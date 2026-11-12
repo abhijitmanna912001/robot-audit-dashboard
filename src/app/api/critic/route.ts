@@ -1,6 +1,7 @@
 // Deterministic MOCK critic. Fails closed: anything unexpected is a reject.
 // Uses DRAFT types; no OpenAI, no Supabase yet.
 import { timingSafeEqual } from "node:crypto";
+import { computePlanHash } from "../../../lib/plan-hash.ts";
 import type { CriticResponse } from "@/types/draft";
 
 const JOINT_LIMIT = 1.57; // radians
@@ -13,15 +14,29 @@ function reject(
   reason: string,
   triggeredRules: string[],
   status = 200,
+  planHash?: string, // only ever the critic's own recomputed hash
 ) {
   const body: CriticResponse = {
     commandId,
     planId,
+    ...(planHash !== undefined && { planHash }),
     verdict: "reject",
     reason,
     triggeredRules,
   };
   return Response.json(body, { status });
+}
+
+// True if null appears anywhere in the value (iterative, no recursion limit).
+function containsNull(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (v === null) return true;
+    if (Array.isArray(v)) stack.push(...v);
+    else if (typeof v === "object") stack.push(...Object.values(v as object));
+  }
+  return false;
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {
@@ -74,19 +89,44 @@ export async function POST(request: Request) {
       !isObject(body) ||
       !nonEmptyString(body.commandId) ||
       !nonEmptyString(body.planId) ||
+      typeof body.planHash !== "string" ||
       !Array.isArray(body.actions)
     ) {
       return reject(
         commandId,
         planId,
-        "Missing or invalid required fields: commandId, planId and actions (array) are required.",
+        "Missing or invalid required fields: commandId, planId, planHash (string) and actions (array) are required.",
         ["missing_fields"],
         400,
       );
     }
 
+    // Plan hash gate: runs before every other rule. Never trust the supplied hash.
+    let planHash: string;
+    try {
+      planHash = computePlanHash(body.actions);
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : "unknown error";
+      return reject(
+        commandId,
+        planId,
+        `Plan hash could not be computed (${detail}); failing closed.`,
+        ["plan_hash_error"],
+      );
+    }
+    if (planHash !== body.planHash) {
+      return reject(
+        commandId,
+        planId,
+        `Plan hash mismatch: supplied ${body.planHash}, critic computed ${planHash}.`,
+        ["plan_hash_mismatch"],
+        200,
+        planHash,
+      );
+    }
+
     if (body.actions.length === 0) {
-      return reject(commandId, planId, "Plan has no actions.", ["empty_actions"]);
+      return reject(commandId, planId, "Plan has no actions.", ["empty_actions"], 200, planHash);
     }
 
     const rules = new Set<string>();
@@ -97,6 +137,10 @@ export async function POST(request: Request) {
     };
 
     body.actions.forEach((a: unknown, i: number) => {
+      if (containsNull(a)) {
+        fail("null_value_not_allowed", `Action #${i}: null values are not allowed; omit unset fields.`);
+        return;
+      }
       if (
         !isObject(a) ||
         !nonEmptyString(a.actionId) ||
@@ -125,12 +169,13 @@ export async function POST(request: Request) {
     });
 
     if (rules.size > 0) {
-      return reject(commandId, planId, reasons.join(" "), [...rules]);
+      return reject(commandId, planId, reasons.join(" "), [...rules], 200, planHash);
     }
 
     const approved: CriticResponse = {
       commandId,
       planId,
+      planHash,
       verdict: "approve",
       reason: "All actions passed all mock safety rules.",
       triggeredRules: [],

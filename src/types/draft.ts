@@ -32,6 +32,7 @@ export type CriticAction = {
 export type CriticRequest = {
   commandId: string;
   planId: string;
+  planHash: string; // DRAFT: "sha256:<hex>" over canonical actions, see docs/schema-draft.md
   actions: CriticAction[];
 };
 
@@ -42,6 +43,9 @@ export type CriticVerdict = "approve" | "reject";
 export type CriticResponse = {
   commandId: string;
   planId: string;
+  // DRAFT: the hash the critic recomputed itself. Omitted when none exists
+  // (401, 400, 500, or a hashing error).
+  planHash?: string;
   verdict: CriticVerdict;
   reason: string;
   triggeredRules: string[];
