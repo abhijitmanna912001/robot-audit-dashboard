@@ -29,3 +29,4 @@ fails or returns invalid output, nothing executes (fail closed).
 - Never read .env files.
 - Explain tradeoffs before big decisions. Keep changes small and tell me what you changed and why.
 - Keep it simple. Do not add libraries without asking.
+- Never kill processes you did not start. Never run pkill.
