@@ -4,7 +4,7 @@ const styles: Record<CommandStatus, string> = {
   received: "bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100",
   approved: "bg-blue-200 text-blue-900 dark:bg-blue-900 dark:text-blue-100",
   rejected: "bg-orange-200 text-orange-900 dark:bg-orange-900 dark:text-orange-100",
-  executing: "bg-amber-200 text-amber-900 dark:bg-amber-800 dark:text-amber-100",
+  executing: "bg-cyan-200 text-cyan-900 dark:bg-cyan-800 dark:text-cyan-100",
   completed: "bg-green-200 text-green-900 dark:bg-green-900 dark:text-green-100",
   failed: "bg-red-600 text-white dark:bg-red-700",
 };
