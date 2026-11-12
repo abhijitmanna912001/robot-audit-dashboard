@@ -1,7 +1,13 @@
 -- 001_init.sql
 -- Initial schema for the robot audit dashboard. Source: docs/schema-draft.md.
--- DRAFT: review before applying. Not re-runnable on purpose: plain CREATE
--- statements fail loudly if objects already exist, instead of silently skipping.
+-- STATUS: applied to the robot-audit Supabase project. This file must stay
+-- identical to what is running, so do not edit the SQL here. Put any change in
+-- a new migration file (002_...). Comment edits are fine.
+-- Still open (see docs/schema-draft.md): the action vocabulary, joint limits and
+-- units, the critic rule ids, and the plan hash reference value. These are JSON
+-- contract details held in `payload`, so they do not change this schema.
+-- Not re-runnable on purpose: plain CREATE statements fail loudly if objects
+-- already exist, instead of silently skipping.
 -- Everything runs in one transaction, so a failure leaves nothing half-applied.
 
 begin;

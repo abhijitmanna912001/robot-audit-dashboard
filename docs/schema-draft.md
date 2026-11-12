@@ -1,9 +1,21 @@
-# Schema draft: dashboard / Python worker contract
+# Schema and contracts: dashboard / Python worker
 
-**Status: DRAFT. Nothing in this file has been applied to any database.** The SQL below is
-text for review. The JSON shapes mirror `src/types/draft.ts`, which is itself a draft.
-Decisions that need agreement between Abhijit (dashboard) and Garvit (worker) are marked
-**DECISION**.
+**Status.** The tables in `db/001_init.sql` (commands, audit_events, indexes, triggers, RLS,
+Realtime publication) are **applied** to the robot-audit Supabase project. That file is the
+source of truth for the SQL and must stay identical to what is running. Any change goes in a new
+migration file.
+
+The JSON contracts in section 4 are **agreed in shape but still draft in detail**. They mirror
+`src/types/draft.ts`, which has not yet been updated for the decisions below (see "Types need
+follow-up" in section 9). Decisions agreed between Abhijit (dashboard) and Garvit (worker) are
+marked **DECIDED**.
+
+**Still open:**
+
+- the action vocabulary, joint limits and units (section 4 and section 8, questions 1 to 3)
+- the AI critic's rule ids (section 8, question 6)
+- the hash reference value (section 4, "Hash reference test")
+- the `validatorVersion` format (section 8)
 
 Out of scope: robot telemetry (joint states, sensor streams). This contract covers the
 command lifecycle and its audit trail only.
@@ -31,12 +43,18 @@ Statuses: `received`, `approved`, `rejected`, `executing`, `completed`, `failed`
 Why: one writer per event means no two components race to write the same fact, and the audit
 log has a clear author for every row.
 
-Known gap: creating the command row and the `command_received` event are two inserts. If the
-second fails, the command exists without its first audit event. Options: accept it and log the
-error (simple), or wrap both in a Postgres function called through `rpc` (atomic, a bit more
-SQL). Recommendation: accept it for the hackathon.
+The two inserts that create a command are not atomic. See section 9, "Known limitations".
 
-## 2. Tables (SQL text only)
+## 2. Tables
+
+The SQL for both tables, the indexes, triggers, RLS and the Realtime publication lives in
+**`db/001_init.sql`, which is applied and authoritative**. The blocks below are the original
+design record. If they disagree with the file, the file wins. Differences in the applied file:
+
+- an extra index, `commands (status, created_at)`
+- `set search_path = ''` on both trigger functions
+- the whole file runs in one transaction
+- the RLS policies, revokes and Realtime statements are ordered as in `db/001_init.sql`
 
 Conventions: `uuid` primary keys from `gen_random_uuid()`, `timestamptz` for all times,
 snake_case in Postgres. The TypeScript types use camelCase, so the dashboard data layer maps
@@ -85,7 +103,7 @@ create table public.audit_events (
 create index audit_events_command_created_idx
   on public.audit_events (command_id, created_at);
 
--- OPTIONAL: enforce append-only in the database, even against the service-role key.
+-- Enforce append-only in the database, even against the service-role key.
 create function public.audit_events_block_mutation() returns trigger
 language plpgsql as $$
 begin
@@ -117,7 +135,7 @@ since the status and event lists are still moving. The same reasoning applies to
 
 **Payload: `jsonb` vs separate columns.** Separate columns give type checks and easy SQL
 filtering, but every schema change is a migration, and the action and verdict schemas are not
-agreed yet. A `jsonb` column absorbs changes without migrations, at the cost of weaker
+fully agreed yet. A `jsonb` column absorbs changes without migrations, at the cost of weaker
 validation. **Recommend `jsonb`** for `payload`, with `command_id`, `event_type` and
 `created_at` as real columns because the dashboard filters and sorts on them.
 
@@ -125,9 +143,12 @@ validation. **Recommend `jsonb`** for `payload`, with `command_id`, `event_type`
 handler, but it lets anyone with the anon key insert arbitrary rows, and there is nowhere to
 validate or rate-limit. Going through a route handler with the service-role key is a little
 more code but gives one validated write path. **Recommend the route handler**, which also
-matches the rule that the browser inserts nothing.
+matches the rule that the browser inserts nothing. (The route itself is public, see section 9.)
 
 ## 3. Claiming commands
+
+**DECIDED:** claiming uses the `claimed_by` and `claimed_at` columns with a conditional update.
+There is no `planning` status.
 
 The worker must never process the same command twice, even with several workers or a restart.
 It claims a `received` command with a single conditional update that returns the row:
@@ -149,35 +170,54 @@ Postgres re-checks the `where` clause after waiting for a row lock, so two simul
 claims cannot both succeed. The worker finds candidates with a normal `select` (oldest
 unclaimed `received` first, or from a Realtime event) and then claims by `id`.
 
-**DECISION: the status list has no "planning" state**, so after a claim the command is still
-`received`. `status = 'received'` alone cannot stop a second claim. Options:
+Why not a `planning` status: after a claim the command is still `received`, so
+`status = 'received'` alone cannot stop a second claim, which is why `claimed_at is null` is in
+the `where` clause. The alternative was a `planning` status, which would change the agreed
+status list and `CommandStatus`. The columns also record which worker took the command.
 
-1. **Add `claimed_by` / `claimed_at` columns** (as in the SQL above). Status list unchanged,
-   and the claim doubles as a record of which worker took it.
-2. **Add a `planning` status.** The claim becomes `set status = 'planning' where status =
-   'received'`. It is simpler SQL but changes the agreed status list and `CommandStatus`.
+**Crash recovery and retries (DECIDED):**
 
-**Recommend option 1.** Crash recovery for a claimed-but-abandoned command (a worker dies
-mid-plan) is not handled here. For the demo, restart by hand.
+- Crash recovery for a claimed-but-abandoned command (a worker dies mid-plan) is **manual** for
+  the meetup. Restart by hand.
+- A command is **never retried automatically once execution has started** (once
+  `execution_started` is written). Re-running a robot action that may have partly happened is
+  not safe to do without a person deciding.
 
 ## 4. JSON contracts
 
-All DRAFT. They mirror `ActionType`, `CriticAction`, `CriticRequest`, `CriticResponse` in
-`src/types/draft.ts`.
+Shapes below are agreed. The **action vocabulary is OPEN** (see below), so every action example
+in this document is a placeholder. They mirror `ActionType`, `CriticAction`, `CriticRequest`,
+`CriticResponse` in `src/types/draft.ts`, which has not been updated yet.
+
+**`plan_id` (DECIDED):** a UUID generated by the Python worker when it generates a plan. It is
+stored in `commands.plan_id` and stays the same across the planner output, the critic request and
+verdict, the validator result and every execution event for that plan.
+
+### Action vocabulary: OPEN
+
+The robot is expected to be the SO-101 arm in simulation. The real action types, joint names,
+limits and units will come from `docs/robot-capabilities.md`, which does not exist yet. Until it
+does, the action types, `target` values, `value` ranges and `unit` strings in this document are
+**placeholders**. The examples must be updated to match the critic's real rules once the robot
+is final.
 
 ### Planner output (also the critic request body)
+
+PLACEHOLDER example. The action type, joint name, value and unit are not real.
 
 ```json
 {
   "commandId": "5b0c1f7e-0000-0000-0000-000000000001",
   "planId":    "9d2e4a10-0000-0000-0000-000000000002",
+  "planHash":  "sha256:<64 lowercase hex characters>",
   "actions": [
     {
       "actionId": "a1",
-      "type": "move_forward",
-      "value": 50,
-      "unit": "m",
-      "reason": "User asked to drive forward 50 metres"
+      "type": "set_joint",
+      "target": "placeholder_joint",
+      "value": 10,
+      "unit": "placeholder_unit",
+      "reason": "PLACEHOLDER: user asked to move a joint"
     }
   ]
 }
@@ -185,27 +225,133 @@ All DRAFT. They mirror `ActionType`, `CriticAction`, `CriticRequest`, `CriticRes
 
 | Field | Type | Notes |
 |---|---|---|
+| `planId` | string (UUID) | generated by the worker, see above |
+| `planHash` | string | computed by the worker over `actions`, see "Plan hash contract" |
 | `actionId` | string | unique within the plan |
-| `type` | `"set_joint" \| "move_forward" \| "stop"` | **unconfirmed**, see Open questions |
-| `target` | string, optional | e.g. a joint name for `set_joint` |
+| `type` | string | **OPEN**: `set_joint` and `stop` are placeholders until `docs/robot-capabilities.md` exists |
+| `target` | string, optional | e.g. a joint name for `set_joint`. Placeholder. |
 | `value` | number, optional | |
 | `unit` | string, optional | units not agreed, see Open questions |
 | `reason` | string | why the planner chose this action |
 
+Optional fields that are not set must be **omitted**, never sent as `null`. See "Plan hash
+contract" for why.
+
 ### Critic verdict (response body of `/api/critic`)
+
+PLACEHOLDER example. The reason and rule id are illustrative.
 
 ```json
 {
   "commandId": "5b0c1f7e-0000-0000-0000-000000000001",
   "planId":    "9d2e4a10-0000-0000-0000-000000000002",
+  "planHash":  "sha256:<64 lowercase hex characters>",
   "verdict": "reject",
-  "reason": "Requested distance and speed exceed the safe envelope",
-  "triggeredRules": ["max_speed"]
+  "reason": "PLACEHOLDER: requested joint value exceeds the safe range",
+  "triggeredRules": ["placeholder_rule"]
 }
 ```
 
-`verdict` is `"approve" | "reject"`. `triggeredRules` is a list of rule ids. The rule names
-are illustrative, and the real list is not agreed.
+`verdict` is `"approve" | "reject"`. `planHash` is the hash the critic verified (see below).
+`triggeredRules` is a list of AI critic rule ids. The critic ids are lowercase snake_case and are
+**separate from the validator's rule ids**. The one defined so far is `plan_hash_mismatch`. The
+rest are not agreed.
+
+### Plan hash contract
+
+**DECIDED.** The hash ties the plan the worker validated to the plan the critic reviewed and to
+the plan that executes.
+
+- `plan_hash` = SHA-256 of the RFC 8785 (JSON Canonicalization Scheme) canonical form of the
+  `actions` array **only**, UTF-8 encoded, output as lowercase hex with a `sha256:` prefix.
+- Keys are sorted recursively. Array order is preserved.
+- `commandId` and `planId` are not part of the hashed input.
+- Both sides use an existing RFC 8785 library. Neither side writes its own canonicalizer.
+- Optional fields that are not set are omitted, never `null`, otherwise the two sides hash
+  different JSON.
+
+Flow:
+
+1. The worker computes `planHash` and sends it in the critic request with `commandId`, `planId`
+   and `actions`.
+2. `/api/critic` recomputes the hash from the received `actions`. On a mismatch it **rejects**
+   with rule id `plan_hash_mismatch`. On a match it returns the verified `planHash` in the
+   response.
+3. Before executing, the worker checks that `commandId`, `planId` and `planHash` in the response
+   match the request. Anything else is a rejection (section 6).
+4. `planHash` is also included in the `critic_result` event payload.
+
+Recommended, to confirm with Garvit: on a mismatch the critic returns HTTP 200 with
+`verdict: "reject"`, `triggeredRules: ["plan_hash_mismatch"]` and `planHash` set to the hash the
+critic computed, so the `critic_result` event shows both values.
+
+### Hash reference test
+
+**TBD until both sides confirm the same value.** Purpose: prove the Python and TypeScript RFC 8785
+libraries agree, especially on number formatting. The array below is a **proposal, not confirmed**.
+
+Reference `actions` array (input as written, placeholder content):
+
+```json
+[
+  {
+    "actionId": "a1",
+    "type": "set_joint",
+    "target": "placeholder_joint",
+    "value": 1.0,
+    "unit": "placeholder_unit",
+    "reason": "PLACEHOLDER: number written as 1.0"
+  },
+  {
+    "actionId": "a2",
+    "type": "set_joint",
+    "target": "placeholder_joint",
+    "value": 0.30000000000000004,
+    "unit": "placeholder_unit",
+    "reason": "PLACEHOLDER: float that does not round to a short decimal"
+  }
+]
+```
+
+| Item | Value |
+|---|---|
+| Canonical JSON (RFC 8785) | TBD. Expected to write `1.0` as `1` and keep `0.30000000000000004` unchanged, with keys sorted and no whitespace. |
+| Expected `plan_hash` | TBD |
+| Confirmed by Python worker | no |
+| Confirmed by dashboard / critic | no |
+
+Update the array, canonical JSON and hash here once the real vocabulary is final and both sides
+have produced the same hash.
+
+### Validator result
+
+**DECIDED** payload for the `validator_result` event:
+
+```json
+{
+  "outcome": "pass",
+  "planId": "9d2e4a10-0000-0000-0000-000000000002",
+  "validatorVersion": "<string>",
+  "errors": []
+}
+```
+
+On `fail`, `outcome` is `"fail"` and `errors` holds one entry per problem:
+
+```json
+{ "ruleId": "UNKNOWN_JOINT", "actionId": "a1", "field": "target", "message": "..." }
+```
+
+`errors` is always an array, and empty on `pass`. Recommended: `actionId` and `field` are
+`string | null`, since a plan-level error such as `MAX_ACTIONS_EXCEEDED` has no single action
+or field.
+
+Initial validator rule ids:
+
+`UNSUPPORTED_ACTION`, `MISSING_REQUIRED_FIELD`, `UNKNOWN_JOINT`, `JOINT_LIMIT_EXCEEDED`,
+`NON_FINITE_VALUE`, `UNIT_MISMATCH`, `MAX_ACTIONS_EXCEEDED`
+
+These are the deterministic validator's ids. The AI critic's rule ids are separate.
 
 ### Event payloads
 
@@ -213,15 +359,18 @@ are illustrative, and the real list is not agreed.
 |---|---|
 | `command_received` | `{}` |
 | `plan_generated` | `{ "plan": <planner output> }` |
-| `validator_result` | `{ "outcome": "pass" \| "fail", "errors": string[] }` (validator output shape not agreed) |
-| `critic_result` | `{ "outcome": "approve" \| "reject" \| "error", "response": <critic verdict>?, "error": { "kind": "http_status" \| "timeout" \| "invalid_body", "httpStatus": number?, "detail": string? }? }` |
-| `execution_started` | `{}` |
-| `execution_completed` | `{ "summary": string? }` |
-| `execution_failed` | `{ "error": string }` |
+| `validator_result` | `{ "outcome": "pass" \| "fail", "planId": string, "validatorVersion": string, "errors": [{ "ruleId", "actionId", "field", "message" }] }` |
+| `critic_result` | `{ "outcome": "approve" \| "reject" \| "error", "planHash": string?, "response": <critic verdict>?, "error": { "kind": "http_status" \| "timeout" \| "invalid_body", "httpStatus": number?, "detail": string? }? }` |
+| `execution_started` | `{ "dryRun": boolean }` |
+| `execution_completed` | `{ "dryRun": boolean, "summary": string? }` |
+| `execution_failed` | `{ "dryRun": boolean, "error": string }` |
+
+`planHash` in `critic_result` is omitted when there is no usable hash to record (for example a
+timeout).
 
 ## 5. Event naming
 
-**DECISION (Abhijit and Garvit):** one `critic_result` and one `validator_result` event, with
+**DECIDED (Abhijit and Garvit):** one `critic_result` and one `validator_result` event, with
 the outcome in `payload`, instead of separate pass and fail event types. This keeps the event
 type list short and means each check has one event type to query. The cost is that a UI badge
 has to read `payload.outcome` rather than only `event_type`.
@@ -250,16 +399,18 @@ reason.
 The worker executes a command **only if both** hold:
 
 1. the deterministic validator passes, and
-2. `/api/critic` returns **HTTP 200** with a body that parses as a valid critic verdict
-   (matching `commandId` and `planId`) and `verdict` equal to `"approve"`.
+2. `/api/critic` returns **HTTP 200** with a body that parses as a valid critic verdict, whose
+   `commandId`, `planId` and `planHash` all match the request, and whose `verdict` equals
+   `"approve"`.
 
 Anything else is a rejection, and nothing executes: validator fail, critic `reject`, HTTP 400,
-HTTP 500, timeout, network error, or a 200 with an invalid body. The worker logs each case:
+HTTP 500, timeout, network error, a 200 with an invalid body, or a response whose `commandId`,
+`planId` or `planHash` does not match. The worker logs each case:
 
 - a validator fail is a `validator_result` event with `outcome: "fail"`
 - a critic `reject` is a `critic_result` with `outcome: "reject"`
-- every critic failure (non-200, timeout, bad body) is a `critic_result` with
-  `outcome: "error"` and `payload.error` describing what went wrong
+- every critic failure (non-200, timeout, bad body, mismatched ids or hash) is a
+  `critic_result` with `outcome: "error"` and `payload.error` describing what went wrong
 
 It then sets `commands.status = 'rejected'`. A failure **during** execution, after approval,
 is `failed`, not `rejected`.
@@ -267,7 +418,17 @@ is `failed`, not `rejected`.
 The order of checks is the worker's call, and it may stop at the first failure. Either way,
 each check that ran gets its own event.
 
+### Dry-run mode
+
+**DECIDED:** command-driven execution stays in **dry-run mode until the validator and the critic
+are both integrated**. A dry run does not drive the robot simulation. It is logged as normal
+execution events (`execution_started`, then `execution_completed` or `execution_failed`) with
+`dryRun: true` in the payload. Real execution writes `dryRun: false`.
+
 ## 7. Row Level Security and Realtime
+
+The SQL for this section is in `db/001_init.sql` and is applied. The blocks below are the
+design record.
 
 The browser (anon key) can SELECT from both tables and INSERT nothing. All writes use the
 service-role key, which bypasses RLS, so it needs no policies.
@@ -300,20 +461,43 @@ Notes:
 - **Security note: because anon can SELECT, the audit log, including command text and event
   payloads, is readable by anyone who has the anon key.** The anon key ships in the browser
   bundle, so treat both tables as public. That is acceptable for a simulation-only hackathon
-  demo. Do not put secrets or personal data in `text` or `payload`.
+  demo. Do not put secrets or personal data in `text` or `payload`. See section 9.
 - The service-role and OpenAI keys stay server-only and never go in `NEXT_PUBLIC_*` variables.
 
 ## 8. Open questions
 
-1. **Robot twin and real action types.** Which Cyberwave twin is used, and what actions does it
-   actually support? `set_joint | move_forward | stop` is a guess. If the twin supports other
-   actions, `ActionType`, the planner prompt, the validator and the critic rules all change.
+1. **Robot and real action types.** The robot is expected to be the SO-101 arm in simulation.
+   Which actions does it actually support in the simulation? The `set_joint` and `stop` types in
+   this doc are placeholders. The answer will be written in `docs/robot-capabilities.md`. If it
+   differs from the placeholders, `ActionType`, the planner prompt, the validator and the critic
+   rules all change.
 2. **Joint limits.** What are the min and max per joint (and any velocity or torque limits)?
    The validator needs hard numbers, and the critic needs them to explain a rejection.
-3. **Units.** Degrees or radians for joints? Metres and metres per second for movement? Is
-   `unit` a free string or a fixed set, and does the validator convert or reject mismatches?
-4. **`plan_id` ownership.** This draft makes the worker generate a uuid when it produces a
-   plan. Confirm, or say whether it should be a string.
-5. **Validator output shape.** What does the validator return on failure (error list, rule
-   ids)? It determines the `validator_result` payload.
-6. **Critic rule ids.** The list of `triggeredRules` values is not defined yet.
+3. **Units.** Degrees or radians for joints? Is `unit` a free string or a fixed set, and does
+   the validator convert or reject mismatches (`UNIT_MISMATCH`)?
+4. ~~**`plan_id` ownership.**~~ **Closed.** A UUID generated by the worker, constant across all
+   events for the plan (section 4).
+5. ~~**Validator output shape.**~~ **Closed.** See "Validator result" in section 4.
+6. **Critic rule ids.** The list of `triggeredRules` values is not defined yet beyond
+   `plan_hash_mismatch`.
+7. **Hash reference value.** The reference array, canonical JSON and expected hash are TBD until
+   both sides produce the same value (section 4).
+8. **`validatorVersion` format.** A string, but the format (semver, git sha, date) is not agreed.
+
+## 9. Known limitations
+
+Accepted for the simulation-only meetup demo.
+
+- **The command submission route is public.** Anyone who can reach the route handler can submit
+  a command. There is no login and no rate limiting yet.
+- **Anon SELECT exposes the audit log.** Anyone with the anon key can read `commands` and
+  `audit_events`, including command text and event payloads (section 7). Do not put secrets or
+  personal data in them.
+- **Creating a command and its `command_received` event are two inserts that are not atomic.**
+  If the second fails, the command exists without its first audit event. For now the error is
+  logged and accepted. A Postgres function called through `rpc` would make it atomic later.
+- **Crash recovery is manual.** A claimed-but-abandoned command is restarted by hand, and a
+  command is never retried automatically once execution has started (section 3).
+- **Types need follow-up.** `src/types/draft.ts` and `src/mocks/mock-data.ts` have not been
+  updated for `planHash`, the new `validator_result` shape, `dryRun`, or the removal of
+  `move_forward`. They will drift from this doc until updated.
