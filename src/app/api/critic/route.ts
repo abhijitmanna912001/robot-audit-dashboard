@@ -1,5 +1,6 @@
 // Deterministic MOCK critic. Fails closed: anything unexpected is a reject.
 // Uses DRAFT types; no OpenAI, no Supabase yet.
+import { timingSafeEqual } from "node:crypto";
 import type { CriticResponse } from "@/types/draft";
 
 const JOINT_LIMIT = 1.57; // radians
@@ -31,10 +32,32 @@ function nonEmptyString(x: unknown): x is string {
   return typeof x === "string" && x.length > 0;
 }
 
+// Constant-time compare that never throws on length mismatch.
+function secretMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) {
+    timingSafeEqual(b, b); // keep timing roughly uniform
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
+function unauthorized() {
+  return reject("unknown", "unknown", "Unauthorized.", ["unauthorized"], 401);
+}
+
 export async function POST(request: Request) {
   let commandId = "unknown";
   let planId = "unknown";
   try {
+    // Auth gate: fail closed, before the body is read.
+    const expected = process.env.CRITIC_SHARED_SECRET;
+    const provided = request.headers.get("x-critic-secret");
+    if (!expected || !provided || !secretMatches(provided, expected)) {
+      return unauthorized();
+    }
+
     let body: unknown;
     try {
       body = await request.json();
