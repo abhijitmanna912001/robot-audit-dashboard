@@ -14,6 +14,8 @@ marked **DECIDED**.
 
 - the AI critic's remaining rule ids for a future AI critic (section 8, question 6). The
   deterministic critic's rule ids are defined, see "Critic verdict" in section 4
+- a `validator_result` shape for a validator error, and a critic error kind for "no request
+  sent" (section 8, questions 9 and 10)
 
 The `validatorVersion` format is decided: the plain string `"1.0"` (section 4, "Validator
 result").
@@ -482,7 +484,9 @@ Validator rule ids are UPPERCASE. They are separate from the critic's snake_case
 | `execution_failed` | `{ "dryRun": boolean, "error": string }` |
 
 `planHash` in `critic_result` is omitted when there is no usable hash to record (for example a
-timeout).
+timeout). The worker stores only the agreed verdict fields in `response` (`commandId`, `planId`,
+`planHash`, `verdict`, `reason` capped at 200 characters, `triggeredRules`); any other field the
+critic returns is dropped.
 
 **Planner error kinds (DECIDED, implemented in `worker/planner.py`):** `unsupported_command` (the
 command text is not one of the accepted commands, so nothing was evaluated) and `planner_error`
@@ -633,6 +637,17 @@ Notes:
    the plain string `"1.0"`, bumped by hand when the rules change, and the worker uses it. The
    four extra ids in the code are agreed, and `DUPLICATE_JOINT_TARGET` is agreed and implemented
    (section 4, "Validator result").
+9. **Validator error outcome (OPEN, new).** The precedence rule in section 6 has a validator
+   "error" case, but the `validator_result` payload only allows `pass` and `fail`. The validator
+   itself never raises (its internal errors are a `fail`), so this only covers the worker failing
+   to run it. For now the worker writes **no** `validator_result` in that case, still runs the
+   critic, and sets the status by the precedence rule (`rejected` if the critic rejected,
+   otherwise `failed`). Not agreed: whether `validator_result` should get `outcome: "error"` with
+   an `error { kind, detail }`, which the dashboard summary would then also need to read.
+10. **Critic error kind when no request was sent (OPEN, new).** Missing or unusable
+    `CRITIC_URL` / `CRITIC_SHARED_SECRET` is a critic `error` (never a skip, never an approval).
+    No error kind fits; the worker writes `timeout` with `detail` starting `critic request not
+    sent:`, the same provisional choice as for a network error. Not agreed.
 
 ## 9. Known limitations
 
@@ -657,12 +672,14 @@ Accepted for the simulation-only meetup demo.
   command is never retried automatically once execution has started (section 3).
 - **A claimed command can be stranded.** The claim has no lease and nothing releases it, so a
   claimed command stays `received` and is skipped by every later claim if the worker's
-  `plan_generated` insert fails, if the event is written but `received -> failed` fails, or (for
-  now) if the planner accepts the command, because the validator, critic and execution steps are
-  not connected yet. A valid plan is deliberately not marked `failed`. While the event exists but
-  the status is still `received`, the dashboard summary already shows the planner failure. The
-  manual recovery steps are in `worker/README.md`, "Manual recovery". The worker never retries an
-  event insert, because `audit_events` rows cannot be deleted.
+  `plan_generated` insert fails, if a `validator_result` or `critic_result` insert fails, or if
+  the events are written but the final status update fails. The worker changes the status only
+  after every event it needs is written. While a planner-failure event exists but the status is
+  still `received`, the dashboard summary already shows the planner failure. The manual recovery
+  steps are in `worker/README.md`, "Manual recovery". The worker never retries an event insert,
+  because `audit_events` rows cannot be deleted.
+- **An approved command is not executed yet.** `worker/command_processor.py` stops at
+  `approved`; the dry-run execution lifecycle is a later milestone.
 - **The worker claims the oldest eligible command.** In a rehearsal, an old unclaimed `received`
   command is processed before the one just submitted. Check the queue first.
 - **The route insert and a worker claim can interleave.** The worker can claim a command between

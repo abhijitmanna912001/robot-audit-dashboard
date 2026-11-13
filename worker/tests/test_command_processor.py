@@ -15,8 +15,10 @@ to pass a client or a mock cannot build a real Supabase client.
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import io
+import json
 import subprocess
 import sys
 import unittest
@@ -25,9 +27,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import httpx
+
 import audit_store
 import command_processor
+import critic_client
 from audit_store import InvalidPayloadError, StateConflictError, WriteError
+from config import CriticSettings
+from critic_gate import CriticDecision, CriticRequest, evaluate_critic_response
+from plan_hasher import hash_actions
 from command_processor import (
     STAGE_CLAIM,
     STAGE_EVENT_WRITE,
@@ -38,12 +46,14 @@ from command_processor import (
     process_one_command,
 )
 from planner import MAX_DETAIL_LENGTH
+from tests.net_guard import NetworkBlocked, block_network
 from tests.test_audit_store import FakeClient
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 WORKER_ID = "test-worker"
 COMMAND_ID = "5b0c1f7e-0000-4000-8000-000000000001"
 REHEARSAL_TEXT = "Pick up the cup and move it to the left."
+TEST_SECRET = "test-secret-not-real"
 STORE_FUNCTIONS = ("claim_next_command", "append_event", "set_command_status")
 # The real functions, captured before any test patches them.
 REAL = {name: getattr(audit_store, name) for name in STORE_FUNCTIONS}
@@ -64,12 +74,34 @@ def command_row(text: object = REHEARSAL_TEXT, **overrides: Any) -> dict[str, An
     return row
 
 
+def critic_returning(
+    verdict: str = "approve", status: int = 200, **overrides: Any
+) -> Any:
+    """An offline critic: builds a response body and judges it with the REAL critic_gate."""
+
+    def review(request: CriticRequest, **_kwargs: Any) -> CriticDecision:
+        body: dict[str, Any] = {
+            "commandId": request.command_id,
+            "planId": request.plan_id,
+            "planHash": request.plan_hash,
+            "verdict": verdict,
+            "reason": "ok" if verdict == "approve" else "Action a1: value is outside the limits.",
+            "triggeredRules": [] if verdict == "approve" else ["joint_limit_exceeded"],
+        }
+        body.update(overrides)
+        return evaluate_critic_response(request, status, body)
+
+    return review
+
+
 def no_real_client(test: unittest.TestCase) -> None:
     guard = mock.patch.object(
         audit_store, "_default_client", side_effect=AssertionError("real client built")
     )
     guard.start()
     test.addCleanup(guard.stop)
+    # No real critic request and no critic settings from .env, ever.
+    block_network(test)
 
 
 class ProcessorTestCase(unittest.TestCase):
@@ -100,6 +132,12 @@ class ProcessorTestCase(unittest.TestCase):
         self.calls.claim_next_command.return_value = command_row()
         self.calls.append_event.return_value = {"id": "event-1"}
         self.calls.set_command_status.return_value = command_row(status="failed")
+        # The default critic is replaced by an offline fake (approve), attached
+        # to the same parent so its place in the call order is visible.
+        patcher = mock.patch.object(critic_client, "review_plan", autospec=True)
+        self.calls.attach_mock(patcher.start(), "review_plan")
+        self._patchers.append(patcher)
+        self.calls.review_plan.side_effect = critic_returning("approve")
 
     def call_names(self) -> list[str]:
         return [c[0] for c in self.calls.mock_calls]
@@ -165,8 +203,12 @@ class OneCommandPerCallTests(ProcessorTestCase):
                 self.calls.claim_next_command.return_value = row
                 process_one_command(WORKER_ID)
                 self.assertEqual(self.calls.claim_next_command.call_count, 1)
-                self.assertLessEqual(self.calls.append_event.call_count, 1)
+                # plan_generated, validator_result, critic_result at most.
+                self.assertLessEqual(self.calls.append_event.call_count, 3)
                 self.assertLessEqual(self.calls.set_command_status.call_count, 1)
+                self.assertLessEqual(self.calls.review_plan.call_count, 1)
+                command_ids = {c.args[0] for c in self.calls.append_event.call_args_list}
+                self.assertLessEqual(len(command_ids), 1)
 
 
 class UnsupportedCommandTests(ProcessorTestCase):
@@ -296,18 +338,31 @@ class StatusFailureTests(ProcessorTestCase):
 
 
 class SupportedCommandTests(ProcessorTestCase):
-    def test_supported_command_writes_nothing_and_is_not_failed(self) -> None:
+    def test_supported_command_is_checked_and_approved_but_not_executed(self) -> None:
+        # Replaces the first slice's "planned_not_processed" test: a valid plan
+        # now goes through both checks and ends at 'approved', never further.
         self.calls.claim_next_command.return_value = command_row(
             "set joint _1 to 0.25 rad; set joint _2 to 0.1 rad"
         )
         result = process_one_command(WORKER_ID)
+        self.assertEqual(result.outcome, "plan_checked")
+        self.assertEqual(result.command_id, COMMAND_ID)
+        self.assertEqual(result.action_count, 2)
+        self.assertEqual(result.final_status, "approved")
         self.assertEqual(
-            result,
-            ProcessResult(
-                outcome="planned_not_processed", command_id=COMMAND_ID, action_count=2
-            ),
+            self.call_names(),
+            [
+                "claim_next_command",
+                "append_event",  # plan_generated
+                "review_plan",
+                "append_event",  # validator_result
+                "append_event",  # critic_result
+                "set_command_status",
+            ],
         )
-        self.assertEqual(self.call_names(), ["claim_next_command"])
+        self.assertNotIn(
+            self.bound("set_command_status")["status"], {"executing", "completed"}
+        )
 
     def test_row_without_id_writes_nothing_and_says_the_claim_may_exist(self) -> None:
         self.calls.claim_next_command.return_value = command_row(id=None)
@@ -360,12 +415,30 @@ class MainTests(ProcessorTestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"FAILED at {STAGE_STATUS_UPDATE}", out)
 
-    def test_valid_command_message_says_not_failed(self) -> None:
+    def test_valid_command_message_reports_checks_and_no_execution(self) -> None:
         self.calls.claim_next_command.return_value = command_row("set joint _1 to 0.1 rad")
         code, out = self.run_main("--confirm-write")
         self.assertEqual(code, 0)
-        self.assertIn("NOT failed", out)
-        self.assertIn("stranded", out)
+        self.assertIn("Validator: pass", out)
+        self.assertIn("Critic: approve", out)
+        self.assertIn("received -> approved", out)
+        self.assertIn("Nothing was executed", out)
+
+    def test_rejected_command_message(self) -> None:
+        self.calls.claim_next_command.return_value = command_row("set joint _6 to -1.0 rad")
+        self.calls.review_plan.side_effect = critic_returning("reject")
+        code, out = self.run_main("--confirm-write")
+        self.assertEqual(code, 0)
+        self.assertIn("Validator: fail", out)
+        self.assertIn("Critic: reject", out)
+        self.assertIn("received -> rejected", out)
+
+    def test_result_event_failure_exit_code_and_stage(self) -> None:
+        self.calls.claim_next_command.return_value = command_row("set joint _1 to 0.1 rad")
+        self.calls.append_event.side_effect = [{"id": "e1"}, WriteError("lost"), {"id": "e3"}]
+        code, out = self.run_main("--confirm-write")
+        self.assertEqual(code, 1)
+        self.assertIn(f"FAILED at {command_processor.STAGE_VALIDATOR_EVENT_WRITE}", out)
 
 
 class RealAuditStoreTests(unittest.TestCase):
@@ -430,15 +503,112 @@ class RealAuditStoreTests(unittest.TestCase):
         self.assertEqual(len(self.client.tables["audit_events"]), 1)
         self.assertEqual(self.command()["status"], "rejected")
 
-    def test_valid_command_is_claimed_but_nothing_else(self) -> None:
+    def mock_critic(self, verdict: str = "approve", status: int = 200) -> tuple[Any, list[httpx.Request]]:
+        """The REAL critic_client on an httpx.MockTransport that answers like the critic."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            body = json.loads(request.content)
+            rejecting = verdict == "reject"
+            return httpx.Response(
+                status,
+                json={
+                    "commandId": body["commandId"],
+                    "planId": body["planId"],
+                    "planHash": hash_actions(body["actions"]),  # recomputed, like the critic
+                    "verdict": verdict,
+                    "reason": "Action a1: value is outside the limits." if rejecting else "ok",
+                    "triggeredRules": ["joint_limit_exceeded"] if rejecting else [],
+                },
+            )
+
+        settings = CriticSettings(url="https://critic.test/api/critic", shared_secret=TEST_SECRET)
+        transport = httpx.MockTransport(handler)
+        return (
+            functools.partial(critic_client.review_plan, settings=settings, transport=transport),
+            seen,
+        )
+
+    def test_valid_command_end_to_end_is_approved_not_executed(self) -> None:
         self.client = FakeClient(
             commands=[command_row("set joint _1 to 0.25 rad", claimed_by=None, claimed_at=None)]
         )
-        result = process_one_command(WORKER_ID, client=self.client)
-        self.assertEqual(result.outcome, "planned_not_processed")
-        self.assertEqual(self.ops(), [("commands", "select"), ("commands", "update")])
-        self.assertEqual(self.client.tables["audit_events"], [])
+        critic, seen = self.mock_critic("approve")
+        result = process_one_command(WORKER_ID, client=self.client, critic=critic)
+        self.assertEqual(result.final_status, "approved")
+        self.assertEqual(
+            self.ops(),
+            [
+                ("commands", "select"),
+                ("commands", "update"),  # claim
+                ("audit_events", "insert"),  # plan_generated
+                ("audit_events", "insert"),  # validator_result
+                ("audit_events", "insert"),  # critic_result
+                ("commands", "update"),  # received -> approved
+            ],
+        )
+        events = self.client.tables["audit_events"]
+        self.assertEqual(
+            [e["event_type"] for e in events],
+            ["plan_generated", "validator_result", "critic_result"],
+        )
+        self.assertEqual(self.command()["status"], "approved")
+        self.assertEqual(self.command()["plan_id"], result.plan_id)
+        status_update = self.client.calls[-1]
+        self.assertEqual(status_update.values, {"status": "approved", "plan_id": result.plan_id})
+        self.assertIn(("eq", "status", "received"), status_update.filters)
+        self.assertEqual(len(seen), 1)
+        sent = json.loads(seen[0].content)
+        self.assertEqual(sent["planId"], events[0]["payload"]["planId"])
+        self.assertEqual(sent["planHash"], events[0]["payload"]["planHash"])
+        self.assertEqual(events[2]["payload"]["planHash"], sent["planHash"])
+        self.assertNotIn(TEST_SECRET, json.dumps(events))
+
+    def test_joint_6_below_limit_rehearsal_is_rejected(self) -> None:
+        # The agreed next live test: 'set joint _6 to -1.0 rad' (lower limit -0.174533).
+        for critic_verdict, critic_status in (("reject", 200), ("approve", 500)):
+            with self.subTest(critic=f"{critic_verdict}/{critic_status}"):
+                self.client = FakeClient(
+                    commands=[
+                        command_row("set joint _6 to -1.0 rad", claimed_by=None, claimed_at=None)
+                    ]
+                )
+                critic, seen = self.mock_critic(critic_verdict, critic_status)
+                result = process_one_command(WORKER_ID, client=self.client, critic=critic)
+                self.assertEqual(result.validator_outcome, "fail")
+                self.assertEqual(result.critic_outcome, "reject" if critic_status == 200 else "error")
+                self.assertEqual(result.final_status, "rejected")
+                self.assertEqual(self.command()["status"], "rejected")
+                self.assertEqual(len(seen), 1)  # the critic ran despite the validator failure
+                events = self.client.tables["audit_events"]
+                validator = events[1]["payload"]
+                self.assertEqual(validator["outcome"], "fail")
+                self.assertEqual(
+                    [e["ruleId"] for e in validator["errors"]], ["JOINT_LIMIT_EXCEEDED"]
+                )
+                self.assertEqual(events[0]["payload"]["plan"]["actions"][0]["value"], -1)
+
+    def test_validator_event_failure_leaves_status_received(self) -> None:
+        self.client = FakeClient(
+            commands=[command_row("set joint _1 to 0.25 rad", claimed_by=None, claimed_at=None)]
+        )
+        written: list[str] = []
+
+        def fail_second_insert(client: FakeClient) -> None:
+            written.append("x")
+            if len(written) == 2:
+                raise WriteError("insert lost")
+
+        for _ in range(3):
+            self.client.before_next("insert", fail_second_insert)
+        critic, _ = self.mock_critic("approve")
+        with self.assertRaises(CommandProcessingError) as ctx:
+            process_one_command(WORKER_ID, client=self.client, critic=critic)
+        self.assertEqual(ctx.exception.stage, command_processor.STAGE_VALIDATOR_EVENT_WRITE)
+        self.assertEqual(len(self.client.calls_of("insert")), 3)  # no retry
         self.assertEqual(self.command()["status"], "received")
+        self.assertIsNone(self.command()["plan_id"])
 
     def test_only_the_oldest_command_is_processed(self) -> None:
         older = command_row(claimed_by=None, claimed_at=None)
@@ -480,6 +650,8 @@ class NoRobotImportTests(unittest.TestCase):
             todo.extend(m for m in imported if (WORKER_DIR / f"{m}.py").is_file())
         self.assertIn("audit_store", seen)
         self.assertIn("robot_profile", seen)
+        for module in ("critic_client", "critic_gate", "plan_snapshot", "safety_validator", "execution_gate"):
+            self.assertIn(module, seen)
 
     def test_importing_the_processor_loads_no_cyberwave_module(self) -> None:
         # A fresh interpreter, so modules imported by other tests do not count.

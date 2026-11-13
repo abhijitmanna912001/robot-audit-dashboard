@@ -2,10 +2,12 @@
 
 Robotics and execution side of the auditable robot agent. Simulation only.
 
-**This is a foundation, not a working agent.** It holds tested building blocks. The only
-connected path is a planner failure: `command_processor.py` claims one command, and if the
-planner cannot parse it, records `plan_generated` (error) and sets `received -> failed`.
-No plan is validated, sent to the critic or executed.
+**This is a decision pipeline, not a working agent.** `command_processor.py` claims one
+command and plans it. A planner failure is recorded and the command set to `failed`. A
+valid plan is validated by the Python safety validator, sent to `/api/critic`, both
+results are recorded, and the command ends `approved`, `rejected` or `failed`. **Nothing
+is executed**: an approved command stays `approved`. No dry run, no Cyberwave call, no
+movement.
 
 ## Status
 
@@ -13,12 +15,13 @@ No plan is validated, sent to the critic or executed.
 |---|---|---|
 | Configuration | Implemented and tested | `config.py` |
 | Plan hashing | Implemented and tested | `plan_hasher.py`. Matches the shared Python/TypeScript reference vector |
-| Safety validator | Implemented and tested, not yet called | `safety_validator.py` checks the agreed action vocabulary, schema position limits, one action per joint and the 10-action cap (`validatorVersion` `"1.0"`). Nothing in the pipeline calls it yet. Position limits only: no velocity, effort or collision checks (see "Safety validator") |
-| Critic handling | Partially implemented | `critic_gate.py` builds the request and judges a response. **The HTTP call to `/api/critic` is not implemented** |
-| Execution gate | Partially implemented | `execution_gate.py` is a tested decision function. Nothing calls it and it executes nothing |
-| Execution | Not implemented | No movement code exists. Execution is to stay dry-run only until both gates are integrated |
-| Audit logging | Implemented, offline tests only | `audit_store.py` is the canonical writer: claim a command, append one audit event (no retry), and conditional status updates checked against the agreed lifecycle. `supabase_client.py` is the older insert-only helper used by the smoke test. **Neither write path has been run against the database** |
-| Command processing | Partially implemented, offline tests only | `command_processor.py` processes ONE command per run (no loop). Planner failures are recorded end to end. A command the planner accepts is left `received` and claimed, with nothing written. **Never run against the database yet** |
+| Safety validator | Implemented and tested, called by the processor | `safety_validator.py` checks the agreed action vocabulary, schema position limits, one action per joint and the 10-action cap (`validatorVersion` `"1.0"`). Position limits only: no velocity, effort or collision checks (see "Safety validator") |
+| Critic handling | Implemented, offline tests only | `critic_gate.py` builds the request and judges a response. `critic_client.py` sends it (one request, `x-critic-secret`, finite timeouts, no redirects, no retries). **The worker-to-critic request has not been made in a controlled live run yet** |
+| Plan snapshot | Implemented and tested | `plan_snapshot.py` freezes a plan as RFC 8785 canonical bytes; the validator, the critic and the audit event each get a copy of exactly the hashed plan |
+| Execution gate | Implemented, used only as a consistency check | `execution_gate.py` is a pure decision function. The processor calls it once before writing `approved`. It executes nothing |
+| Execution | Not implemented | No movement code exists. The next milestone is a dry run (`execution_started` / `execution_completed` with `dryRun: true`) |
+| Audit logging | Implemented | `audit_store.py` is the canonical writer: claim a command, append one audit event (no retry), and conditional status updates checked against the agreed lifecycle. Used live once, by the planner-failure rehearsal. `supabase_client.py` is the older insert-only helper used by the smoke test |
+| Command processing | Implemented. Planner-failure path verified live; successful-plan path offline tests only | `command_processor.py` processes ONE command per run (no loop). Planner failures, validator and critic results and the final status are recorded. The planner-failure path ran once against the live database (14 Nov 2026: `command_received`, `plan_generated` error, status `failed`). **The successful-plan path (validator, critic, `approved`/`rejected`/`failed`) has only run against mocks** |
 | Planner | Implemented and tested, deterministic | `planner.py` parses ASCII-only `set joint _1 to 0.25 rad` clauses separated by `;`. No language model |
 | Cyberwave connection | Implemented, read-only | `cyberwave_client.py` connects in simulation mode and reads the joint schema. It cannot move anything |
 
@@ -28,9 +31,10 @@ Facts that must not be lost:
 - Capabilities reported by the Cyberwave API have been read, not physically verified.
 - The validator is not a complete physical safety envelope.
 - Two scripts write to Supabase: the one-time smoke test and `command_processor.py`. Both
-  need `--confirm-write`. The smoke test has not been executed, and `command_processor.py`
-  has never been run against the database: its tests use mocks and an in-memory fake
-  client. A read-only check has run: both tables are reachable and have the expected columns.
+  need `--confirm-write`, and `command_processor.py` also calls the critic. The smoke test
+  has not been executed. `command_processor.py` has run live once, for a planner failure
+  only; its successful-plan path has run only in tests, against mocks, an in-memory fake
+  client and `httpx.MockTransport`.
 
 ## Layout
 
@@ -45,14 +49,17 @@ Facts that must not be lost:
 | `robot_profile.py` | SO-101 joint names and schema position limits used by the validator |
 | `safety_validator.py` | Deterministic validator for a plan's actions. Pure, never raises, fails closed |
 | `critic_gate.py` | Builds the critic request and judges a critic response. Pure, sends no request |
+| `critic_client.py` | Sends ONE request to `/api/critic` and returns the `critic_gate` decision. Never raises |
+| `plan_snapshot.py` | Immutable snapshot of one plan (canonical bytes, plan id, hash) |
 | `execution_gate.py` | Allows only if validator and critic both passed the same plan. Executes nothing |
 | `planner.py` | Deterministic parser from command text to `set_joint` actions, or a structured planner error |
-| `command_processor.py` | Claim one command, plan it, record a planner failure. Manual run needs `--confirm-write` |
+| `command_processor.py` | Claim one command, plan, validate, ask the critic, record everything, set the final status. Manual run needs `--confirm-write` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
 | `discover_cyberwave_assets.py` | Manual script: read-only asset lookup, creates nothing |
 | `supabase_smoke_test.py` | Manual script: one-time Supabase write check. Needs `--confirm-write`, and refuses to write a second time |
-| `tests/` | Unit tests. All offline: no network, no database, no robot |
+| `tests/` | Unit tests. All offline: no network, no database, no robot. `tests/net_guard.py` blocks all network access |
+| `conftest.py`, `pytest.ini` | Install the network guard before pytest collects any test |
 
 The modules are plain files, not a package, so run everything **from the `worker/`
 directory**.
@@ -98,8 +105,8 @@ values:
 | `CYBERWAVE_ENVIRONMENT_ID` | Cyberwave | optional. The UUID of an existing environment. Unset: the SDK reuses or creates a "Quickstart Environment" |
 | `SUPABASE_URL` | Supabase | required |
 | `SUPABASE_SECRET_KEY` | Supabase | required. Backend key (`sb_secret_...`). Server-side only |
-| `CRITIC_URL` | critic call | required once the pipeline exists |
-| `CRITIC_SHARED_SECRET` | critic call | required once the pipeline exists |
+| `CRITIC_URL` | critic call | required by `command_processor.py` for a valid plan. `https` only (plain `http` only for a loopback host). Missing or unusable: the critic result is an error and nothing is approved |
+| `CRITIC_SHARED_SECRET` | critic call | required, same as above. Sent only as the `x-critic-secret` header |
 
 In the worker, `SUPABASE_SECRET_KEY` replaces the older name `SUPABASE_SERVICE_ROLE_KEY`.
 The Next.js app has its own environment file and still uses its own variable names.
@@ -126,6 +133,51 @@ pytest-style ones in `tests/test_audit_store.py`; `unittest discover` runs only 
 .venv\Scripts\python.exe -m pytest -q
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 ```
+
+### The test suite is network-isolated
+
+**The entire Python test suite is network-isolated, and real HTTP calls are forbidden in
+tests.** `tests/net_guard.py` installs a process-wide guard before any test module is
+imported:
+
+- pytest: `worker/conftest.py` installs it before collection. `worker/pytest.ini` makes
+  `worker/` the rootdir for any path inside it, so this also holds for
+  `python -m pytest worker` or a single test file run from the repository root. The run
+  header shows `worker network guard: installed`.
+- unittest: `worker/tests/__init__.py` installs it before any `tests.*` module.
+
+Blocked, raising `NetworkBlocked` before anything leaves the process:
+- the default httpx transports (`httpx.Client` and `httpx.AsyncClient`)
+- httpcore pools and backends
+- `http.client`, which covers `urllib` and urllib3
+- `requests`, if installed
+- socket `connect` / `connect_ex` / `sendto`, and `create_connection`
+- DNS lookups (`getaddrinfo` and friends)
+- asyncio connection, datagram and resolver calls
+
+The only local exception is `socket.socketpair()`, which asyncio needs to create an event
+loop. Tests also cannot load the real critic settings
+(`critic_client.load_critic_settings` is blocked), and `worker/.env` is never read
+(`load_dotenv` is a no-op).
+
+`NetworkBlocked` derives from `BaseException`, so the worker's fail-closed
+`except Exception` handlers cannot hide a blocked request as an ordinary critic error:
+the test fails loudly. `tests/test_network_guard.py` proves each blocked path, using only
+`.invalid` hostnames and loopback.
+
+Rules for tests:
+
+- **Critic tests must use `httpx.MockTransport`** (or inject a fake `critic` into
+  `process_one_command`). There is no live fallback and no opt-out.
+- Database tests use autospecced `audit_store` mocks, the in-memory `FakeClient`, or the
+  real PostgREST client on `httpx.MockTransport`.
+- **Live critic authentication is verified only through a separately approved, controlled
+  rehearsal** (`command_processor.py --confirm-write`), never by a test.
+
+Note: before this guard existed, one pytest run on 14 Nov 2026 sent about four requests to
+the deployed critic, through tests that fell back to the default critic client. Those
+requests were an accident, **not a controlled authentication test**, and do not count as
+verifying live critic authentication.
 
 Cyberwave connection test (network calls, read-only, no simulation started):
 
@@ -310,15 +362,49 @@ plan, even when the actions and hash are identical, and it refuses rather than r
 when a result is missing or malformed. "Allowed" means both checks passed. It is not
 permission to move a robot.
 
+Only the agreed verdict fields of a response are kept in the `critic_result` payload
+(`commandId`, `planId`, `planHash`, `verdict`, `reason`, `triggeredRules`). `reason` is
+capped at 200 characters, `triggeredRules` at 20 entries of 64 characters, and any other
+field the critic returns is dropped (`critic_gate.sanitize_response`).
+
 Open points in the critic contract:
 
 - No error kind is defined for a `commandId`, `planId` or `planHash` mismatch. The worker
   writes `invalid_body` with a detail saying which one.
 - No error kind is defined for a network error that is not a timeout. The worker writes
   `timeout` with a detail saying what happened. This is provisional.
+- **New, unresolved:** no error kind is defined for "no request was sent" (missing or
+  unusable `CRITIC_URL` / `CRITIC_SHARED_SECRET`, invalid timeout). The worker writes
+  `timeout` with detail `critic request not sent: ...`, by the same reasoning as the network
+  error (no response arrived). Provisional, to agree with Abhijit.
 
-Not built yet: the HTTP call to `/api/critic`, the successful-plan path (`plan_generated`
-with a plan, `validator_result`, `critic_result`), and any execution.
+### Critic HTTP client
+
+`critic_client.review_plan(request)` makes the call. It never raises: every problem becomes
+an `error` decision, never an approval and never a skip.
+
+| Rule | How |
+|---|---|
+| Authentication | `x-critic-secret: <CRITIC_SHARED_SECRET>` header. The secret is never in the body, the URL, an audit payload, an exception message or output. `CriticSettings.__repr__` hides it |
+| Configuration | `config.load_critic_settings()` (`CRITIC_URL`, `CRITIC_SHARED_SECRET`). No fallback names. Missing, blank, non-`https` (except loopback `http`), or a URL with credentials, query or fragment: error, no request |
+| Redirects | `follow_redirects=False`. Any 3xx is an `http_status` error ("redirect not followed"); the secret never reaches another host |
+| Environment | `trust_env=False`: no proxy variables, `.netrc` credentials or other environment settings are applied to the request |
+| Timeouts | `httpx.Timeout` with connect, read, write and pool all set, default 10 s. `build_timeout` refuses 0, negative, NaN, infinite, `None`, booleans and anything over 60 s |
+| Retries | None, for anything. One worker run makes at most one critic request |
+| Response | Non-200: error (body not read). 200: body read up to 64 KB, parsed as strict JSON (no NaN), secret values scrubbed from its strings, then judged by `critic_gate.evaluate_critic_response` |
+| Error detail | Fixed text plus an exception class name only. Never exception text, headers or a raw body |
+
+| Situation | Decision | `payload.error.kind` |
+|---|---|---|
+| 200, valid body, ids and hash match, `verdict: "approve"` | approve | |
+| 200, valid body, ids match, `verdict: "reject"` | reject | |
+| 401 | error | `http_status` (401) |
+| other non-200, including 3xx | error | `http_status` |
+| timeout (any phase) | error | `timeout` |
+| connection or protocol failure | error | `timeout` (provisional, detail names the error class) |
+| malformed JSON, not an object, missing field, unknown verdict, too large | error | `invalid_body` |
+| `commandId`, `planId` or `planHash` mismatch | error | `invalid_body` |
+| configuration missing or unusable | error | `timeout` (provisional, see above) |
 
 ## Command processor
 
@@ -334,7 +420,53 @@ with a plan, `validator_result`, `critic_result`), and any execution.
      `Command not understood: nothing executed`.
    - `planner_error`: any other planner failure (the text is not a string, or an internal
      error). Message `Planning failed: nothing executed`.
-4. Planner success: writes nothing and returns `planned_not_processed`.
+4. Planner success (the successful-plan lifecycle):
+   1. A new `planId` (UUID, generated once) and a `PlanSnapshot`: the actions frozen as
+      RFC 8785 canonical bytes, `planHash = plan_hasher.hash_actions(...)` of them.
+   2. Append `plan_generated` with `{"plan": {commandId, planId, planHash, actions},
+      "planId", "planHash"}`, message `Plan generated: N action(s)`. **If this fails,
+      nothing else happens**: no check runs and the status is not touched.
+   3. Run the safety validator on one copy of the snapshot and send another copy to the
+      critic. Both always run, even when the other one rejects.
+   4. Append `validator_result` (the `ValidationResult.to_payload()` shape), then
+      `critic_result` (`CriticDecision.to_payload()`, sanitized). The second is attempted
+      even if the first insert failed. Neither is retried.
+   5. Only if every result event was written: ONE conditional status update
+      `received -> approved | rejected | failed`, which also sets `commands.plan_id`.
+
+   Final status precedence (agreed, `decide_final_status`):
+
+   | Validator | Critic | Status |
+   |---|---|---|
+   | pass | approve | `approved` |
+   | fail | reject | `rejected` |
+   | fail | error | `rejected` |
+   | error | reject | `rejected` |
+   | pass | reject | `rejected` |
+   | pass | error | `failed` |
+   | error | approve | `failed` |
+   | error | error | `failed` |
+
+   A rejection by either check wins over an error in the other. `failed` means no check
+   rejected but at least one errored. `approved` needs a validator pass AND a critic
+   approval of exactly this command, plan id and hash; before writing it, the processor
+   also asks the pure `execution_gate.decide_execution` to re-validate and re-hash the
+   request, and treats a disagreement as a critic error.
+
+   **Approved plans are not executed.** The command stays `approved`; no
+   `execution_started` is written. The dry-run lifecycle is the next milestone.
+
+   **Validator "error" (new, unresolved contract question).** The validator never raises:
+   it turns its own internal errors into `fail` (`INVALID_PLAN`). The processor still
+   treats `validate_plan` raising, or returning something unusable, as `error`. The agreed
+   `validator_result` payload only has `pass` and `fail`, so in that case **no
+   `validator_result` is written**; the critic still runs and the status follows the table.
+   The dashboard summary then has no validator event to explain a `failed` status. To agree
+   with Abhijit: whether `validator_result` gets `outcome: "error"`.
+
+Event messages: `Validator passed` / `Validator rejected the plan`; `Critic approved the
+plan` / `Critic rejected the plan` / `Critic unavailable: no verdict`. The dashboard
+derives its summary from the payloads, not from these messages.
 
 Planner grammar: `set joint <_1.._6> to <decimal> rad`, up to 10 clauses separated by `;`.
 The whole command must be plain ASCII: Arabic-Indic or fullwidth digits, Unicode
@@ -352,15 +484,17 @@ rather than the one just typed, and whatever it claims is failed or stranded for
 **A command can be stranded.** The claim has no lease and no recovery, so the command stays
 `received` and claimed, and no later run picks it up, when:
 
-- the `plan_generated` write fails (stage `event_write`; status untouched; after a
-  `WriteError` the event may or may not exist),
-- the event is written but the status update fails (stage `status_update`), or
-- the planner accepts the command (`planned_not_processed`: the rest of the pipeline does
-  not exist yet, and a valid plan is deliberately NOT marked failed).
+- the `plan_generated` write fails (stage `event_write`; status untouched; for a valid plan
+  no check ran; after a `WriteError` the event may or may not exist),
+- a result event write fails (stage `validator_event_write` or `critic_event_write`; both
+  checks ran, the other result event was still attempted, status untouched), or
+- every event is written but the status update fails (stage `status_update`).
 
-`CommandProcessingError` carries `command_id`, `stage` (`claim`, `event_write` or
-`status_update`) and `event_written` (True, False, or None when unknown). Nothing is retried
-automatically, and nothing releases a claim.
+`CommandProcessingError` carries `command_id`, `stage` (`claim`, `event_write`,
+`validator_event_write`, `critic_event_write` or `status_update`), `event_written` (for
+the failed stage: True, False, or None when unknown), and, for a valid plan, `plan_id`,
+`events_written` (event types confirmed written) and `intended_status` (what the status
+would have been set to). Nothing is retried automatically, and nothing releases a claim.
 
 ### Manual recovery
 
@@ -373,7 +507,9 @@ the dashboard, open the command and read its timeline and status.
 | `status_update` with `StateConflictError` | the event, and a status other than `received` | Someone else changed the status. Leave it; investigate who. |
 | `event_write`, `event_written` None | check: the event may or may not be there | If the `plan_generated` error event is there, set the status only (row above). If not, write the event once, then set the status. Never write it without looking: `audit_events` rows cannot be deleted. |
 | `event_write`, `event_written` False | no `plan_generated` event | The request was never sent (for example the payload was rejected). Fix the cause before writing anything. |
-| `planned_not_processed` | no worker event, status `received`, `claimed_by` set | Nothing to recover automatically. It waits for the validator, critic and execution steps. Failing it by hand is a human decision, not something the worker does. |
+| `event_write` for a valid plan (`plan_id` set) | maybe a `plan_generated` event with that `planId`, nothing after it | No check ran. Do not re-run the checks by hand against the same plan id without deciding what the audit trail should say. Failing it (`received -> failed`) is a human decision. |
+| `validator_event_write` / `critic_event_write` | `plan_generated`, plus the events in `events_written` | The message lists both checks' outcomes and `intended_status`. If an event with `event_written` None is in the timeline, do not write it again. A missing result cannot be rebuilt by the worker; decide by hand whether to set `intended_status` or `failed`. |
+| `status_update` after a valid plan | `plan_generated`, `validator_result` (unless the validator errored), `critic_result`; status still `received` | Set the status only, to `intended_status`, with `plan_id`. Do **not** write any event again. |
 | `claim` | nothing | A row may have been claimed: look for a `received` command whose `claimed_by` is this worker id. |
 
 Setting the status by hand, after reading the timeline (replace the id):
@@ -382,12 +518,19 @@ Setting the status by hand, after reading the timeline (replace the id):
 .venv\Scripts\python.exe -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='failed')"
 ```
 
+After a valid plan, with the status and plan id from the error message:
+
+```
+.venv\Scripts\python.exe -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='<intended-status>', plan_id='<plan-id>')"
+```
+
 While a command has its `plan_generated` error event but is still `received`, the
 dashboard summary already reads "Command not understood: nothing executed" (events take
 priority over status in `src/lib/summary.ts`). The status column shows `received` until the
 status is fixed.
 
-Manual run (claims a real command and writes to Supabase):
+Manual run (claims a real command, writes to Supabase and, for a valid plan, makes one
+request to the critic):
 
 ```
 .venv\Scripts\python.exe command_processor.py --confirm-write
@@ -398,7 +541,10 @@ Manual run (claims a real command and writes to Supabase):
 - Simulation only. `SimulatedRobot` refuses to continue if the SDK client is not in
   simulation mode.
 - No movement code exists yet. It is to be added only behind the validator and critic
-  gates (fail closed).
+  gates (fail closed). `command_processor.py` stops at `approved`.
+- Every test runs under the process-wide network guard (`tests/net_guard.py`, see "The
+  test suite is network-isolated"). Critic responses come from `httpx.MockTransport` or
+  an offline fake.
 - Secrets come from the environment only. `config.redact()` scrubs them from third-party
   error text before it is printed.
 
