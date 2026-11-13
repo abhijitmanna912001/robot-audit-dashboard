@@ -1,12 +1,14 @@
-// Deterministic MOCK critic. Fails closed: anything unexpected is a reject.
-// Uses DRAFT types; no OpenAI, no Supabase yet.
+// Deterministic critic (no OpenAI, no Supabase yet). Fails closed: anything
+// unexpected is a reject. Rules mirror worker/safety_validator.py; joint limits
+// come from shared/so101-limits.json.
 import { timingSafeEqual } from "node:crypto";
 import { computePlanHash } from "../../../lib/plan-hash.ts";
+import { JOINT_LIMITS, JOINT_UNIT } from "../../../lib/so101-limits.ts";
 import type { CriticResponse } from "@/types/draft";
 
-const JOINT_LIMIT = 1.57; // radians
-const MAX_FORWARD = 2; // metres
-const KNOWN_TYPES = new Set(["set_joint", "move_forward", "stop"]);
+const MAX_ACTIONS = 10;
+const ACTION_TYPE = "set_joint"; // the only supported action type
+const ALLOWED_FIELDS = new Set(["actionId", "type", "target", "value", "unit", "reason"]);
 
 function reject(
   commandId: string,
@@ -45,6 +47,11 @@ function isObject(x: unknown): x is Record<string, unknown> {
 
 function nonEmptyString(x: unknown): x is string {
   return typeof x === "string" && x.length > 0;
+}
+
+// A string that is not empty or whitespace-only.
+function nonBlankString(x: unknown): x is string {
+  return typeof x === "string" && x.trim().length > 0;
 }
 
 // Constant-time compare that never throws on length mismatch.
@@ -136,37 +143,90 @@ export async function POST(request: Request) {
       reasons.push(msg);
     };
 
+    const actionIds = new Set<string>();
+    const duplicateIds = new Set<string>();
+    const joints = new Set<string>();
+    const duplicateJoints = new Set<string>();
+
     body.actions.forEach((a: unknown, i: number) => {
       if (containsNull(a)) {
         fail("null_value_not_allowed", `Action #${i}: null values are not allowed; omit unset fields.`);
         return;
       }
-      if (
-        !isObject(a) ||
-        !nonEmptyString(a.actionId) ||
-        !nonEmptyString(a.reason) ||
-        (a.value !== undefined && !(typeof a.value === "number" && Number.isFinite(a.value)))
-      ) {
-        fail("malformed_action", `Action #${i} is malformed.`);
+      if (!isObject(a)) {
+        fail("malformed_action", `Action #${i} is malformed: not an object.`);
         return;
       }
-      const label = `Action ${a.actionId}`;
-      if (typeof a.type !== "string" || !KNOWN_TYPES.has(a.type)) {
-        fail("unknown_action_type", `${label}: unknown action type.`);
-        return;
-      }
-      if (a.type === "set_joint") {
-        if (a.value === undefined || Math.abs(a.value as number) > JOINT_LIMIT) {
-          fail("joint_out_of_range", `${label}: set_joint value must be within -${JOINT_LIMIT} to ${JOINT_LIMIT} rad.`);
+
+      for (const key of Object.keys(a)) {
+        if (!ALLOWED_FIELDS.has(key)) {
+          fail("unexpected_field", `Action #${i}: unexpected field "${key}".`);
         }
-      } else if (a.type === "move_forward") {
-        if (a.value === undefined || (a.value as number) > MAX_FORWARD) {
-          fail("move_forward_too_far", `${label}: move_forward value must be at most ${MAX_FORWARD} m.`);
-        } else if ((a.value as number) < 0) {
-          fail("move_forward_negative", `${label}: move_forward value must not be negative.`);
+      }
+
+      const id = nonBlankString(a.actionId) ? a.actionId : undefined;
+      const label = id !== undefined ? `Action ${id}` : `Action #${i}`;
+      if (id === undefined) fail("malformed_action", `${label}: actionId must be a non-blank string.`);
+      else if (actionIds.has(id)) duplicateIds.add(id);
+      else actionIds.add(id);
+      if (!nonBlankString(a.reason)) fail("malformed_action", `${label}: reason must be a non-blank string.`);
+
+      if (!nonBlankString(a.type)) {
+        fail("malformed_action", `${label}: type must be a non-blank string.`);
+        return;
+      }
+      if (a.type !== ACTION_TYPE) {
+        fail("unsupported_action_type", `${label}: only ${ACTION_TYPE} is supported.`);
+        return;
+      }
+
+      // target must be a known joint. Map lookup, so "constructor" is not a joint.
+      let limit: { min: number; max: number } | undefined;
+      let knownJoint: string | undefined;
+      if (!nonBlankString(a.target)) {
+        fail("malformed_action", `${label}: target must be a non-blank string.`);
+      } else if (!JOINT_LIMITS.has(a.target)) {
+        fail("unknown_joint", `${label}: unknown joint.`);
+      } else {
+        knownJoint = a.target;
+        limit = JOINT_LIMITS.get(a.target);
+        if (joints.has(a.target)) duplicateJoints.add(a.target);
+        else joints.add(a.target);
+      }
+
+      const value =
+        typeof a.value === "number" && Number.isFinite(a.value) ? a.value : undefined;
+      if (value === undefined) fail("malformed_action", `${label}: value must be a finite number.`);
+
+      let unitOk = false;
+      if (!nonBlankString(a.unit)) {
+        fail("malformed_action", `${label}: unit must be a non-blank string.`);
+      } else if (a.unit !== JOINT_UNIT) {
+        fail("unit_mismatch", `${label}: unit must be "${JOINT_UNIT}". No conversion is done.`);
+      } else {
+        unitOk = true;
+      }
+
+      // Only meaningful for a known joint, a real number and the right unit.
+      if (limit && knownJoint !== undefined && value !== undefined && unitOk) {
+        if (value < limit.min || value > limit.max) {
+          fail(
+            "joint_limit_exceeded",
+            `${label}: value is outside the limits for ${knownJoint} (${limit.min} to ${limit.max} ${JOINT_UNIT}).`,
+          );
         }
       }
     });
+
+    if (body.actions.length > MAX_ACTIONS) {
+      fail("max_actions_exceeded", `Plan has ${body.actions.length} actions; the maximum is ${MAX_ACTIONS}.`);
+    }
+    if (duplicateIds.size > 0) {
+      fail("duplicate_action_id", "Each actionId may be used only once in a plan.");
+    }
+    if (duplicateJoints.size > 0) {
+      fail("duplicate_joint_target", "Each joint may be targeted by only one action in a plan.");
+    }
 
     if (rules.size > 0) {
       return reject(commandId, planId, reasons.join(" "), [...rules], 200, planHash);
@@ -177,7 +237,7 @@ export async function POST(request: Request) {
       planId,
       planHash,
       verdict: "approve",
-      reason: "All actions passed all mock safety rules.",
+      reason: "All actions passed all critic safety rules.",
       triggeredRules: [],
     };
     return Response.json(approved);

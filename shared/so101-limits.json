@@ -1,0 +1,13 @@
+{
+  "robot": "so101",
+  "unit": "rad",
+  "source": "docs/robot-capabilities.md section 6 (Schema limits, inclusive)",
+  "joints": {
+    "_1": { "min": -1.91986, "max": 1.91986 },
+    "_2": { "min": -1.74533, "max": 1.74533 },
+    "_3": { "min": -1.74533, "max": 1.5708 },
+    "_4": { "min": -1.65806, "max": 1.65806 },
+    "_5": { "min": -2.79253, "max": 2.79253 },
+    "_6": { "min": -0.174533, "max": 1.74533 }
+  }
+}

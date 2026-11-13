@@ -21,16 +21,16 @@ export type Command = {
   updatedAt: string; // ISO 8601
 };
 
-// DRAFT: critic request contract, not agreed yet.
-export type ActionType = "set_joint" | "move_forward" | "stop";
+// Action vocabulary: set_joint only (docs/robot-capabilities.md section 5).
+export type ActionType = "set_joint";
 
-// DRAFT
+// Joint names `_1`..`_6`, radians, limits in shared/so101-limits.json.
 export type CriticAction = {
   actionId: string;
   type: ActionType;
-  target?: string;
-  value?: number;
-  unit?: string;
+  target: string;
+  value: number;
+  unit: "rad";
   reason: string;
 };
 
