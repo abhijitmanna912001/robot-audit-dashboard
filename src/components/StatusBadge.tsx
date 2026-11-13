@@ -12,7 +12,7 @@ const styles: Record<CommandStatus, string> = {
 export function StatusBadge({ status }: { status: CommandStatus }) {
   return (
     <span
-      className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${styles[status]}`}
+      className={`inline-block shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${styles[status]}`}
     >
       {status}
     </span>

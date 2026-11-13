@@ -1,18 +1,24 @@
 // DRAFT TYPES: schemas are not agreed yet. Expect these to change.
 
-export type CommandStatus =
-  | "received"
-  | "approved"
-  | "rejected"
-  | "executing"
-  | "completed"
-  | "failed";
+export const COMMAND_STATUSES = [
+  "received",
+  "approved",
+  "rejected",
+  "executing",
+  "completed",
+  "failed",
+] as const;
+export type CommandStatus = (typeof COMMAND_STATUSES)[number];
 
 export type Command = {
   id: string;
   text: string;
   status: CommandStatus;
+  planId: string | null; // null until the worker generates a plan
+  claimedBy: string | null; // worker instance id
+  claimedAt: string | null; // ISO 8601
   createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
 };
 
 // DRAFT: critic request contract, not agreed yet.
@@ -51,10 +57,31 @@ export type CriticResponse = {
   triggeredRules: string[];
 };
 
+export const EVENT_TYPES = [
+  "command_received",
+  "plan_generated",
+  "validator_result",
+  "critic_result",
+  "execution_started",
+  "execution_completed",
+  "execution_failed",
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];
+
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | Json[]
+  | { [key: string]: Json };
+export type JsonObject = { [key: string]: Json };
+
 export type AuditEvent = {
   id: string;
   commandId: string;
-  eventType: string; // free-form for now
+  eventType: EventType;
   message: string;
-  timestamp: string; // ISO 8601
+  payload: JsonObject; // shapes per event type: docs/schema-draft.md "Event payloads"
+  createdAt: string; // ISO 8601
 };
