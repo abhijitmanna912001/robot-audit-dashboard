@@ -1,7 +1,8 @@
 // One-line outcome summary for the selected command. Pure.
 // Events come first, the command status is only a fallback when events do not explain it.
 // Events are expected oldest first (see lib/merge.ts).
-import { readCritic, readExecution, readValidator, text } from "./payload.ts";
+import { readCritic, readExecution, readPlanFailure, readValidator, text } from "./payload.ts";
+import type { PlanFailure } from "./payload.ts";
 
 type EventLike = { eventType: string; payload: unknown };
 
@@ -13,14 +14,21 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
   let validator: "pass" | "fail" | undefined;
   let critic: "approve" | "reject" | "error" | undefined;
   let hasPlan = false;
+  let planFailure: PlanFailure | undefined;
+  let criticError = false;
   let started: boolean | undefined;
   let terminal: string | undefined;
 
+  // A validator fail or critic reject returns from inside the loop, so it wins over any
+  // error event wherever it sits. Errors are only remembered and resolved after the loop.
   for (const e of events) {
     switch (e?.eventType) {
-      case "plan_generated":
-        hasPlan = true;
+      case "plan_generated": {
+        const failure = readPlanFailure(e.payload);
+        planFailure = failure; // a later successful plan clears an earlier failure
+        hasPlan = failure === undefined;
         break;
+      }
       case "validator_result": {
         const v = readValidator(e.payload);
         if (v.outcome === "fail") {
@@ -40,8 +48,11 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
             ? `Rejected by critic: ${c.triggeredRules.join(", ")}${more(c.extraRules)}`
             : "Rejected by critic";
         }
-        if (c.outcome === "error") return "Critic unavailable: nothing executed";
-        if (c.outcome === "approve") critic = "approve";
+        if (c.outcome === "error") criticError = true;
+        if (c.outcome === "approve") {
+          critic = "approve";
+          criticError = false;
+        }
         break;
       }
       case "execution_started":
@@ -60,6 +71,12 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
 
   if (terminal) return terminal;
   if (started !== undefined) return started ? "Executing (dry run)" : "Executing";
+  if (planFailure) {
+    return planFailure.kind === "unsupported_command"
+      ? "Command not understood: nothing executed"
+      : "Planning failed: nothing executed";
+  }
+  if (criticError) return "Critic unavailable: nothing executed";
   if (validator === "pass" && critic === "approve") return "Approved, waiting for execution";
 
   // Events do not explain it yet. Fall back to the command status.
@@ -67,7 +84,7 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
     case "rejected":
       return "Rejected (reason not recorded)";
     case "failed":
-      return "Execution failed";
+      return events.length === 0 ? "Failed: nothing executed" : "Execution failed";
     case "completed":
       return "Completed";
     case "executing":
