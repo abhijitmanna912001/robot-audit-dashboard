@@ -1,0 +1,5 @@
+﻿cyberwave
+supabase
+python-dotenv
+httpx
+rfc8785
