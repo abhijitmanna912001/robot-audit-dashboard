@@ -7,6 +7,7 @@ import {
   readCritic,
   readExecution,
   readPlan,
+  readPlanFailure,
   readRaw,
   readSource,
   readValidator,
@@ -152,4 +153,35 @@ test("readRaw caps at MAX_RAW and handles odd values", () => {
 
 test("HTML-like text is returned verbatim as a plain string", () => {
   assert.equal(readSource({ source: "<script>alert(1)</script>" }), "<script>alert(1)</script>");
+});
+
+test("readPlanFailure reads kind and detail of the planner failure shape", () => {
+  assert.deepEqual(
+    readPlanFailure({ outcome: "error", error: { kind: "unsupported_command", detail: "no such action" } }),
+    { kind: "unsupported_command", detail: "no such action" },
+  );
+  assert.equal(readPlanFailure({ outcome: "error", error: { kind: "x".repeat(900) } })?.kind?.length, MAX_STRING + 1);
+  assert.equal(readPlanFailure({ outcome: "error", error: { detail: "y".repeat(5000) } })?.detail?.length, MAX_STRING + 1);
+});
+
+test("readPlanFailure is undefined unless outcome is exactly \"error\"", () => {
+  for (const p of [null, undefined, [], 5, "error", {}, { plan: {} }, { outcome: "ERROR" }, { outcome: true }, { outcome: "ok" }]) {
+    assert.equal(readPlanFailure(p), undefined);
+  }
+});
+
+test("readPlanFailure leaves out missing or wrong-typed fields and never throws", () => {
+  for (const error of [undefined, null, "boom", 5, [1], { kind: 5, detail: { x: 1 } }, { kind: "", detail: "  " }]) {
+    assert.deepEqual(readPlanFailure({ outcome: "error", error }), { kind: undefined, detail: undefined });
+  }
+});
+
+test("readPlan falls back to planId and planHash beside plan", () => {
+  const top = readPlan({ plan: { actions: [] }, planId: "p1", planHash: "sha256:x" });
+  assert.equal(top.planId, "p1");
+  assert.equal(top.planHash, "sha256:x");
+  const nested = readPlan({ plan: { planId: "in", planHash: "h-in" }, planId: "out", planHash: "h-out" });
+  assert.equal(nested.planId, "in");
+  assert.equal(nested.planHash, "h-in");
+  assert.equal(readPlan({ plan: {}, planId: 7 }).planId, undefined);
 });

@@ -62,9 +62,11 @@ export type PlanDetails = {
   extraActions: number;
 };
 
-// plan_generated: { plan: { planId, planHash, actions: [{ actionId, target, value, unit, reason }] } }
+// plan_generated (success): { plan: { planId, planHash, actions: [{ actionId, target, value, unit, reason }] } }
+// planId and planHash are also accepted beside `plan` ({ plan, planId, planHash }) when missing inside it.
 export function readPlan(payload: unknown): PlanDetails {
-  const plan = asRecord(asRecord(payload)?.plan);
+  const p = asRecord(payload);
+  const plan = asRecord(p?.plan);
   const { items, extra } = records(plan?.actions);
   const actions = items
     .map((a) => ({
@@ -75,7 +77,23 @@ export function readPlan(payload: unknown): PlanDetails {
       reason: text(a.reason),
     }))
     .filter((a) => a.target !== undefined || a.value !== undefined || a.unit !== undefined);
-  return { planId: text(plan?.planId), planHash: text(plan?.planHash), actions, extraActions: extra };
+  return {
+    planId: text(plan?.planId) ?? text(p?.planId),
+    planHash: text(plan?.planHash) ?? text(p?.planHash),
+    actions,
+    extraActions: extra,
+  };
+}
+
+export type PlanFailure = { kind?: string; detail?: string };
+
+// plan_generated (planner failure): { outcome: "error", error: { kind, detail } }
+// Only an exact outcome of "error" counts. A missing or wrong-typed kind or detail is left out.
+export function readPlanFailure(payload: unknown): PlanFailure | undefined {
+  const p = asRecord(payload);
+  if (p?.outcome !== "error") return undefined;
+  const err = asRecord(p.error);
+  return { kind: text(err?.kind), detail: text(err?.detail) };
 }
 
 export type ValidatorError = {

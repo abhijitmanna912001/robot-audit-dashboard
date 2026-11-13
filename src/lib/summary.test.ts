@@ -74,7 +74,7 @@ test("approved and waiting, and partial checks", () => {
 
 test("status is the fallback when events do not explain it", () => {
   assert.equal(summarize("rejected", []), "Rejected (reason not recorded)");
-  assert.equal(summarize("failed", []), "Execution failed");
+  assert.equal(summarize("failed", []), "Failed: nothing executed"); // was "Execution failed" before planner failures
   assert.equal(summarize("completed", []), "Completed");
   assert.equal(summarize("executing", []), "Executing");
   assert.equal(summarize("approved", []), "Approved, waiting for execution");
@@ -97,4 +97,70 @@ test("malformed events and statuses never throw", () => {
   assert.equal(summarize(42 as unknown as string, bad), "Waiting for the worker");
   // The event type alone says execution finished, even if its payload is garbage.
   assert.equal(summarize("completed", [e("execution_completed", "x")]), "Execution completed");
+});
+
+const planFail = (kind: unknown, detail: unknown = "d") =>
+  e("plan_generated", { outcome: "error", error: { kind, detail } });
+const NOT_UNDERSTOOD = "Command not understood: nothing executed";
+const PLAN_FAILED = "Planning failed: nothing executed";
+
+test("planner failure: unsupported_command", () => {
+  assert.equal(summarize("failed", [planFail("unsupported_command")]), NOT_UNDERSTOOD);
+});
+
+test("planner failure: planner_error, unknown, missing or wrong-typed kind", () => {
+  assert.equal(summarize("failed", [planFail("planner_error")]), PLAN_FAILED);
+  assert.equal(summarize("failed", [planFail("something_new")]), PLAN_FAILED);
+  assert.equal(summarize("failed", [planFail(undefined)]), PLAN_FAILED);
+  assert.equal(summarize("failed", [planFail(5)]), PLAN_FAILED);
+  assert.equal(summarize("failed", [e("plan_generated", { outcome: "error" })]), PLAN_FAILED);
+  assert.equal(summarize("failed", [e("plan_generated", { outcome: "error", error: "boom" })]), PLAN_FAILED);
+});
+
+test("plan_generated without outcome error is not a failure", () => {
+  assert.equal(summarize("received", [e("plan_generated", { plan: {} })]), "Plan generated, waiting for validator and critic");
+  assert.equal(summarize("received", [e("plan_generated", { outcome: "ERROR" })]), "Plan generated, waiting for validator and critic");
+  assert.equal(summarize("received", [e("plan_generated", null)]), "Plan generated, waiting for validator and critic");
+});
+
+test("a later successful plan clears an earlier planner failure", () => {
+  assert.equal(
+    summarize("received", [planFail("planner_error"), e("plan_generated", { plan: {} })]),
+    "Plan generated, waiting for validator and critic",
+  );
+});
+
+test("failed command with no events at all", () => {
+  assert.equal(summarize("failed", []), "Failed: nothing executed");
+  assert.equal(summarize("failed", [e("command_received", { source: "dashboard" })]), "Execution failed");
+});
+
+test("validator fail or critic reject wins over any error event, in either order", () => {
+  const vFail = e("validator_result", { outcome: "fail", errors: [{ ruleId: "UNKNOWN_JOINT" }] });
+  const cReject = e("critic_result", { outcome: "reject", response: { triggeredRules: ["x"] } });
+  const cError = e("critic_result", { outcome: "error", error: { kind: "timeout" } });
+  const pError = planFail("planner_error");
+  assert.equal(summarize("rejected", [vFail, cError]), "Rejected by validator: UNKNOWN_JOINT");
+  assert.equal(summarize("rejected", [cError, vFail]), "Rejected by validator: UNKNOWN_JOINT");
+  assert.equal(summarize("rejected", [pError, vFail]), "Rejected by validator: UNKNOWN_JOINT");
+  assert.equal(summarize("rejected", [vPass, cReject, pError]), "Rejected by critic: x");
+  assert.equal(summarize("rejected", [cError, cReject]), "Rejected by critic: x");
+  assert.equal(summarize("rejected", [pError, cError, vFail]), "Rejected by validator: UNKNOWN_JOINT");
+});
+
+test("planner failure beats a critic error, and critic error still says nothing executed", () => {
+  const cError = e("critic_result", { outcome: "error", error: { kind: "timeout" } });
+  assert.equal(summarize("rejected", [cError, planFail("unsupported_command")]), NOT_UNDERSTOOD);
+  assert.equal(summarize("rejected", [vPass, cError]), "Critic unavailable: nothing executed");
+});
+
+test("malformed planner failure payloads never throw", () => {
+  const bad = [
+    e("plan_generated", { outcome: "error", error: { kind: { x: 1 }, detail: [1] } }),
+    e("plan_generated", { outcome: "error", error: [1, 2] }),
+    e("plan_generated", [1]),
+    e("plan_generated", undefined),
+  ];
+  for (const ev of bad) assert.doesNotThrow(() => summarize("failed", [ev]));
+  assert.equal(summarize("failed", bad.slice(0, 2)), PLAN_FAILED);
 });

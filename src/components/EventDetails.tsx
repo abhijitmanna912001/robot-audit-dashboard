@@ -5,6 +5,7 @@ import {
   readCritic,
   readExecution,
   readPlan,
+  readPlanFailure,
   readRaw,
   readSource,
   readValidator,
@@ -31,6 +32,12 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       add(rows, "source", readSource(e.payload));
       return { rows, dryRun: false };
     case "plan_generated": {
+      const failure = readPlanFailure(e.payload);
+      if (failure) {
+        add(rows, "error kind", failure.kind);
+        add(rows, "error detail", failure.detail);
+        return { rows, dryRun: false };
+      }
       const p = readPlan(e.payload);
       add(rows, "planId", p.planId);
       add(rows, "planHash", p.planHash);

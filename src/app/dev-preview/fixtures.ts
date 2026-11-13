@@ -145,6 +145,60 @@ export const scenarios: Scenario[] = [
     ],
   },
   {
+    title: "Unsupported command",
+    status: "failed",
+    events: [
+      received("unsup"),
+      ev("unsup", "plan_generated", "Command not understood", {
+        outcome: "error",
+        error: { kind: "unsupported_command", detail: "The arm cannot move forward." },
+      }),
+    ],
+  },
+  {
+    title: "Planner error",
+    status: "failed",
+    events: [
+      received("perr"),
+      ev("perr", "plan_generated", "Planning failed", {
+        outcome: "error",
+        error: { kind: "planner_error", detail: "The planner returned no usable plan." },
+      }),
+    ],
+  },
+  {
+    title: "Validator fail + critic error",
+    status: "rejected",
+    events: [
+      received("vce"),
+      planned("vce", 3),
+      ev("vce", "validator_result", "Validator failed", {
+        outcome: "fail",
+        planId: PLAN_ID,
+        validatorVersion: "0.1.0",
+        errors: [
+          { ruleId: "JOINT_LIMIT_EXCEEDED", actionId: "a1", field: "value", message: "value 3 is outside the limits for _1" },
+        ],
+      }),
+      ev("vce", "critic_result", "Critic unavailable", {
+        outcome: "error",
+        error: { kind: "timeout", detail: "critic did not answer in time" },
+      }),
+    ],
+  },
+  {
+    title: "Malformed planner failure",
+    status: "failed",
+    events: [
+      ev("badfail", "plan_generated", "error is a string", { outcome: "error", error: "boom" }),
+      ev("badfail", "plan_generated", "kind and detail wrong types", { outcome: "error", error: { kind: 5, detail: { x: 1 } } }),
+      ev("badfail", "plan_generated", "very long detail and HTML kind", {
+        outcome: "error",
+        error: { kind: "<b>kind</b>", detail: "z".repeat(900) },
+      }),
+    ],
+  },
+  {
     title: "Malformed payloads",
     status: "received",
     events: [
