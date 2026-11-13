@@ -26,12 +26,35 @@ command lifecycle and its audit trail only.
 
 ```
 received ──► approved ──► executing ──► completed
-    │                          └──────► failed
+    │            │            └──────► failed
+    │            └──────────────────► failed
+    ├──────────────────────────────► failed
     └──────► rejected
 ```
 
 Statuses: `received`, `approved`, `rejected`, `executing`, `completed`, `failed`.
-`rejected`, `completed` and `failed` are terminal.
+
+Allowed transitions:
+
+| From | To |
+|---|---|
+| `received` | `approved`, `rejected`, `failed` |
+| `approved` | `executing`, `failed` |
+| `executing` | `completed`, `failed` |
+
+`rejected`, `completed` and `failed` are terminal: nothing leaves them.
+
+- `received -> failed` is for a planner, critic or other processing failure **before approval**. A
+  critic that errors (non-200, timeout, network error, invalid body, mismatched ids or `planHash`)
+  gives no verdict, so it ends in `failed` if no check returned a rejecting verdict (see
+  Precedence in section 6). `rejected` means the validator failed or the critic returned a
+  `reject` verdict.
+- `approved -> failed` is for a failure after approval but before execution started.
+- `worker/audit_store.py` enforces this table in code, before any database call. Every status
+  update is conditional on the expected current status (`where id = $1 and status = <expected>`),
+  so a command whose status changed in the meantime is never overwritten.
+- `audit_store.append_event` accepts `command_received` for completeness, although the dashboard
+  route normally writes it (see the single-writer rule below).
 
 **Single-writer rule.** Each lifecycle event has exactly one writer:
 
@@ -122,8 +145,10 @@ Event type to status, for reference:
 | Event | Worker then sets `commands.status` to |
 |---|---|
 | `command_received` | `received` (set at insert by the route handler) |
-| `plan_generated` | unchanged |
-| `validator_result` / `critic_result` | unchanged until both are in. Then `approved` or `rejected`. |
+| `plan_generated` (no error) | unchanged |
+| `plan_generated` with `outcome: "error"` | `failed` (`received -> failed`). No plan was generated. |
+| `validator_result` / `critic_result` | unchanged until both are in. Then `approved`, or `rejected` if either returned a `fail` or `reject` verdict, even if the other check errored. |
+| `critic_result` with `outcome: "error"` | `failed` (`received -> failed`), only if no check returned a `fail` or `reject` verdict. The critic gave no verdict. |
 | `execution_started` | `executing` |
 | `execution_completed` | `completed` |
 | `execution_failed` | `failed` |
@@ -351,7 +376,9 @@ Flow:
    response.
 3. **Worker contract.** Before executing, the worker must check all of: HTTP status 200,
    `verdict` is `"approve"`, and `commandId`, `planId` and `planHash` in the response match its
-   request. Any other outcome is a rejection (section 6).
+   request. Any other outcome means nothing executes. A critic `reject` verdict ends in
+   `rejected`, and a critic error ends in `failed` if no check returned a rejecting verdict (see
+   Precedence in section 6).
 4. `planHash` is also included in the `critic_result` event payload.
 
 ### Hash reference test
@@ -423,7 +450,8 @@ These are the deterministic validator's ids. The AI critic's rule ids are separa
 | Event | `payload` |
 |---|---|
 | `command_received` | `{ "source": "dashboard" }` |
-| `plan_generated` | `{ "plan": <planner output> }` |
+| `plan_generated` (success) | `{ "plan": <planner output>, "planId": string, "planHash": string }`. No `outcome` and no `error`. |
+| `plan_generated` (planner failure) | `{ "outcome": "error", "error": { "kind": string, "detail": string } }`. No `plan`, `planId` or `planHash`, because no plan exists. |
 | `validator_result` | `{ "outcome": "pass" \| "fail", "planId": string, "validatorVersion": string, "errors": [{ "ruleId", "actionId", "field", "message" }] }` |
 | `critic_result` | `{ "outcome": "approve" \| "reject" \| "error", "planHash": string?, "response": <critic verdict>?, "error": { "kind": "http_status" \| "timeout" \| "invalid_body", "httpStatus": number?, "detail": string? }? }` |
 | `execution_started` | `{ "dryRun": boolean }` |
@@ -432,6 +460,12 @@ These are the deterministic validator's ids. The AI critic's rule ids are separa
 
 `planHash` in `critic_result` is omitted when there is no usable hash to record (for example a
 timeout).
+
+**Planner error kinds (PROPOSED, to confirm with the worker owner):** `unsupported_command` (the
+command text is not one of the accepted commands, so nothing was evaluated) and `planner_error`
+(any other planner failure). `payload.error.detail` is capped at 200 characters, the same cap the
+worker uses for critic error detail, and contains no secrets and no raw responses. The planner
+error shape above is proposed too (section 6).
 
 ## 5. Event naming
 
@@ -453,7 +487,7 @@ Mapping from the mock event names in `src/mocks/mock-data.ts`:
 | `executing` | `execution_started` | |
 | `completed` | `execution_completed` | |
 | `failed` | `execution_failed` | |
-| `rejected` | **no event of its own** | the status change to `rejected` follows the failing `validator_result` or `critic_result`, which carries the reason |
+| `rejected` | **no event of its own** | the status change to `rejected` follows a failing `validator_result` or a `critic_result` with outcome `reject`, which carries the reason. A `critic_result` with outcome `error` is followed by `failed`. |
 
 If you want an explicit "command rejected" row in the timeline, the alternative is an eighth
 event type. Recommendation: do not add one, because the rejecting event already holds the
@@ -468,17 +502,35 @@ The worker executes a command **only if both** hold:
    `commandId`, `planId` and `planHash` all match the request, and whose `verdict` equals
    `"approve"`.
 
-Anything else is a rejection, and nothing executes: validator fail, critic `reject`, HTTP 400,
-HTTP 500, timeout, network error, a 200 with an invalid body, or a response whose `commandId`,
-`planId` or `planHash` does not match. The worker logs each case:
+Anything else, and nothing executes. What the command ends as depends on whether anyone
+evaluated the plan:
 
-- a validator fail is a `validator_result` event with `outcome: "fail"`
-- a critic `reject` is a `critic_result` with `outcome: "reject"`
-- every critic failure (non-200, timeout, bad body, mismatched ids or hash) is a
-  `critic_result` with `outcome: "error"` and `payload.error` describing what went wrong
+- **A validator fail or a critic `reject` ends in `rejected`** (`received -> rejected`). A check
+  ran and said no. A validator fail is a `validator_result` event with `outcome: "fail"`. A
+  critic `reject` is a `critic_result` with `outcome: "reject"`.
+- **If no check returned a rejecting verdict, anything that stopped the plan from being
+  evaluated ends in `failed`** (`received -> failed`), never `rejected`, because nobody
+  evaluated the plan. This covers a
+  critic error (a non-200 status such as 400, 401 or 500, a timeout, a network error, a 200 with
+  an invalid body, or a response whose `commandId`, `planId` or `planHash` does not match the
+  request), a planner error, and any other processing failure before approval. If a
+  `critic_result` event was written, it has `outcome: "error"` and `payload.error` with the error
+  kind (`http_status`, `timeout` or `invalid_body`) and detail.
+- A failure **after approval but before execution starts** is `approved -> failed`.
+- A failure **during execution** is `executing -> failed`.
 
-It then sets `commands.status = 'rejected'`. A failure **during** execution, after approval,
-is `failed`, not `rejected`.
+**Precedence.** If the validator returned `fail`, or the critic returned `reject`, the command
+ends in `rejected`, even if another check errored. `failed` is used only when no check returned a
+rejecting verdict.
+
+`rejected` and `failed` are terminal (section 1).
+
+**Proposed, to confirm with the worker owner:** a failure before the critic runs (for example a
+planner error) is recorded as a `plan_generated` event with `outcome: "error"` and
+`payload.error { kind, detail }`, the same shape used for critic errors, followed by
+`received -> failed`. No new event type is introduced, because event types are part of the applied
+schema. A command the planner does not recognise ends in `failed`, never `rejected`, because no
+plan was evaluated.
 
 The order of checks is the worker's call, and it may stop at the first failure. Either way,
 each check that ran gets its own event.
@@ -558,6 +610,13 @@ Accepted for the simulation-only meetup demo.
 - **Creating a command and its `command_received` event are two inserts that are not atomic.**
   If the second fails, the command exists without its first audit event. For now the error is
   logged and accepted. A Postgres function called through `rpc` would make it atomic later.
+- **Message and payload limits exist only in the worker.** `message` is limited to 500 characters
+  and `payload` to 20,000 bytes of compact UTF-8 JSON, enforced only in `worker/audit_store.py`.
+  The database has no such limits, and the dashboard route handler is not bound by them.
+- **An event insert and the matching status update are not atomic.** `audit_store.append_event`
+  and `audit_store.set_command_status` are separate calls, so a crash between them leaves an event
+  without its status change, or the reverse. The worker writes the event first, then the status. A
+  Postgres function called through `rpc` would make it atomic later.
 - **Crash recovery is manual.** A claimed-but-abandoned command is restarted by hand, and a
   command is never retried automatically once execution has started (section 3).
 - **Test rows in `audit_events` cannot be deleted.** The table is append-only through the
