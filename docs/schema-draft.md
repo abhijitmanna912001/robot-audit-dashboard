@@ -423,10 +423,14 @@ not need to change, as long as both sides keep producing this hash. It is **not 
 {
   "outcome": "pass",
   "planId": "9d2e4a10-0000-0000-0000-000000000002",
-  "validatorVersion": "<string>",
+  "validatorVersion": "1.0",
   "errors": []
 }
 ```
+
+`validatorVersion` is the plain string `"1.0"`, bumped by hand when the rules change. It is not
+semver, a git sha or a date. `worker/safety_validator.py` still has `VALIDATOR_VERSION = "0.1.0"`
+until the worker owner bumps it (**pending in the worker**).
 
 On `fail`, `outcome` is `"fail"` and `errors` holds one entry per problem:
 
@@ -438,12 +442,25 @@ On `fail`, `outcome` is `"fail"` and `errors` holds one entry per problem:
 `string | null`, since a plan-level error such as `MAX_ACTIONS_EXCEEDED` has no single action
 or field.
 
-Initial validator rule ids:
+Validator rule ids, exactly as they appear in `worker/safety_validator.py`:
 
-`UNSUPPORTED_ACTION`, `MISSING_REQUIRED_FIELD`, `UNKNOWN_JOINT`, `JOINT_LIMIT_EXCEEDED`,
-`NON_FINITE_VALUE`, `UNIT_MISMATCH`, `MAX_ACTIONS_EXCEEDED`
+| Rule id | Status |
+|---|---|
+| `UNSUPPORTED_ACTION` | agreed, implemented |
+| `MISSING_REQUIRED_FIELD` | agreed, implemented |
+| `UNKNOWN_JOINT` | agreed, implemented |
+| `JOINT_LIMIT_EXCEEDED` | agreed, implemented |
+| `NON_FINITE_VALUE` | agreed, implemented |
+| `UNIT_MISMATCH` | agreed, implemented |
+| `MAX_ACTIONS_EXCEEDED` | agreed; implemented in the code but inactive until the profile sets `max_actions=10` (pending in the worker) |
+| `INVALID_PLAN` | agreed (documented here): the plan is not an array, is empty, or an action is not an object |
+| `INVALID_FIELD_TYPE` | agreed (documented here): a field has the wrong JSON type |
+| `DUPLICATE_ACTION_ID` | agreed (documented here): an `actionId` is used by an earlier action |
+| `UNEXPECTED_FIELD` | agreed (documented here): a field outside the agreed action shape |
+| `DUPLICATE_JOINT_TARGET` | agreed, pending in the worker (not in the code yet) |
 
-These are the deterministic validator's ids. The AI critic's rule ids are separate.
+Validator rule ids are UPPERCASE. They are separate from the critic's snake_case rule ids
+(section 4, "Critic verdict"), and the AI critic's ids are separate again.
 
 ### Event payloads
 
@@ -596,7 +613,10 @@ Notes:
    ids are defined in section 4, "Critic verdict". Ids for a future AI critic are not agreed.
 7. ~~**Hash reference value.**~~ **Closed.** Verified by both sides (section 4, "Hash reference
    test").
-8. **`validatorVersion` format.** A string, but the format (semver, git sha, date) is not agreed.
+8. ~~**`validatorVersion` format and extra validator ids.**~~ **Closed.** `validatorVersion` is
+   the plain string `"1.0"`, bumped by hand when the rules change (the worker still has `"0.1.0"`,
+   pending). The four extra ids in the code are agreed, and `DUPLICATE_JOINT_TARGET` is agreed and
+   pending in the worker (section 4, "Validator result").
 
 ## 9. Known limitations
 
