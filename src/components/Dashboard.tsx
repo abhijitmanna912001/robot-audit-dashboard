@@ -5,6 +5,7 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 import { fetchSnapshot } from "@/lib/queries";
 import { toAuditEvent, toCommand } from "@/lib/mappers";
 import { mergeCommands, mergeEvents } from "@/lib/merge";
+import { summarize } from "@/lib/summary";
 import type { AuditEvent, Command } from "@/types/draft";
 import { AuditTimeline } from "./AuditTimeline";
 import { CommandInput } from "./CommandInput";
@@ -139,6 +140,11 @@ export function Dashboard({
           >
             Audit timeline{selected ? `: ${selected.text}` : ""}
           </h2>
+          {selected && (
+            <p className="wrap-anywhere mb-3 text-sm font-medium">
+              {summarize(selected.status, selectedEvents)}
+            </p>
+          )}
           <AuditTimeline events={selectedEvents} />
         </section>
       </div>
