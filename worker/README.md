@@ -2,8 +2,10 @@
 
 Robotics and execution side of the auditable robot agent. Simulation only.
 
-**This is a foundation, not a working agent.** It holds tested building blocks. Nothing
-connects them yet: no command is claimed, planned, sent to the critic or executed.
+**This is a foundation, not a working agent.** It holds tested building blocks. The only
+connected path is a planner failure: `command_processor.py` claims one command, and if the
+planner cannot parse it, records `plan_generated` (error) and sets `received -> failed`.
+No plan is validated, sent to the critic or executed.
 
 ## Status
 
@@ -11,13 +13,13 @@ connects them yet: no command is claimed, planned, sent to the critic or execute
 |---|---|---|
 | Configuration | Implemented and tested | `config.py` |
 | Plan hashing | Implemented and tested | `plan_hasher.py`. Matches the shared Python/TypeScript reference vector |
-| Safety validator | Partially implemented | `safety_validator.py` is tested, but it is not called by anything, it checks position limits only, and its vocabulary is not agreed (see "Safety validator") |
+| Safety validator | Implemented and tested, not yet called | `safety_validator.py` checks the agreed action vocabulary, schema position limits, one action per joint and the 10-action cap (`validatorVersion` `"1.0"`). Nothing in the pipeline calls it yet. Position limits only: no velocity, effort or collision checks (see "Safety validator") |
 | Critic handling | Partially implemented | `critic_gate.py` builds the request and judges a response. **The HTTP call to `/api/critic` is not implemented** |
 | Execution gate | Partially implemented | `execution_gate.py` is a tested decision function. Nothing calls it and it executes nothing |
 | Execution | Not implemented | No movement code exists. Execution is to stay dry-run only until both gates are integrated |
-| Audit logging | Partially implemented | `supabase_client.py` can insert a command and an audit event. No status updates, no event sequence. **The write path has never been run against the database** |
-| Command claiming and the worker loop | Not implemented | The claim rule is decided in docs/schema-draft.md, but there is no code |
-| Planner | Not implemented, blocked | Needs the action vocabulary and a decision on the language model |
+| Audit logging | Implemented, offline tests only | `audit_store.py` is the canonical writer: claim a command, append one audit event (no retry), and conditional status updates checked against the agreed lifecycle. `supabase_client.py` is the older insert-only helper used by the smoke test. **Neither write path has been run against the database** |
+| Command processing | Partially implemented, offline tests only | `command_processor.py` processes ONE command per run (no loop). Planner failures are recorded end to end. A command the planner accepts is left `received` and claimed, with nothing written. **Never run against the database yet** |
+| Planner | Implemented and tested, deterministic | `planner.py` parses ASCII-only `set joint _1 to 0.25 rad` clauses separated by `;`. No language model |
 | Cyberwave connection | Implemented, read-only | `cyberwave_client.py` connects in simulation mode and reads the joint schema. It cannot move anything |
 
 Facts that must not be lost:
@@ -25,8 +27,10 @@ Facts that must not be lost:
 - No physical robot movement has been tested, and no Cyberwave simulation has been started.
 - Capabilities reported by the Cyberwave API have been read, not physically verified.
 - The validator is not a complete physical safety envelope.
-- The Supabase smoke test (the only script that writes) has not been executed. A read-only
-  check has: both tables are reachable and have the expected columns.
+- Two scripts write to Supabase: the one-time smoke test and `command_processor.py`. Both
+  need `--confirm-write`. The smoke test has not been executed, and `command_processor.py`
+  has never been run against the database: its tests use mocks and an in-memory fake
+  client. A read-only check has run: both tables are reachable and have the expected columns.
 
 ## Layout
 
@@ -35,12 +39,15 @@ Facts that must not be lost:
 | `config.py` | Loads settings from `worker/.env` or the environment. Never prints values |
 | `schemas.py` | Typed shapes mirroring `db/001_init.sql` (statuses, event types, rows) |
 | `cyberwave_client.py` | `SimulatedRobot`: connect in simulation mode, read joints. No movement |
-| `supabase_client.py` | `AuditStore`: insert into `commands` and `audit_events` |
+| `supabase_client.py` | `AuditStore`: insert into `commands` and `audit_events` (used by the smoke test) |
+| `audit_store.py` | Canonical writer: claim a command, append an audit event, conditional status update |
 | `plan_hasher.py` | RFC 8785 + SHA-256 hash of a plan's actions array |
 | `robot_profile.py` | SO-101 joint names and schema position limits used by the validator |
 | `safety_validator.py` | Deterministic validator for a plan's actions. Pure, never raises, fails closed |
 | `critic_gate.py` | Builds the critic request and judges a critic response. Pure, sends no request |
 | `execution_gate.py` | Allows only if validator and critic both passed the same plan. Executes nothing |
+| `planner.py` | Deterministic parser from command text to `set_joint` actions, or a structured planner error |
+| `command_processor.py` | Claim one command, plan it, record a planner failure. Manual run needs `--confirm-write` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
 | `discover_cyberwave_assets.py` | Manual script: read-only asset lookup, creates nothing |
@@ -52,12 +59,33 @@ directory**.
 
 ## Setup
 
-Python 3.12, virtual environment in `worker/.venv/`.
+Python 3.12, virtual environment in `worker/.venv/` (inside `worker/`, not at the repository
+root).
+
+| File | Contents |
+|---|---|
+| `requirements.txt` | runtime dependencies only |
+| `requirements-dev.txt` | `-r requirements.txt` plus the test runner, `pytest==9.2.0` |
+
+Runtime only:
 
 ```
 cd worker
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+Development (runtime plus tests), in PowerShell from the repository root:
+
+```
+cd worker
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+If PowerShell refuses to run `Activate.ps1` because of the execution policy, skip activation
+and call the interpreter directly: `.venv\Scripts\python.exe -m pip install -r
+requirements-dev.txt`, then `.venv\Scripts\python.exe -m pytest -q`.
 
 Create `worker/.env` (ignored by Git) with these variables. Names only, never commit
 values:
@@ -90,9 +118,12 @@ filter itself, so the registry id fails with "Asset not found". Details are in
 
 All from `worker/`.
 
-Unit tests (offline, safe to run any time):
+Unit tests (offline, safe to run any time). pytest runs every test, including the
+pytest-style ones in `tests/test_audit_store.py`; `unittest discover` runs only the
+`unittest.TestCase` classes:
 
 ```
+.venv\Scripts\python.exe -m pytest -q
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 ```
 
@@ -213,6 +244,13 @@ the `validator_result` event payload from docs/schema-draft.md.
 What it checks, for the SO-101 profile in `robot_profile.py`:
 
 - `actions` is a non-empty array of objects, with unique `actionId` values
+  (`DUPLICATE_ACTION_ID`)
+- at most 10 actions (`MAX_ACTIONS_EXCEEDED`, from `SO101_PROFILE.max_actions`, which must
+  equal `"maxActions"` in `shared/so101-limits.json`, the value the critic reads; a parity
+  test enforces it)
+- each joint is targeted by at most one action (`DUPLICATE_JOINT_TARGET`, reported on every
+  later action that repeats a known joint). This is a separate rule from
+  `DUPLICATE_ACTION_ID`
 - every action has `actionId`, `type` and `reason` as non-empty strings, and no `null`
 - only `set_joint` is accepted as an action type
 - `target` is one of the schema joint names `_1` to `_6`. No alias exists for other names
@@ -230,17 +268,22 @@ Both limits are inclusive: a value exactly at `lower` or `upper` passes. That fo
 usual meaning of joint limits and matches the critic mock, which rejects only values
 beyond its bound. It is the worker's reading, not a written agreement.
 
-Provisional behaviour, not yet agreed with the dashboard side. Each item keeps the safe
-choice until it is confirmed, and none of it should be treated as the external contract:
+How this lines up with docs/schema-draft.md ("Action vocabulary" and "Validator result"),
+which is the external contract:
 
-| Point | What the validator does now | What the contract says |
+| Point | What the validator does | Contract |
 |---|---|---|
-| Action vocabulary | accepts `set_joint` only | OPEN. `set_joint` and `stop` are placeholders |
-| Target names | accepts `_1` to `_6` only | OPEN. To come from `docs/robot-capabilities.md` |
-| `unit` | required, must be exactly `rad` | listed as optional, units OPEN |
-| Maximum actions | not enforced | `MAX_ACTIONS_EXCEEDED` is agreed, but no number |
-| Rule ids | adds `INVALID_PLAN`, `INVALID_FIELD_TYPE`, `DUPLICATE_ACTION_ID`, `UNEXPECTED_FIELD` | seven "initial" ids, which the validator also uses |
-| `validatorVersion` | `0.1.0` | a string, format OPEN |
+| Action vocabulary | accepts `set_joint` only | DECIDED: `set_joint` only |
+| Target names | accepts `_1` to `_6` only | DECIDED |
+| `unit` | required, must be exactly `rad` | DECIDED: mandatory, exactly `"rad"` |
+| Maximum actions | 10, enforced | DECIDED: 10 (same as the critic) |
+| One action per joint | `DUPLICATE_JOINT_TARGET` | DECIDED |
+| Rule ids | `AGREED_RULE_IDS` (eight, including `MAX_ACTIONS_EXCEEDED` and `DUPLICATE_JOINT_TARGET`) plus `INVALID_PLAN`, `INVALID_FIELD_TYPE`, `DUPLICATE_ACTION_ID`, `UNEXPECTED_FIELD` | all listed as agreed |
+| `validatorVersion` | `"1.0"` | DECIDED: the plain string `"1.0"`, bumped by hand when the rules change |
+
+The version moved from the provisional `"0.1.0"` to the agreed `"1.0"` together with
+`DUPLICATE_JOINT_TARGET` and the active cap. No `validator_result` event has been written
+yet, so no stored event carries the old version.
 
 ## Critic and execution gates
 
@@ -274,8 +317,81 @@ Open points in the critic contract:
 - No error kind is defined for a network error that is not a timeout. The worker writes
   `timeout` with a detail saying what happened. This is provisional.
 
-Not built yet: the planner, the HTTP call to `/api/critic`, command claiming, status
-updates, the audit events after `command_received`, and any execution.
+Not built yet: the HTTP call to `/api/critic`, the successful-plan path (`plan_generated`
+with a plan, `validator_result`, `critic_result`), and any execution.
+
+## Command processor
+
+`command_processor.process_one_command(worker_id)` handles at most one command:
+
+1. `audit_store.claim_next_command`. Nothing eligible: returns `no_command`, writes nothing.
+2. Plans `row["text"]` with `planner.plan_command`.
+3. Planner failure: appends `plan_generated` with
+   `{"outcome": "error", "error": {"kind", "detail"}}` (detail at most 200 characters), then,
+   **only if that write succeeded**, `set_command_status(received -> failed)`. The two kinds
+   (DECIDED in docs/schema-draft.md) are:
+   - `unsupported_command`: the text is not in the grammar below. Message
+     `Command not understood: nothing executed`.
+   - `planner_error`: any other planner failure (the text is not a string, or an internal
+     error). Message `Planning failed: nothing executed`.
+4. Planner success: writes nothing and returns `planned_not_processed`.
+
+Planner grammar: `set joint <_1.._6> to <decimal> rad`, up to 10 clauses separated by `;`.
+The whole command must be plain ASCII: Arabic-Indic or fullwidth digits, Unicode
+lookalike letters, non-breaking spaces and so on are rejected before parsing. Keywords are
+case-insensitive (ASCII only). Joint names and the unit are read from `SO101_PROFILE`.
+Empty clauses, other units, exponents, `nan`/`inf` and other joints are
+`unsupported_command`. Each action's `reason` is at most 200 characters. Out-of-limit values
+and a joint named twice are passed through unchanged: the validator rejects them
+(`JOINT_LIMIT_EXCEEDED`, `DUPLICATE_JOINT_TARGET`), and so does the critic.
+
+**Before a rehearsal**, check in the dashboard that no other `received` command is
+waiting. The claim takes the **oldest** eligible command, which may be an old test command
+rather than the one just typed, and whatever it claims is failed or stranded for good.
+
+**A command can be stranded.** The claim has no lease and no recovery, so the command stays
+`received` and claimed, and no later run picks it up, when:
+
+- the `plan_generated` write fails (stage `event_write`; status untouched; after a
+  `WriteError` the event may or may not exist),
+- the event is written but the status update fails (stage `status_update`), or
+- the planner accepts the command (`planned_not_processed`: the rest of the pipeline does
+  not exist yet, and a valid plan is deliberately NOT marked failed).
+
+`CommandProcessingError` carries `command_id`, `stage` (`claim`, `event_write` or
+`status_update`) and `event_written` (True, False, or None when unknown). Nothing is retried
+automatically, and nothing releases a claim.
+
+### Manual recovery
+
+Each step below is a deliberate write by a person, run once from `worker/`. Look first: in
+the dashboard, open the command and read its timeline and status.
+
+| What failed | What the timeline shows | What to do |
+|---|---|---|
+| `status_update` | one `plan_generated` error event, status still `received` | Set the status only. Do **not** write the event again. The update is conditional on `received`, so running it a second time changes nothing and raises `StateConflictError`. |
+| `status_update` with `StateConflictError` | the event, and a status other than `received` | Someone else changed the status. Leave it; investigate who. |
+| `event_write`, `event_written` None | check: the event may or may not be there | If the `plan_generated` error event is there, set the status only (row above). If not, write the event once, then set the status. Never write it without looking: `audit_events` rows cannot be deleted. |
+| `event_write`, `event_written` False | no `plan_generated` event | The request was never sent (for example the payload was rejected). Fix the cause before writing anything. |
+| `planned_not_processed` | no worker event, status `received`, `claimed_by` set | Nothing to recover automatically. It waits for the validator, critic and execution steps. Failing it by hand is a human decision, not something the worker does. |
+| `claim` | nothing | A row may have been claimed: look for a `received` command whose `claimed_by` is this worker id. |
+
+Setting the status by hand, after reading the timeline (replace the id):
+
+```
+.venv\Scripts\python.exe -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='failed')"
+```
+
+While a command has its `plan_generated` error event but is still `received`, the
+dashboard summary already reads "Command not understood: nothing executed" (events take
+priority over status in `src/lib/summary.ts`). The status column shows `received` until the
+status is fixed.
+
+Manual run (claims a real command and writes to Supabase):
+
+```
+.venv\Scripts\python.exe command_processor.py --confirm-write
+```
 
 ## Safety rules for this code
 

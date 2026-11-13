@@ -5,10 +5,13 @@ import raw from "../../shared/so101-limits.json" with { type: "json" };
 
 export type JointLimit = { readonly min: number; readonly max: number };
 
-function load(): { unit: string; limits: ReadonlyMap<string, JointLimit> } {
-  const { unit, joints } = raw as { unit: unknown; joints: unknown };
+function load(): { unit: string; limits: ReadonlyMap<string, JointLimit>; maxActions: number } {
+  const { unit, joints, maxActions } = raw as { unit: unknown; joints: unknown; maxActions: unknown };
   if (typeof unit !== "string" || unit.trim() === "") {
     throw new Error("so101-limits.json: unit must be a non-empty string");
+  }
+  if (typeof maxActions !== "number" || !Number.isInteger(maxActions) || maxActions < 1) {
+    throw new Error("so101-limits.json: maxActions must be a positive integer");
   }
   if (typeof joints !== "object" || joints === null || Array.isArray(joints)) {
     throw new Error("so101-limits.json: joints must be an object");
@@ -25,11 +28,14 @@ function load(): { unit: string; limits: ReadonlyMap<string, JointLimit> } {
     limits.set(name, Object.freeze({ min, max }));
   }
   if (limits.size === 0) throw new Error("so101-limits.json: no joints");
-  return { unit, limits };
+  return { unit, limits, maxActions };
 }
 
 const loaded = load();
 
 export const JOINT_UNIT: string = loaded.unit;
+// Maximum actions per plan. worker/robot_profile.py holds the same number;
+// worker/tests/test_safety_validator.py fails if the two differ.
+export const MAX_ACTIONS: number = loaded.maxActions;
 // A Map, not an object: "constructor" or "__proto__" must not look like joints.
 export const JOINT_LIMITS: ReadonlyMap<string, JointLimit> = loaded.limits;

@@ -39,8 +39,8 @@ class RobotProfile:
     # conversion is done: any other unit is rejected.
     joint_position_unit: str
     supported_action_types: frozenset[str]
-    # Maximum number of actions in one plan. None means "not agreed yet", and
-    # the MAX_ACTIONS_EXCEEDED rule is then not applied.
+    # Maximum number of actions in one plan. None means no cap, and the
+    # MAX_ACTIONS_EXCEEDED rule is then not applied.
     max_actions: int | None = None
 
 
@@ -61,5 +61,11 @@ SO101_PROFILE = RobotProfile(
     # no SDK call for arm twins and "move_forward" does not apply to a fixed
     # arm (docs/robot-capabilities.md section 5).
     supported_action_types=frozenset({"set_joint"}),
-    max_actions=None,
+    # Agreed cap (docs/schema-draft.md, "Action vocabulary"). It must equal
+    # "maxActions" in shared/so101-limits.json, which the critic reads; the
+    # parity tests in tests/test_safety_validator.py fail if they differ. Kept
+    # as a literal so this module does no file I/O. The planner and the
+    # validator both read it from here. With one action per joint a valid
+    # SO-101 plan has at most six actions; the cap is a guard.
+    max_actions=10,
 )
