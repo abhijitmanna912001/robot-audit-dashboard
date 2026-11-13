@@ -392,7 +392,7 @@ These are the deterministic validator's ids. The AI critic's rule ids are separa
 
 | Event | `payload` |
 |---|---|
-| `command_received` | `{}` |
+| `command_received` | `{ "source": "dashboard" }` |
 | `plan_generated` | `{ "plan": <planner output> }` |
 | `validator_result` | `{ "outcome": "pass" \| "fail", "planId": string, "validatorVersion": string, "errors": [{ "ruleId", "actionId", "field", "message" }] }` |
 | `critic_result` | `{ "outcome": "approve" \| "reject" \| "error", "planHash": string?, "response": <critic verdict>?, "error": { "kind": "http_status" \| "timeout" \| "invalid_body", "httpStatus": number?, "detail": string? }? }` |
