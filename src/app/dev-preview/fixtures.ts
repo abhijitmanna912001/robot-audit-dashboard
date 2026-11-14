@@ -3,7 +3,7 @@
 // deliberately breaks them to show the timeline never crashes on untrusted payloads.
 import type { AuditEvent, CommandStatus } from "@/types/draft";
 
-export type Scenario = { title: string; status: CommandStatus; events: AuditEvent[] };
+export type Scenario = { id: string; title: string; status: CommandStatus; events: AuditEvent[] };
 
 const PLAN_ID = "9d2e4a10-0000-0000-0000-000000000002";
 const HASH = "sha256:" + "ab".repeat(32);
@@ -67,7 +67,21 @@ const criticApprove = (s: string) =>
     },
   });
 
-export const scenarios: Scenario[] = [
+// Query value for "show every scenario". Lives here, not in the client picker, so the server page gets a real string.
+export const ALL = "all";
+
+const slug = (title: string) =>
+  title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+function withIds(list: Omit<Scenario, "id">[]): Scenario[] {
+  return list.map((sc) => ({ id: slug(sc.title), ...sc }));
+}
+
+// Ids are derived from the titles (unique, URL-safe) so the fixtures themselves stay as they are.
+export const scenarios: Scenario[] = withIds([
   {
     title: "Approved dry run",
     status: "completed",
@@ -275,4 +289,4 @@ export const scenarios: Scenario[] = [
       ev("bad", "something_new", "unknown event type", { note: "<b>raw</b>", blob: "y".repeat(3000) }),
     ],
   },
-];
+]);

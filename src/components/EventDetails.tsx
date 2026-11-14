@@ -11,6 +11,8 @@ import {
   readValidator,
 } from "@/lib/payload";
 import { text } from "@/lib/payload";
+import { ChevronRight } from "lucide-react";
+import { kindLabel } from "@/lib/kind-label";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 
@@ -18,7 +20,7 @@ import { CopyButton } from "./CopyButton";
 type Row = { label: string; value: string | string[]; copy?: boolean; mono?: boolean };
 
 // Mono is only for ids, hashes and rule ids.
-const MONO = new Set(["planId", "planHash", "critic planHash", "errors", "triggeredRules", "actions"]);
+const MONO = new Set(["planId", "planHash", "critic planHash", "errors", "triggeredRules", "actions", "raw kind"]);
 
 function add(rows: Row[], label: string, value: string | string[] | undefined, copy = false) {
   if (value === undefined || (Array.isArray(value) && value.length === 0)) return;
@@ -41,7 +43,8 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
     case "plan_generated": {
       const failure = readPlanFailure(e.payload);
       if (failure) {
-        add(rows, "error kind", failure.kind);
+        add(rows, "error", kindLabel(failure.kind));
+        add(rows, "raw kind", failure.kind);
         add(rows, "error detail", failure.detail);
         return { rows, dryRun: false };
       }
@@ -80,7 +83,8 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       add(rows, "triggeredRules", rules);
       add(rows, "planHash", c.planHash, true);
       if (c.responsePlanHash !== c.planHash) add(rows, "critic planHash", c.responsePlanHash, true);
-      add(rows, "error kind", c.error?.kind);
+      add(rows, "error", kindLabel(c.error?.kind));
+      add(rows, "raw kind", c.error?.kind);
       add(rows, "HTTP status", c.error?.httpStatus === undefined ? undefined : String(c.error.httpStatus));
       add(rows, "error detail", c.error?.detail);
       return { rows, dryRun: false };
@@ -98,6 +102,20 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
   }
 }
 
+// Native details/summary with our own chevron instead of the browser marker. Keyboard
+// behaviour (Tab, Enter, Space) is the browser's own.
+const summaryClass =
+  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-0.5 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden";
+
+function Chevron() {
+  return (
+    <ChevronRight
+      aria-hidden="true"
+      className="size-3.5 shrink-0 transition-transform duration-150 group-open:rotate-90"
+    />
+  );
+}
+
 export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | "payload"> }) {
   const { rows, dryRun, raw } = build(event);
   const type = (
@@ -106,11 +124,12 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
 
   if (raw !== undefined) {
     return (
-      <details className="mt-2 text-xs">
-        <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
+      <details className="group mt-2 text-xs">
+        <summary className={summaryClass}>
+          <Chevron />
           Raw payload
         </summary>
-        <div className="mt-1.5 space-y-1.5 rounded-ui-md bg-raised p-2">
+        <div className="mt-1.5 ml-5 space-y-1.5 rounded-ui-md bg-raised p-2">
           {type}
           <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
         </div>
@@ -118,8 +137,9 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
     );
   }
   return (
-    <details className="mt-2 text-xs">
-      <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
+    <details className="group mt-2 text-xs">
+      <summary className={summaryClass}>
+        <Chevron />
         Details
         {dryRun && (
           <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
@@ -127,7 +147,7 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
           </span>
         )}
       </summary>
-      <dl className="mt-1.5 space-y-1.5 rounded-ui-md bg-raised p-2">
+      <dl className="mt-1.5 ml-5 space-y-1.5 rounded-ui-md bg-raised p-2">
         <div className="min-w-0">
           <dt className="sr-only">event type</dt>
           <dd>{type}</dd>

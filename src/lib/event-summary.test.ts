@@ -30,8 +30,10 @@ test("plan_generated: caps at 3 actions then +N more", () => {
 });
 
 test("plan_generated: planner failure and missing pieces", () => {
-  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: "unsupported_command" } }))), "planner error · unsupported_command");
-  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: 5 } }))), "planner error");
+  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: "unsupported_command" } }))), "Not a supported command");
+  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: "planner_error" } }))), "Planner error");
+  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: "planner_errr" } }))), "Planner error · planner_errr");
+  assert.equal(text(summarizeEvent(e("plan_generated", { outcome: "error", error: { kind: 5 } }))), "Planner error");
   assert.equal(text(summarizeEvent(plan("p", { target: "_6" }))), "_6");
   assert.equal(text(summarizeEvent(plan("p", { value: 2, unit: "rad" }))), "2 rad");
   // hash only
@@ -99,7 +101,9 @@ test("critic reject and error", () => {
   assert.equal(text(summarizeEvent(e("critic_result", { outcome: "reject", response: { triggeredRules: ["a", "b", "c", "d", "e"] } }))), "a, b, c +2 more");
   assert.equal(summarizeEvent(e("critic_result", { outcome: "reject", response: { triggeredRules: [1, null] } })), undefined);
   assert.equal(summarizeEvent(e("critic_result", { outcome: "reject", planHash: H })), undefined);
-  assert.equal(text(summarizeEvent(e("critic_result", { outcome: "error", error: { kind: "http_status" } }))), "http_status");
+  assert.equal(text(summarizeEvent(e("critic_result", { outcome: "error", error: { kind: "http_status" } }))), "Critic returned an HTTP error");
+  assert.equal(text(summarizeEvent(e("critic_result", { outcome: "error", error: { kind: "timeout" } }))), "Critic timed out");
+  assert.equal(text(summarizeEvent(e("critic_result", { outcome: "error", error: { kind: "invalid_body" } }))), "Critic returned an invalid response");
   assert.equal(summarizeEvent(e("critic_result", { outcome: "error", error: { kind: 3 } })), undefined);
   assert.equal(summarizeEvent(e("critic_result", { outcome: "weird" })), undefined);
 });

@@ -124,7 +124,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           aria-describedby={`${helpId} ${countId}`}
           className="min-h-9 w-full min-w-0 resize-none bg-raised transition-[height] duration-150 sm:flex-1"
         />
-        <Button type="submit" disabled={submitting} className="w-full px-4 sm:w-auto">
+        <Button type="submit" disabled={submitting} className="w-full px-4 transition-colors duration-150 active:bg-primary/70 sm:w-auto">
           {submitting ? "Submitting..." : "Submit"}
         </Button>
       </div>
@@ -140,7 +140,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               setText(ex);
               setNotice(null);
             }}
-            className="inline-flex h-7 max-w-full items-center rounded-full border border-border px-3 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:bg-raised hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="inline-flex h-7 max-w-full items-center rounded-full border border-border px-3 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <span className="truncate">{ex}</span>
           </button>

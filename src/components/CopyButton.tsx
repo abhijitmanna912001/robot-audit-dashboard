@@ -1,37 +1,53 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-// Copies a short displayed value (a hash) to the clipboard. Display helper only.
+type State = "idle" | "copied" | "failed";
+
+// Copies a value (a hash) to the clipboard. Display helper only. It never throws: an
+// unavailable or failing Clipboard API shows a brief "Copy failed" state instead.
 export function CopyButton({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<State>("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(timer.current), []);
 
   async function copy() {
+    let next: State = "copied";
     try {
-      await navigator.clipboard.writeText(value);
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+        next = "failed";
+      } else {
+        await navigator.clipboard.writeText(value);
+      }
     } catch {
-      return; // clipboard unavailable (insecure context, permission): do nothing
+      next = "failed";
     }
-    setCopied(true);
+    setState(next);
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setCopied(false), 1500);
+    timer.current = setTimeout(() => setState("idle"), 1500);
   }
 
+  const Icon = state === "copied" ? Check : state === "failed" ? X : Copy;
+  const status = state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "";
   return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon-xs"
-      onClick={copy}
-      aria-label={copied ? `${label} copied` : `Copy ${label}`}
-      title={copied ? "Copied" : `Copy ${label}`}
-    >
-      {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-    </Button>
+    <>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        onClick={copy}
+        aria-label={`Copy ${label}`}
+        title={status || `Copy ${label}`}
+        className="text-muted-foreground transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted"
+      >
+        <Icon aria-hidden="true" />
+      </Button>
+      <span role="status" aria-live="polite" className="sr-only">
+        {status}
+      </span>
+    </>
   );
 }

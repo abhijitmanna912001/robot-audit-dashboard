@@ -200,6 +200,21 @@
     @apply font-sans;
     color-scheme: dark;
   }
+  /* Tailwind v4 resets buttons to cursor: default. Interactive things get a pointer,
+     disabled things get not-allowed (last, so it wins). */
+  button:not(:disabled),
+  [role="button"]:not(:disabled):not([aria-disabled="true"]),
+  [role="switch"]:not(:disabled),
+  [role="tab"]:not(:disabled),
+  summary,
+  label[for],
+  a[href] {
+    cursor: pointer;
+  }
+  :disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 
 /* New realtime events flash briefly (Dashboard clears the class after 1.5s). */

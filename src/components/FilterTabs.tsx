@@ -38,8 +38,8 @@ export function FilterTabs({
             aria-pressed={tab === t.id}
             onClick={() => onTab(t.id)}
             className={cn(
-              "h-7 px-1 text-xs sm:px-1.5 text-muted-foreground transition-colors duration-150",
-              tab === t.id && "bg-primary/15 text-foreground",
+              "h-7 px-1 text-xs sm:px-1.5 text-muted-foreground transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted",
+              tab === t.id && "bg-primary/15 text-foreground hover:bg-primary/25 active:bg-primary/30",
             )}
           >
             {t.label}
@@ -51,7 +51,7 @@ export function FilterTabs({
         role="switch"
         aria-checked={showTest}
         onClick={onShowTest}
-        className="inline-flex h-7 items-center gap-1.5 rounded-full px-0 text-xs sm:px-1 text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+        className="inline-flex h-7 items-center gap-1.5 rounded-full px-0 text-xs sm:px-1 text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground active:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 [&:hover>span:first-child]:border-primary/60"
       >
         <span
           aria-hidden="true"

@@ -12,6 +12,7 @@ import {
   readValidator,
   text,
 } from "./payload.ts";
+import { isKnownKind, kindLabel } from "./kind-label.ts";
 
 export const MAX_LINE = 120;
 const MAX_PIECE = 40;
@@ -83,7 +84,11 @@ function moreSuffix(shown: number, total: number): string {
 
 function planSummary(payload: unknown): EventSummary | undefined {
   const failure = readPlanFailure(payload);
-  if (failure) return { text: join(["planner error", piece(failure.kind)]) };
+  if (failure) {
+    // A known kind has its own label. An unknown one keeps a "Planner error" prefix for context.
+    const label = kindLabel(failure.kind);
+    return { text: join(label === undefined || !isKnownKind(failure.kind) ? ["Planner error", label] : [label]) };
+  }
   const plan = readPlan(payload);
   const parts = plan.actions.slice(0, MAX_ACTIONS).flatMap((a) => {
     const tail = [a.value === undefined ? undefined : `${a.value}`, piece(a.unit)]
@@ -137,7 +142,7 @@ function criticSummary(payload: unknown): EventSummary | undefined {
     return { text: clip(`${shown.join(", ")}${moreSuffix(MAX_RULES, c.triggeredRules.length + c.extraRules)}`, MAX_LINE) };
   }
   if (c.outcome === "error") {
-    const kind = piece(c.error?.kind);
+    const kind = kindLabel(c.error?.kind);
     return kind ? { text: kind } : undefined;
   }
   return undefined;
