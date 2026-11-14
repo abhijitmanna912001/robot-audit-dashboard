@@ -32,17 +32,42 @@ async function LoadedDashboard({ searchParams }: { searchParams: SearchParams })
   );
 }
 
+function Skeleton({ className }: { className: string }) {
+  return <div aria-hidden="true" className={`skeleton rounded-lg ${className}`} />;
+}
+
+// Loading state only: same shell as the dashboard, so the page does not jump.
+function LoadingShell() {
+  return (
+    <div role="status" aria-label="Loading" className="flex min-h-dvh flex-col">
+      <div className="sticky top-0 z-20 border-b border-border bg-background">
+        <div className="mx-auto flex min-h-14 w-full max-w-7xl items-center px-4 py-2 sm:px-6">
+          <Brand />
+        </div>
+      </div>
+      <div className="mx-auto grid w-full max-w-7xl flex-1 gap-6 px-4 py-4 sm:px-6 sm:py-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-24" />
+          <Skeleton className="h-8" />
+          <Skeleton className="h-16" />
+          <Skeleton className="h-16" />
+          <Skeleton className="h-16" />
+        </div>
+        <div className="flex flex-col gap-4">
+          <Skeleton className="h-16" />
+          <Skeleton className="h-10" />
+          <Skeleton className="h-20" />
+          <Skeleton className="h-64" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home({ searchParams }: { searchParams: SearchParams }) {
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 sm:p-6">
-      <Suspense
-        fallback={
-          <>
-            <Brand />
-            <p className="text-sm text-muted-foreground">Loading...</p>
-          </>
-        }
-      >
+    <main className="w-full">
+      <Suspense fallback={<LoadingShell />}>
         <LoadedDashboard searchParams={searchParams} />
       </Suspense>
     </main>

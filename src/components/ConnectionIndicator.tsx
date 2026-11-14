@@ -9,7 +9,7 @@ const dot: Record<ConnectionStatus, string> = {
 export function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-muted-foreground"
+      className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-xs text-muted-foreground"
       role="status"
     >
       <span className={`size-2 rounded-full ${dot[status]}`} />

@@ -16,7 +16,7 @@ const styles: Record<CommandStatus, string> = {
 
 export function StatusBadge({ status }: { status: CommandStatus }) {
   return (
-    <Badge className={cn("h-auto px-2.5 py-0.5 capitalize", styles[status])}>
+    <Badge className={cn("h-auto px-2 py-px text-xs capitalize", styles[status])}>
       {status === "executing" && (
         <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
       )}

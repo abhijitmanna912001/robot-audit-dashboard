@@ -1,6 +1,5 @@
 import {
   Check,
-  ChevronRight,
   CircleDashed,
   ClipboardList,
   FlaskConical,
@@ -58,24 +57,16 @@ function toneOf(stage: StageName, state: StageState): Tone {
   }
 }
 
-const toneStyles: Record<Tone, string> = {
-  ok: "border-status-completed-accent/40 bg-status-completed-accent/10",
-  blocked: "border-status-rejected-accent/60 bg-status-rejected-accent/15",
-  broke: "border-status-failed-accent/60 bg-status-failed-accent/15",
-  info: "border-status-info-accent/50 bg-status-info-accent/10",
-  idle: "border-dashed border-border bg-transparent text-muted-foreground",
-};
-
-const toneIcon: Record<Tone, string> = {
-  ok: "text-status-completed-accent",
-  blocked: "text-status-rejected-accent",
-  broke: "text-status-failed-accent",
-  info: "text-status-info-accent",
-  idle: "text-muted-foreground",
+const circle: Record<Tone, string> = {
+  ok: "border-status-completed-accent bg-status-completed-accent/15 text-status-completed-accent",
+  blocked: "border-status-rejected-accent bg-status-rejected-accent/15 text-status-rejected-accent",
+  broke: "border-status-failed-accent bg-status-failed-accent/15 text-status-failed-accent",
+  info: "border-status-info-accent bg-status-info-accent/15 text-status-info-accent",
+  idle: "border-dashed border-border bg-surface text-muted-foreground",
 };
 
 function StateGlyph({ state }: { state: StageState }) {
-  const cls = "size-3.5 shrink-0";
+  const cls = "size-3 shrink-0";
   switch (state) {
     case "passed":
       return <Check aria-hidden="true" className={cls} />;
@@ -92,35 +83,44 @@ function StateGlyph({ state }: { state: StageState }) {
   }
 }
 
+// One horizontal stepper: a continuous line behind four circles (sm and up). Below sm it is
+// a compact 2x2 grid with no line. The state word is always written out.
 export function PipelineStrip({ stages }: { stages: PipelineStage[] }) {
   return (
-    <ol aria-label="Pipeline" className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
-      {stages.map(({ stage, state }, i) => {
+    <ol
+      aria-label="Pipeline"
+      className="relative grid grid-cols-2 gap-x-3 gap-y-3 rounded-lg bg-surface px-3 py-3 sm:grid-cols-4"
+    >
+      <span
+        aria-hidden="true"
+        className="absolute top-7 right-[12.5%] left-[12.5%] hidden h-px bg-border sm:block"
+      />
+      {stages.map(({ stage, state }) => {
         const tone = toneOf(stage, state);
         const Icon = stageIcon[stage];
         return (
           <li
             key={stage}
-            className={cn(
-              "relative flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs transition-colors duration-150",
-              toneStyles[tone],
-            )}
+            className="relative flex min-w-0 items-center gap-2 sm:flex-col sm:gap-1.5 sm:text-center"
           >
-            {i < stages.length - 1 && (
-              <ChevronRight
-                aria-hidden="true"
-                className={cn(
-                  "absolute top-1/2 -right-3.5 size-3 -translate-y-1/2 text-muted-foreground",
-                  i % 2 === 1 && "max-sm:hidden",
-                )}
-              />
-            )}
-            <Icon aria-hidden="true" className={cn("size-4 shrink-0", toneIcon[tone])} />
+            <span
+              className={cn(
+                "flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors duration-150",
+                circle[tone],
+              )}
+            >
+              <Icon aria-hidden="true" className="size-4" />
+            </span>
             <span className="min-w-0">
               <span className="block truncate text-sm font-medium text-foreground">
                 {stageLabel[stage]}
               </span>
-              <span className={cn("flex items-center gap-1", tone === "idle" ? "" : "text-foreground/80")}>
+              <span
+                className={cn(
+                  "flex items-center gap-1 text-xs sm:justify-center",
+                  tone === "idle" ? "text-muted-foreground" : "text-foreground/80",
+                )}
+              >
                 <StateGlyph state={state} />
                 {stateLabel[state]}
               </span>

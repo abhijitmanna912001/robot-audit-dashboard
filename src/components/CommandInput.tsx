@@ -1,15 +1,18 @@
 "use client";
 
 import { useId, useRef, useState } from "react";
+import { Info } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 
 const MAX_TEXT_LENGTH = 500; // mirrors the route; the server stays the authority
 const GENERIC = "Could not submit the command. Nothing was saved. Try again.";
 const NETWORK = "Could not reach the server. Try again.";
 const SAVED_AUDIT_FAILED = "Command saved, but its audit event failed. Do not resubmit.";
+
+const FORMAT_HELP =
+  "Format: set joint _1 to 0.25 rad; joints _1 to _6; unit rad; separate several with ;";
 
 const EXAMPLES = [
   "set joint _1 to 0.25 rad",
@@ -32,6 +35,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [focused, setFocused] = useState(false); // display only: grows the textarea
   const inFlight = useRef(false);
   const id = useId();
   const helpId = `${id}-help`;
@@ -86,72 +90,88 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
     }
   }
 
+  const expanded = focused || text.length > 0;
+  const showCount = focused || text.length > 400;
   return (
-    <form onSubmit={handleSubmit}>
-      <Card size="sm">
-        <CardContent className="flex flex-col gap-3">
-          <label htmlFor={id} className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            New command
-          </label>
-          <Textarea
-            id={id}
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
+    <form
+      onSubmit={handleSubmit}
+      // Focus is "inside the composer" while it stays on the textarea or a chip.
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
+      }}
+      className="flex flex-col gap-2 rounded-lg bg-surface p-3"
+    >
+      <label htmlFor={id} className="sr-only">
+        New command
+      </label>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <Textarea
+          id={id}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setNotice(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              void handleSubmit(e);
+            }
+          }}
+          rows={expanded ? 3 : 1}
+          maxLength={MAX_TEXT_LENGTH}
+          placeholder="Type a command for the robot..."
+          aria-describedby={`${helpId} ${countId}`}
+          className="min-h-9 w-full min-w-0 resize-none bg-raised transition-[height] duration-150 sm:flex-1"
+        />
+        <Button type="submit" disabled={submitting} className="w-full px-4 sm:w-auto">
+          {submitting ? "Submitting..." : "Submit"}
+        </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span>Try:</span>
+        {EXAMPLES.map((ex) => (
+          <Button
+            key={ex}
+            type="button"
+            variant="ghost"
+            size="xs"
+            // Keep focus in the textarea so the composer does not collapse when a chip is used.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setText(ex);
               setNotice(null);
             }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
-                void handleSubmit(e);
-              }
-            }}
-            rows={3}
-            maxLength={MAX_TEXT_LENGTH}
-            placeholder="Type a command for the robot..."
-            aria-describedby={`${helpId} ${countId}`}
-            className="min-h-20 w-full resize-y"
-          />
-          <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <p id={helpId} className="min-w-0 flex-1 basis-64">
-              Format: set joint _1 to 0.25 rad; joints _1 to _6; unit rad; separate several with ;
-            </p>
-            <span id={countId} className="tabular-nums">
-              {text.length}/{MAX_TEXT_LENGTH}
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-2" aria-label="Examples">
-            {EXAMPLES.map((ex) => (
-              <button
-                key={ex}
-                type="button"
-                onClick={() => {
-                  setText(ex);
-                  setNotice(null);
-                }}
-                className="wrap-anywhere rounded-full border border-border bg-muted/40 px-3 py-1 text-left text-xs text-foreground/90 outline-none transition-colors duration-150 hover:bg-accent/60 focus-visible:ring-3 focus-visible:ring-ring/50"
-              >
-                {ex}
-              </button>
-            ))}
-          </div>
-          {notice && (
-            <p
-              role="alert"
-              className={`text-sm ${
-                notice.kind === "warning" ? "text-status-failed-accent" : "text-destructive"
-              }`}
-            >
-              {notice.message}
-            </p>
-          )}
-          <div className="flex items-center justify-end gap-3">
-            <span className="hidden text-xs text-muted-foreground sm:inline">Cmd/Ctrl+Enter to submit</span>
-            <Button type="submit" disabled={submitting} className="px-4">
-              {submitting ? "Submitting..." : "Submit"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+            className="h-auto max-w-full min-w-0 py-1 text-left whitespace-normal text-muted-foreground transition-colors duration-150 hover:text-foreground"
+          >
+            {ex}
+          </Button>
+        ))}
+        <span
+          id={countId}
+          aria-hidden={!showCount}
+          className={`ml-auto tabular-nums ${showCount ? "" : "invisible"}`}
+        >
+          {text.length}/{MAX_TEXT_LENGTH}
+        </span>
+      </div>
+      <p
+        id={helpId}
+        className={`flex items-start gap-1.5 text-xs text-muted-foreground ${focused ? "" : "sr-only"}`}
+      >
+        <Info aria-hidden="true" className="mt-px size-3 shrink-0" />
+        {FORMAT_HELP}
+      </p>
+      {notice && (
+        <p
+          role="alert"
+          className={`text-sm ${
+            notice.kind === "warning" ? "text-status-failed-accent" : "text-destructive"
+          }`}
+        >
+          {notice.message}
+        </p>
+      )}
     </form>
   );
 }

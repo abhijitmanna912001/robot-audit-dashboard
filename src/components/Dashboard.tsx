@@ -5,19 +5,14 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 import { fetchSnapshot } from "@/lib/queries";
 import { toAuditEvent, toCommand } from "@/lib/mappers";
 import { mergeCommands, mergeEvents } from "@/lib/merge";
-import { bannerTone, derivePipeline } from "@/lib/pipeline";
-import { summarize } from "@/lib/summary";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { COMMAND_STATUSES, type AuditEvent, type Command, type CommandStatus } from "@/types/draft";
-import { AuditTimeline } from "./AuditTimeline";
+import { filterCommands, statusCounts, type Tab } from "@/lib/command-filter";
+import type { AuditEvent, Command } from "@/types/draft";
+import { CaseFile, sectionLabel } from "./CaseFile";
 import { CommandInput } from "./CommandInput";
 import { CommandList } from "./CommandList";
 import type { ConnectionStatus } from "./ConnectionIndicator";
-import { DashboardHeader } from "./Header";
-import { PipelineStrip } from "./PipelineStrip";
-import { SummaryBanner } from "./SummaryBanner";
-import { LocalTime } from "./LocalTime";
+import { FilterTabs } from "./FilterTabs";
+import { TopBar } from "./Header";
 import { isTestCommand } from "./test-commands";
 
 export function Dashboard({
@@ -47,6 +42,7 @@ export function Dashboard({
   );
   const [loadError, setLoadError] = useState(initialError);
   const [showTest, setShowTest] = useState(false); // display filter only, off by default
+  const [tab, setTab] = useState<Tab>("all"); // display filter only
   const refetchRef = useRef<() => Promise<void>>(async () => {});
   // Ids of events that just arrived over Realtime, highlighted for 1.5s. Display only.
   const [freshIds, setFreshIds] = useState<ReadonlySet<string>>(new Set());
@@ -143,88 +139,64 @@ export function Dashboard({
   const selectedEvents = events.filter((e) => e.commandId === selectedId);
 
   // Display only: the commands state and Realtime merge are untouched. The selected
-  // command is never hidden, so the open timeline always keeps its row.
+  // command is never hidden, so the open case file always keeps its row.
   const hiddenTestCount = showTest
     ? 0
     : commands.filter((c) => isTestCommand(c.text) && c.id !== selectedId).length;
-  const visibleCommands = showTest
-    ? commands
-    : commands.filter((c) => !isTestCommand(c.text) || c.id === selectedId);
+  const visibleCommands = filterCommands(commands, { tab, showTest, selectedId });
+  // Top-bar counts follow the test-command toggle but not the tab, so picking a tab does not
+  // blank the other statuses.
+  const counts = statusCounts(filterCommands(commands, { tab: "all", showTest, selectedId }));
 
-  // Counts follow the list: same commands as shown (test commands excluded while the toggle
-  // is off, the selected one always included), so the numbers match the rows.
-  const counts = Object.fromEntries(COMMAND_STATUSES.map((st) => [st, 0])) as Record<
-    CommandStatus,
-    number
-  >;
-  for (const c of visibleCommands) if (c.status in counts) counts[c.status] += 1;
+  const emptyText =
+    commands.length === 0
+      ? "No commands yet. Type one above and it will appear here."
+      : tab === "attention"
+        ? "Nothing needs attention."
+        : tab === "completed"
+          ? "No completed commands yet."
+          : "No commands to show.";
 
-  const heading = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
   return (
-    <>
-      <DashboardHeader status={status} counts={counts} />
-      {loadError && (
-        <p role="alert" className="text-xs text-destructive">
-          Could not load or refresh data
-        </p>
-      )}
-      <CommandInput onSubmitted={handleSubmitted} />
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-        <section className="min-w-0">
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className={heading}>Commands</h2>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              aria-pressed={showTest}
-              onClick={() => setShowTest((v) => !v)}
-              className="transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {showTest ? "Hide test commands" : "Show test commands"}
-            </Button>
-          </div>
+    <div className="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
+      <TopBar status={status} counts={counts} />
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-4 sm:px-6 sm:py-6 lg:grid lg:grid-cols-[380px_minmax(0,1fr)] lg:gap-6 lg:py-6">
+        {loadError && (
+          <p role="alert" className="text-xs text-destructive lg:col-span-2">
+            Could not load or refresh data
+          </p>
+        )}
+        <section aria-label="Commands" className="flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+          <CommandInput onSubmitted={handleSubmitted} />
+          <FilterTabs
+            tab={tab}
+            onTab={setTab}
+            showTest={showTest}
+            onShowTest={() => setShowTest((v) => !v)}
+          />
           {hiddenTestCount > 0 && (
-            <p className="mb-2 text-xs tabular-nums text-muted-foreground" role="status">
+            <p className="text-xs tabular-nums text-muted-foreground" role="status">
               {hiddenTestCount} test {hiddenTestCount === 1 ? "command" : "commands"} hidden
             </p>
           )}
+          <h2 className={sectionLabel}>Commands</h2>
           <CommandList
             commands={visibleCommands}
             selectedId={selectedId ?? undefined}
             onSelect={select}
+            emptyText={emptyText}
           />
         </section>
-        <section className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-4 lg:-mx-1 lg:max-h-[calc(100dvh-2rem)] lg:self-start lg:overflow-y-auto lg:px-1">
-          <h2 className={heading}>Audit timeline</h2>
-          {selected && (
-            <>
-              <div className="min-w-0">
-                <p
-                  className="line-clamp-2 wrap-anywhere text-base font-semibold leading-snug"
-                  title={selected.text}
-                >
-                  {selected.text}
-                </p>
-                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-                  <span className="font-mono">{selected.id.slice(0, 8)}</span>
-                  <LocalTime iso={selected.createdAt} />
-                </div>
-              </div>
-              <SummaryBanner
-                text={summarize(selected.status, selectedEvents)}
-                tone={bannerTone(selected.status, selectedEvents)}
-              />
-              <PipelineStrip stages={derivePipeline(selectedEvents)} />
-            </>
+        <section className="min-w-0 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+          {selected ? (
+            <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />
+          ) : (
+            <p className="rounded-lg bg-surface px-4 py-8 text-center text-sm text-muted-foreground">
+              Select a command to see its case file.
+            </p>
           )}
-          <Card size="sm">
-            <CardContent>
-              <AuditTimeline events={selectedEvents} highlightIds={freshIds} />
-            </CardContent>
-          </Card>
         </section>
       </div>
-    </>
+    </div>
   );
 }

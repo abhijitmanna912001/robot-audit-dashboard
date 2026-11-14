@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { AuditEvent } from "@/types/draft";
 import { badgeVariants } from "@/components/ui/badge";
-import { actionTargets, summarizeEvent } from "@/lib/event-summary";
+import { actionTargets, isRedundant, summarizeEvent } from "@/lib/event-summary";
 import { getMarker, type Marker } from "@/lib/outcome";
 import { readPlanFailure, text } from "@/lib/payload";
 import { cn } from "@/lib/utils";
@@ -75,6 +75,7 @@ export function AuditTimeline({
         const Icon = icons[e.eventType as string] ?? CircleHelp;
         const last = i === events.length - 1;
         const line = summarizeEvent(e, targets);
+        const title = text(e.message) ?? text(e.eventType) ?? "Unknown event";
         return (
           <li
             key={e.id}
@@ -90,34 +91,33 @@ export function AuditTimeline({
             <span
               aria-hidden="true"
               className={cn(
-                "absolute top-0 left-0 flex size-8 items-center justify-center rounded-full border-2 bg-card",
+                "absolute top-0 left-0 flex size-8 items-center justify-center rounded-full border-2 bg-raised",
                 nodeStyles[nodeTone(e, marker)],
               )}
             >
               <Icon className="size-4" />
             </span>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1">
-              <p className="wrap-anywhere min-w-0 text-sm font-medium leading-snug">
-                {text(e.message) ?? text(e.eventType) ?? "unknown event"}
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-1">
+              <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm font-medium leading-snug">
+                {title}
               </p>
-              {marker && (
-                <span
-                  className={cn(
-                    badgeVariants(),
-                    "h-auto px-2 py-0.5 text-[0.7rem] uppercase tracking-wide",
-                    markerStyles[marker],
-                  )}
-                >
-                  {marker}
-                </span>
-              )}
+              <div className="flex shrink-0 items-center gap-2">
+                {marker && (
+                  <span
+                    className={cn(
+                      badgeVariants(),
+                      "h-auto px-2 py-px text-xs uppercase tracking-wide",
+                      markerStyles[marker],
+                    )}
+                  >
+                    {marker}
+                  </span>
+                )}
+                <LocalTime iso={e.createdAt} className="text-xs text-muted-foreground" />
+              </div>
             </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
-              <span className="wrap-anywhere font-mono">{text(e.eventType) ?? "unknown"}</span>
-              <LocalTime iso={e.createdAt} />
-            </div>
-            {line && (
-              <p className="wrap-anywhere mt-1 font-mono text-xs text-foreground/80">{line}</p>
+            {line && !isRedundant(title, line) && (
+              <p className="wrap-anywhere mt-0.5 text-sm text-muted-foreground">{line}</p>
             )}
             <EventDetails event={e} />
           </li>

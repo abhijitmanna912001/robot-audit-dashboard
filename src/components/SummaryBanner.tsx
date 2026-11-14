@@ -36,12 +36,12 @@ export function SummaryBanner({ text, tone }: { text: string; tone: BannerTone }
   const t = tones[tone];
   const Icon = t.icon;
   return (
-    <div role="status" aria-live="polite" className={cn("flex items-start gap-3 rounded-xl border px-4 py-3", t.box)}>
+    <div role="status" aria-live="polite" className={cn("flex items-center gap-3 rounded-lg border px-3 py-2", t.box)}>
       <Icon
         aria-hidden="true"
-        className={cn("mt-0.5 size-5 shrink-0", t.iconColor, tone === "running" && "animate-spin")}
+        className={cn("size-4 shrink-0", t.iconColor, tone === "running" && "animate-spin")}
       />
-      <p className="wrap-anywhere min-w-0 text-sm font-medium">{text}</p>
+      <p className="wrap-anywhere min-w-0 text-sm font-medium leading-snug">{text}</p>
     </div>
   );
 }

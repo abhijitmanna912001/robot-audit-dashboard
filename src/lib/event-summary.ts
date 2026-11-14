@@ -98,3 +98,14 @@ export function summarizeEvent(e: EventLike, targets?: ActionTargets): string | 
       return undefined;
   }
 }
+
+// True when the summary only repeats the title (ignoring case and punctuation), so the
+// timeline can hide the second line. Both are plain strings; anything else is not redundant.
+const norm = (v: string) => v.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+export function isRedundant(title: unknown, summary: unknown): boolean {
+  if (typeof title !== "string" || typeof summary !== "string") return false;
+  const t = norm(title);
+  const s = norm(summary);
+  return s !== "" && t !== "" && ` ${t} `.includes(` ${s} `);
+}

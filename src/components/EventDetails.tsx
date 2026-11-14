@@ -10,14 +10,19 @@ import {
   readSource,
   readValidator,
 } from "@/lib/payload";
+import { text } from "@/lib/payload";
+import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 
 // `copy` adds a copy button next to a short single-line value (the plan hash).
-type Row = { label: string; value: string | string[]; copy?: boolean };
+type Row = { label: string; value: string | string[]; copy?: boolean; mono?: boolean };
+
+// Mono is only for ids, hashes and rule ids.
+const MONO = new Set(["planId", "planHash", "critic planHash", "errors", "triggeredRules", "actions"]);
 
 function add(rows: Row[], label: string, value: string | string[] | undefined, copy = false) {
   if (value === undefined || (Array.isArray(value) && value.length === 0)) return;
-  rows.push({ label, value, copy: copy && typeof value === "string" });
+  rows.push({ label, value, copy: copy && typeof value === "string", mono: MONO.has(label) });
 }
 
 const orDash = (v: string | number | undefined) => (v === undefined ? "?" : String(v));
@@ -95,24 +100,26 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
 
 export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | "payload"> }) {
   const { rows, dryRun, raw } = build(event);
+  const type = (
+    <p className="font-mono text-xs text-muted-foreground">{text(event.eventType) ?? "unknown"}</p>
+  );
 
   if (raw !== undefined) {
     return (
       <details className="mt-2 text-xs">
-        <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+        <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
           Raw payload
         </summary>
-        <pre className="mt-1.5 whitespace-pre-wrap wrap-anywhere rounded-lg border border-border bg-muted/40 p-2 font-mono">
-          {raw}
-        </pre>
+        <div className="mt-1.5 space-y-1.5 rounded-lg bg-raised p-2">
+          {type}
+          <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
+        </div>
       </details>
     );
   }
-  if (rows.length === 0 && !dryRun) return null;
-
   return (
     <details className="mt-2 text-xs">
-      <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+      <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
         Details
         {dryRun && (
           <span className="ml-2 rounded-full bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
@@ -120,11 +127,15 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
           </span>
         )}
       </summary>
-      <dl className="mt-1.5 space-y-1.5 rounded-lg border border-border bg-muted/40 p-2">
+      <dl className="mt-1.5 space-y-1.5 rounded-lg bg-raised p-2">
+        <div className="min-w-0">
+          <dt className="sr-only">event type</dt>
+          <dd>{type}</dd>
+        </div>
         {rows.map((r) => (
           <div key={r.label} className="min-w-0">
             <dt className="text-muted-foreground">{r.label}</dt>
-            <dd className="wrap-anywhere flex min-w-0 items-start gap-1 font-mono">
+            <dd className={cn("wrap-anywhere flex min-w-0 items-start gap-1", r.mono && "font-mono")}>
               {Array.isArray(r.value) ? (
                 <ul className="min-w-0 list-inside list-disc">
                   {r.value.map((line, i) => (

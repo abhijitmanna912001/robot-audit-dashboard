@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { actionTargets, summarizeEvent } from "./event-summary.ts";
+import { actionTargets, isRedundant, summarizeEvent } from "./event-summary.ts";
 
 const e = (eventType: unknown, payload: unknown) => ({ eventType, payload });
 const act = (id: string, target: string, value: number) => ({ actionId: id, type: "set_joint", target, value, unit: "rad" });
@@ -100,4 +100,17 @@ test("actionTargets: ignores bad plans and duplicates", () => {
   const m = actionTargets([plan(act("a1", "_1", 1), act("a1", "_2", 1)), e("plan_generated", null), e("x", {}), null as never]);
   assert.equal(m.get("a1"), "_1");
   assert.equal(m.size, 1);
+});
+
+test("isRedundant: only when the summary repeats the title", () => {
+  assert.equal(isRedundant("Critic approved", "approve"), false);
+  assert.equal(isRedundant("Execution started", "dry run"), false);
+  assert.equal(isRedundant("Dry run completed", "dry run"), true);
+  assert.equal(isRedundant("Command received", "command received."), true);
+  assert.equal(isRedundant("Validator passed", "pass · v1"), false);
+  assert.equal(isRedundant("x", ""), false);
+  assert.equal(isRedundant("", "x"), false);
+  assert.equal(isRedundant(null, "x"), false);
+  assert.equal(isRedundant("x", undefined), false);
+  assert.equal(isRedundant("!!!", "???"), false);
 });

@@ -1,3 +1,6 @@
+"use client";
+
+import { useRef } from "react";
 import { Inbox } from "lucide-react";
 import type { Command, CommandStatus } from "@/types/draft";
 import { cn } from "@/lib/utils";
@@ -21,24 +24,38 @@ export function CommandList({
   commands,
   selectedId,
   onSelect,
+  emptyText = "No commands yet. Type one above and it will appear here.",
 }: {
   commands: Command[];
   selectedId?: string;
   onSelect: (id: string) => void;
+  emptyText?: string;
 }) {
+  const list = useRef<HTMLUListElement>(null);
+
+  // Up/Down move focus between rows. Tab still works; this is only a shortcut.
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const rows = Array.from(list.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    const i = rows.indexOf(document.activeElement as HTMLButtonElement);
+    if (i === -1) return;
+    const next = rows[i + (e.key === "ArrowDown" ? 1 : -1)];
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
+  }
+
   if (commands.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center">
-        <Inbox aria-hidden="true" className="size-8 text-muted-foreground" />
-        <p className="text-sm font-medium">No commands yet</p>
-        <p className="text-xs text-muted-foreground">
-          Type a command above. It will appear here and move through the pipeline.
-        </p>
+      <div className="flex flex-col items-center gap-2 rounded-lg bg-surface px-4 py-8 text-center">
+        <Inbox aria-hidden="true" className="size-6 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">{emptyText}</p>
       </div>
     );
   }
   return (
-    <ul className="flex flex-col gap-2">
+    <ul ref={list} onKeyDown={onKeyDown} className="flex flex-col gap-1">
       {commands.map((c) => {
         const selected = c.id === selectedId;
         return (
@@ -48,23 +65,21 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block w-full min-w-0 rounded-xl border border-l-4 p-3 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/50",
+                "block min-h-16 w-full min-w-0 rounded-lg border-l-[3px] px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
                 leftBorder[c.status],
                 selected
-                  ? "border-y-primary border-r-primary bg-primary/10 ring-2 ring-primary/60"
-                  : "border-y-border border-r-border bg-card hover:bg-accent/50",
+                  ? "bg-primary/15 ring-2 ring-primary"
+                  : "bg-surface hover:bg-raised",
               )}
             >
-              <div className="flex min-w-0 items-start justify-between gap-2">
-                <span className="line-clamp-2 min-w-0 flex-1 wrap-anywhere" title={c.text}>
-                  {c.text}
-                </span>
+              <span className="block truncate font-medium" title={c.text}>
+                {c.text}
+              </span>
+              <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                 <StatusBadge status={c.status} />
-              </div>
-              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
                 <span className="font-mono">{shortId(c.id)}</span>
                 <LocalTime iso={c.createdAt} />
-              </div>
+              </span>
             </button>
           </li>
         );
