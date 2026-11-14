@@ -98,7 +98,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
         <p
           role="alert"
           className={`text-sm ${
-            notice.kind === "warning" ? "text-status-rejected-foreground" : "text-destructive"
+            notice.kind === "warning" ? "text-status-failed-accent" : "text-destructive"
           }`}
         >
           {notice.message}

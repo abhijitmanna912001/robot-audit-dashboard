@@ -84,6 +84,57 @@ export const scenarios: Scenario[] = [
     ],
   },
   {
+    title: "Real execution completed (not a dry run)",
+    status: "completed",
+    events: [
+      received("real"),
+      planned("real", 0.5),
+      validatorPass("real"),
+      criticApprove("real"),
+      ev("real", "execution_started", "Execution started", { dryRun: false }),
+      ev("real", "execution_completed", "Execution completed", {
+        dryRun: false,
+        summary: "1 action executed",
+      }),
+    ],
+  },
+  {
+    title: "Execution failed",
+    status: "failed",
+    events: [
+      received("xfail"),
+      planned("xfail", 0.5),
+      validatorPass("xfail"),
+      criticApprove("xfail"),
+      ev("xfail", "execution_started", "Execution started", { dryRun: false }),
+      ev("xfail", "execution_failed", "Execution failed", {
+        dryRun: false,
+        error: "the simulation stopped before the action finished",
+      }),
+    ],
+  },
+  {
+    title: "Executing (started, not finished)",
+    status: "executing",
+    events: [
+      received("run"),
+      planned("run", 0.5),
+      validatorPass("run"),
+      criticApprove("run"),
+      ev("run", "execution_started", "Execution started", { dryRun: true }),
+    ],
+  },
+  {
+    title: "Approved, waiting for execution",
+    status: "approved",
+    events: [received("appr"), planned("appr", 0.5), validatorPass("appr"), criticApprove("appr")],
+  },
+  {
+    title: "Waiting for the worker",
+    status: "received",
+    events: [received("wait")],
+  },
+  {
     title: "Validator rejection",
     status: "rejected",
     events: [

@@ -1,9 +1,9 @@
 export type ConnectionStatus = "live" | "connecting" | "disconnected";
 
 const dot: Record<ConnectionStatus, string> = {
-  live: "bg-status-completed-foreground",
-  connecting: "bg-status-rejected-foreground",
-  disconnected: "bg-destructive",
+  live: "bg-status-completed-accent",
+  connecting: "bg-status-failed-accent",
+  disconnected: "bg-status-rejected-accent",
 };
 
 export function ConnectionIndicator({ status }: { status: ConnectionStatus }) {

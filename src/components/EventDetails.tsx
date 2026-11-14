@@ -10,12 +10,14 @@ import {
   readSource,
   readValidator,
 } from "@/lib/payload";
+import { CopyButton } from "./CopyButton";
 
-type Row = { label: string; value: string | string[] };
+// `copy` adds a copy button next to a short single-line value (the plan hash).
+type Row = { label: string; value: string | string[]; copy?: boolean };
 
-function add(rows: Row[], label: string, value: string | string[] | undefined) {
+function add(rows: Row[], label: string, value: string | string[] | undefined, copy = false) {
   if (value === undefined || (Array.isArray(value) && value.length === 0)) return;
-  rows.push({ label, value });
+  rows.push({ label, value, copy: copy && typeof value === "string" });
 }
 
 const orDash = (v: string | number | undefined) => (v === undefined ? "?" : String(v));
@@ -40,7 +42,7 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       }
       const p = readPlan(e.payload);
       add(rows, "planId", p.planId);
-      add(rows, "planHash", p.planHash);
+      add(rows, "planHash", p.planHash, true);
       const lines = p.actions.map((a) => {
         const base = `${orDash(a.actionId)}: ${orDash(a.target)} = ${orDash(a.value)} ${orDash(a.unit)}`;
         return a.reason ? `${base} (${a.reason})` : base;
@@ -71,8 +73,8 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       const rules = [...c.triggeredRules];
       if (c.extraRules > 0) rules.push(`+${c.extraRules} more`);
       add(rows, "triggeredRules", rules);
-      add(rows, "planHash", c.planHash);
-      if (c.responsePlanHash !== c.planHash) add(rows, "critic planHash", c.responsePlanHash);
+      add(rows, "planHash", c.planHash, true);
+      if (c.responsePlanHash !== c.planHash) add(rows, "critic planHash", c.responsePlanHash, true);
       add(rows, "error kind", c.error?.kind);
       add(rows, "HTTP status", c.error?.httpStatus === undefined ? undefined : String(c.error.httpStatus));
       add(rows, "error detail", c.error?.detail);
@@ -122,15 +124,18 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
         {rows.map((r) => (
           <div key={r.label} className="min-w-0">
             <dt className="text-muted-foreground">{r.label}</dt>
-            <dd className="wrap-anywhere font-mono">
+            <dd className="wrap-anywhere flex min-w-0 items-start gap-1 font-mono">
               {Array.isArray(r.value) ? (
-                <ul className="list-inside list-disc">
+                <ul className="min-w-0 list-inside list-disc">
                   {r.value.map((line, i) => (
                     <li key={i}>{line}</li>
                   ))}
                 </ul>
               ) : (
-                r.value
+                <>
+                  <span className="min-w-0">{r.value}</span>
+                  {r.copy && <CopyButton value={r.value} label={r.label} />}
+                </>
               )}
             </dd>
           </div>

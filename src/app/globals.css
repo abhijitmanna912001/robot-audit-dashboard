@@ -24,6 +24,13 @@
   --color-status-failed-foreground: var(--status-failed-foreground);
   --color-status-info: var(--status-info);
   --color-status-info-foreground: var(--status-info-foreground);
+  --color-status-received-accent: var(--status-received-accent);
+  --color-status-approved-accent: var(--status-approved-accent);
+  --color-status-rejected-accent: var(--status-rejected-accent);
+  --color-status-executing-accent: var(--status-executing-accent);
+  --color-status-completed-accent: var(--status-completed-accent);
+  --color-status-failed-accent: var(--status-failed-accent);
+  --color-status-info-accent: var(--status-info-accent);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -99,16 +106,23 @@
   --status-received-foreground: oklch(0.3 0.03 255);
   --status-approved: oklch(0.88 0.06 255);
   --status-approved-foreground: oklch(0.3 0.12 255);
-  --status-rejected: oklch(0.9 0.09 65);
-  --status-rejected-foreground: oklch(0.36 0.09 55);
+  --status-rejected: oklch(0.55 0.21 27);
+  --status-rejected-foreground: oklch(0.99 0 0);
   --status-executing: oklch(0.89 0.06 205);
   --status-executing-foreground: oklch(0.33 0.07 215);
   --status-completed: oklch(0.89 0.09 150);
   --status-completed-foreground: oklch(0.32 0.09 150);
-  --status-failed: oklch(0.55 0.21 27);
-  --status-failed-foreground: oklch(0.99 0 0);
+  --status-failed: oklch(0.9 0.09 65);
+  --status-failed-foreground: oklch(0.36 0.09 55);
   --status-info: oklch(0.9 0.05 235);
   --status-info-foreground: oklch(0.33 0.09 240);
+  --status-received-accent: oklch(0.55 0.03 255);
+  --status-approved-accent: oklch(0.5 0.17 255);
+  --status-rejected-accent: oklch(0.55 0.21 27);
+  --status-executing-accent: oklch(0.55 0.1 210);
+  --status-completed-accent: oklch(0.5 0.13 150);
+  --status-failed-accent: oklch(0.6 0.14 65);
+  --status-info-accent: oklch(0.55 0.12 240);
 }
 
 .dark {
@@ -147,16 +161,23 @@
   --status-received-foreground: oklch(0.92 0.01 255);
   --status-approved: oklch(0.34 0.09 255);
   --status-approved-foreground: oklch(0.92 0.04 255);
-  --status-rejected: oklch(0.4 0.09 60);
-  --status-rejected-foreground: oklch(0.94 0.06 75);
+  --status-rejected: oklch(0.52 0.2 27);
+  --status-rejected-foreground: oklch(0.99 0 0);
   --status-executing: oklch(0.36 0.07 205);
   --status-executing-foreground: oklch(0.93 0.05 205);
   --status-completed: oklch(0.35 0.08 150);
   --status-completed-foreground: oklch(0.92 0.06 150);
-  --status-failed: oklch(0.52 0.2 27);
-  --status-failed-foreground: oklch(0.99 0 0);
+  --status-failed: oklch(0.4 0.09 60);
+  --status-failed-foreground: oklch(0.94 0.06 75);
   --status-info: oklch(0.35 0.07 240);
   --status-info-foreground: oklch(0.93 0.04 240);
+  --status-received-accent: oklch(0.72 0.03 255);
+  --status-approved-accent: oklch(0.72 0.14 255);
+  --status-rejected-accent: oklch(0.68 0.2 25);
+  --status-executing-accent: oklch(0.78 0.11 205);
+  --status-completed-accent: oklch(0.76 0.15 150);
+  --status-failed-accent: oklch(0.8 0.15 75);
+  --status-info-accent: oklch(0.76 0.11 235);
 }
 
 @layer base {

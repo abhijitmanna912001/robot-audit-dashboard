@@ -5,14 +5,18 @@ import { getBrowserClient } from "@/lib/supabase/browser";
 import { fetchSnapshot } from "@/lib/queries";
 import { toAuditEvent, toCommand } from "@/lib/mappers";
 import { mergeCommands, mergeEvents } from "@/lib/merge";
+import { bannerTone, derivePipeline } from "@/lib/pipeline";
 import { summarize } from "@/lib/summary";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import type { AuditEvent, Command } from "@/types/draft";
+import { COMMAND_STATUSES, type AuditEvent, type Command, type CommandStatus } from "@/types/draft";
 import { AuditTimeline } from "./AuditTimeline";
 import { CommandInput } from "./CommandInput";
 import { CommandList } from "./CommandList";
-import { ConnectionIndicator, type ConnectionStatus } from "./ConnectionIndicator";
+import type { ConnectionStatus } from "./ConnectionIndicator";
+import { DashboardHeader } from "./Header";
+import { PipelineStrip } from "./PipelineStrip";
+import { SummaryBanner } from "./SummaryBanner";
 import { isTestCommand } from "./test-commands";
 
 export function Dashboard({
@@ -128,16 +132,23 @@ export function Dashboard({
     ? commands
     : commands.filter((c) => !isTestCommand(c.text) || c.id === selectedId);
 
+  // Counts are over every command in state; the test-command toggle only filters the list.
+  const counts = Object.fromEntries(COMMAND_STATUSES.map((st) => [st, 0])) as Record<
+    CommandStatus,
+    number
+  >;
+  for (const c of commands) if (c.status in counts) counts[c.status] += 1;
+
   return (
     <>
+      <DashboardHeader status={status} counts={counts} />
+      {loadError && (
+        <p role="alert" className="text-xs text-destructive">
+          Could not load or refresh data
+        </p>
+      )}
       <CommandInput onSubmitted={handleSubmitted} />
-      <div className="flex flex-wrap items-center gap-3">
-        <ConnectionIndicator status={status} />
-        {loadError && (
-          <span className="text-xs text-destructive">Could not load or refresh data</span>
-        )}
-      </div>
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <section className="min-w-0">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h2 className="text-sm font-medium text-muted-foreground">Commands</h2>
@@ -162,17 +173,21 @@ export function Dashboard({
             onSelect={select}
           />
         </section>
-        <section className="min-w-0">
+        <section className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-4 lg:-mx-1 lg:max-h-[calc(100dvh-2rem)] lg:self-start lg:overflow-y-auto lg:px-1">
           <h2
-            className="mb-3 line-clamp-2 wrap-anywhere text-sm font-medium text-muted-foreground"
+            className="line-clamp-2 wrap-anywhere text-sm font-medium text-muted-foreground"
             title={selected?.text}
           >
             Audit timeline{selected ? `: ${selected.text}` : ""}
           </h2>
           {selected && (
-            <p className="wrap-anywhere mb-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium">
-              {summarize(selected.status, selectedEvents)}
-            </p>
+            <>
+              <SummaryBanner
+                text={summarize(selected.status, selectedEvents)}
+                tone={bannerTone(selected.status, selectedEvents)}
+              />
+              <PipelineStrip stages={derivePipeline(selectedEvents)} />
+            </>
           )}
           <Card size="sm">
             <CardContent>

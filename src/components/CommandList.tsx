@@ -1,7 +1,21 @@
-import type { Command } from "@/types/draft";
+import { Inbox } from "lucide-react";
+import type { Command, CommandStatus } from "@/types/draft";
 import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "./StatusBadge";
+
+// Literal class names so Tailwind can see them. The left border carries the status colour.
+const leftBorder: Record<CommandStatus, string> = {
+  received: "border-l-status-received-accent",
+  approved: "border-l-status-approved-accent",
+  rejected: "border-l-status-rejected-accent",
+  executing: "border-l-status-executing-accent",
+  completed: "border-l-status-completed-accent",
+  failed: "border-l-status-failed-accent",
+};
+
+// First 8 characters of the id, as plain text (ids are uuids; the row also has a title).
+const shortId = (id: string) => id.slice(0, 8);
 
 export function CommandList({
   commands,
@@ -13,7 +27,15 @@ export function CommandList({
   onSelect: (id: string) => void;
 }) {
   if (commands.length === 0) {
-    return <p className="text-sm text-muted-foreground">No commands yet.</p>;
+    return (
+      <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border px-4 py-10 text-center">
+        <Inbox aria-hidden="true" className="size-8 text-muted-foreground" />
+        <p className="text-sm font-medium">No commands yet</p>
+        <p className="text-xs text-muted-foreground">
+          Type a command above. It will appear here and move through the pipeline.
+        </p>
+      </div>
+    );
   }
   return (
     <ul className="flex flex-col gap-2">
@@ -26,10 +48,11 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block w-full min-w-0 rounded-xl border bg-card p-3 text-left text-sm text-card-foreground outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50",
+                "block w-full min-w-0 rounded-xl border border-l-4 p-3 text-left text-sm text-card-foreground outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50",
+                leftBorder[c.status],
                 selected
-                  ? "border-primary bg-accent ring-1 ring-primary"
-                  : "border-border hover:bg-accent/50",
+                  ? "border-y-primary border-r-primary bg-primary/10 ring-2 ring-primary/60"
+                  : "border-y-border border-r-border bg-card hover:bg-accent/50",
               )}
             >
               <div className="flex min-w-0 items-start justify-between gap-2">
@@ -38,9 +61,10 @@ export function CommandList({
                 </span>
                 <StatusBadge status={c.status} />
               </div>
-              <time className="mt-1.5 block text-xs text-muted-foreground" dateTime={c.createdAt}>
-                {formatDateTime(c.createdAt)}
-              </time>
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                <span className="font-mono">{shortId(c.id)}</span>
+                <time dateTime={c.createdAt}>{formatDateTime(c.createdAt)}</time>
+              </div>
             </button>
           </li>
         );
