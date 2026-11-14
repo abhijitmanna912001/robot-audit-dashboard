@@ -96,28 +96,32 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
 
   if (raw !== undefined) {
     return (
-      <details className="mt-1 text-xs">
-        <summary className="cursor-pointer text-zinc-500">Raw payload</summary>
-        <pre className="mt-1 whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
+      <details className="mt-2 text-xs">
+        <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+          Raw payload
+        </summary>
+        <pre className="mt-1.5 whitespace-pre-wrap wrap-anywhere rounded-lg border border-border bg-muted/40 p-2 font-mono">
+          {raw}
+        </pre>
       </details>
     );
   }
   if (rows.length === 0 && !dryRun) return null;
 
   return (
-    <details className="mt-1 text-xs">
-      <summary className="cursor-pointer text-zinc-500">
+    <details className="mt-2 text-xs">
+      <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
         Details
         {dryRun && (
-          <span className="ml-2 rounded-full bg-sky-200 px-2 py-0.5 font-medium uppercase text-sky-900 dark:bg-sky-900 dark:text-sky-100">
+          <span className="ml-2 rounded-full bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
             dry run
           </span>
         )}
       </summary>
-      <dl className="mt-1 space-y-1">
+      <dl className="mt-1.5 space-y-1.5 rounded-lg border border-border bg-muted/40 p-2">
         {rows.map((r) => (
           <div key={r.label} className="min-w-0">
-            <dt className="text-zinc-500">{r.label}</dt>
+            <dt className="text-muted-foreground">{r.label}</dt>
             <dd className="wrap-anywhere font-mono">
               {Array.isArray(r.value) ? (
                 <ul className="list-inside list-disc">

@@ -6,11 +6,14 @@ import { fetchSnapshot } from "@/lib/queries";
 import { toAuditEvent, toCommand } from "@/lib/mappers";
 import { mergeCommands, mergeEvents } from "@/lib/merge";
 import { summarize } from "@/lib/summary";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import type { AuditEvent, Command } from "@/types/draft";
 import { AuditTimeline } from "./AuditTimeline";
 import { CommandInput } from "./CommandInput";
 import { CommandList } from "./CommandList";
 import { ConnectionIndicator, type ConnectionStatus } from "./ConnectionIndicator";
+import { isTestCommand } from "./test-commands";
 
 export function Dashboard({
   initialCommands,
@@ -38,6 +41,7 @@ export function Dashboard({
     client ? "connecting" : "disconnected",
   );
   const [loadError, setLoadError] = useState(initialError);
+  const [showTest, setShowTest] = useState(false); // display filter only, off by default
   const refetchRef = useRef<() => Promise<void>>(async () => {});
 
   // Selection only auto-fills while empty; it never moves on its own after that.
@@ -115,37 +119,66 @@ export function Dashboard({
   const selected = commands.find((c) => c.id === selectedId);
   const selectedEvents = events.filter((e) => e.commandId === selectedId);
 
+  // Display only: the commands state and Realtime merge are untouched. The selected
+  // command is never hidden, so the open timeline always keeps its row.
+  const hiddenTestCount = showTest
+    ? 0
+    : commands.filter((c) => isTestCommand(c.text) && c.id !== selectedId).length;
+  const visibleCommands = showTest
+    ? commands
+    : commands.filter((c) => !isTestCommand(c.text) || c.id === selectedId);
+
   return (
     <>
       <CommandInput onSubmitted={handleSubmitted} />
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <ConnectionIndicator status={status} />
         {loadError && (
-          <span className="text-xs text-red-600">Could not load or refresh data</span>
+          <span className="text-xs text-destructive">Could not load or refresh data</span>
         )}
       </div>
       <div className="grid gap-6 md:grid-cols-2">
         <section className="min-w-0">
-          <h2 className="mb-3 text-sm font-medium text-zinc-500">Commands</h2>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium text-muted-foreground">Commands</h2>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              aria-pressed={showTest}
+              onClick={() => setShowTest((v) => !v)}
+            >
+              {showTest ? "Hide test commands" : "Show test commands"}
+            </Button>
+          </div>
+          {hiddenTestCount > 0 && (
+            <p className="mb-2 text-xs text-muted-foreground" role="status">
+              {hiddenTestCount} test {hiddenTestCount === 1 ? "command" : "commands"} hidden
+            </p>
+          )}
           <CommandList
-            commands={commands}
+            commands={visibleCommands}
             selectedId={selectedId ?? undefined}
             onSelect={select}
           />
         </section>
         <section className="min-w-0">
           <h2
-            className="mb-3 line-clamp-2 wrap-anywhere text-sm font-medium text-zinc-500"
+            className="mb-3 line-clamp-2 wrap-anywhere text-sm font-medium text-muted-foreground"
             title={selected?.text}
           >
             Audit timeline{selected ? `: ${selected.text}` : ""}
           </h2>
           {selected && (
-            <p className="wrap-anywhere mb-3 text-sm font-medium">
+            <p className="wrap-anywhere mb-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium">
               {summarize(selected.status, selectedEvents)}
             </p>
           )}
-          <AuditTimeline events={selectedEvents} />
+          <Card size="sm">
+            <CardContent>
+              <AuditTimeline events={selectedEvents} />
+            </CardContent>
+          </Card>
         </section>
       </div>
     </>

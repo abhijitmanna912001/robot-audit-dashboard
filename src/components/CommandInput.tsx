@@ -1,6 +1,9 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 const MAX_TEXT_LENGTH = 500; // mirrors the route; the server stays the authority
 const GENERIC = "Could not submit the command. Nothing was saved. Try again.";
@@ -41,6 +44,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
         });
       } catch {
         setNotice({ kind: "error", message: NETWORK });
+        toast.error(NETWORK);
         return;
       }
 
@@ -50,17 +54,21 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
 
       if (res.status === 201) {
         setText("");
+        toast.success("Command submitted");
         onSubmitted(commandId);
       } else if (res.status === 400) {
         const msg = typeof body.error === "string" ? body.error.slice(0, 200) : GENERIC;
         setNotice({ kind: "error", message: msg });
+        toast.error(msg);
       } else if (res.status === 500 && commandId) {
         // Saved, but its audit event failed. Clear the input and offer no retry.
         setText("");
         setNotice({ kind: "warning", message: SAVED_AUDIT_FAILED });
+        toast.warning(SAVED_AUDIT_FAILED, { duration: 10000 });
         onSubmitted(commandId);
       } else {
         setNotice({ kind: "error", message: GENERIC });
+        toast.error(GENERIC);
       }
     } finally {
       inFlight.current = false;
@@ -71,7 +79,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-2">
       <div className="flex flex-col gap-2 sm:flex-row">
-        <textarea
+        <Textarea
           value={text}
           onChange={(e) => {
             setText(e.target.value);
@@ -80,21 +88,17 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           rows={2}
           maxLength={MAX_TEXT_LENGTH}
           placeholder="Type a command for the robot..."
-          className="flex-1 rounded-md border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
+          className="min-h-16 flex-1 resize-y"
         />
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-        >
+        <Button type="submit" disabled={submitting} className="h-auto px-4 py-2 sm:self-start">
           {submitting ? "Submitting..." : "Submit"}
-        </button>
+        </Button>
       </div>
       {notice && (
         <p
           role="alert"
           className={`text-sm ${
-            notice.kind === "warning" ? "text-orange-600" : "text-red-600"
+            notice.kind === "warning" ? "text-status-rejected-foreground" : "text-destructive"
           }`}
         >
           {notice.message}

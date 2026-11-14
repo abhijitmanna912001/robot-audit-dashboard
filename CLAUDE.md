@@ -34,3 +34,4 @@ fails or returns invalid output, nothing executes (fail closed).
 - /api/critic needs the x-critic-secret header, verifies planHash (RFC 8785 + SHA-256, see src/lib/plan-hash.ts), and must fail closed: every error path returns a reject, never an approval.
 - Never log or return secrets, raw database errors or keys.
 - POST /api/commands can return 500 with a commandId in the body. That means the command was saved but its audit event failed, so the UI must not resubmit. A 500 without a commandId means nothing was saved.
+- shadcn/ui components are allowed (button, badge, card, textarea, sonner). No other new libraries without asking.
