@@ -3,7 +3,7 @@
 // deliberately breaks them to show the timeline never crashes on untrusted payloads.
 import type { AuditEvent, CommandStatus } from "@/types/draft";
 
-export type Scenario = { title: string; status: CommandStatus; events: AuditEvent[] };
+export type Scenario = { id: string; title: string; status: CommandStatus; events: AuditEvent[] };
 
 const PLAN_ID = "9d2e4a10-0000-0000-0000-000000000002";
 const HASH = "sha256:" + "ab".repeat(32);
@@ -67,7 +67,18 @@ const criticApprove = (s: string) =>
     },
   });
 
-export const scenarios: Scenario[] = [
+const slug = (title: string) =>
+  title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+function withIds(list: Omit<Scenario, "id">[]): Scenario[] {
+  return list.map((sc) => ({ id: slug(sc.title), ...sc }));
+}
+
+// Ids are derived from the titles (unique, URL-safe) so the fixtures themselves stay as they are.
+export const scenarios: Scenario[] = withIds([
   {
     title: "Approved dry run",
     status: "completed",
@@ -82,6 +93,57 @@ export const scenarios: Scenario[] = [
         summary: "1 action simulated, robot not driven",
       }),
     ],
+  },
+  {
+    title: "Real execution completed (not a dry run)",
+    status: "completed",
+    events: [
+      received("real"),
+      planned("real", 0.5),
+      validatorPass("real"),
+      criticApprove("real"),
+      ev("real", "execution_started", "Execution started", { dryRun: false }),
+      ev("real", "execution_completed", "Execution completed", {
+        dryRun: false,
+        summary: "1 action executed",
+      }),
+    ],
+  },
+  {
+    title: "Execution failed",
+    status: "failed",
+    events: [
+      received("xfail"),
+      planned("xfail", 0.5),
+      validatorPass("xfail"),
+      criticApprove("xfail"),
+      ev("xfail", "execution_started", "Execution started", { dryRun: false }),
+      ev("xfail", "execution_failed", "Execution failed", {
+        dryRun: false,
+        error: "the simulation stopped before the action finished",
+      }),
+    ],
+  },
+  {
+    title: "Executing (started, not finished)",
+    status: "executing",
+    events: [
+      received("run"),
+      planned("run", 0.5),
+      validatorPass("run"),
+      criticApprove("run"),
+      ev("run", "execution_started", "Execution started", { dryRun: true }),
+    ],
+  },
+  {
+    title: "Approved, waiting for execution",
+    status: "approved",
+    events: [received("appr"), planned("appr", 0.5), validatorPass("appr"), criticApprove("appr")],
+  },
+  {
+    title: "Waiting for the worker",
+    status: "received",
+    events: [received("wait")],
   },
   {
     title: "Validator rejection",
@@ -224,4 +286,4 @@ export const scenarios: Scenario[] = [
       ev("bad", "something_new", "unknown event type", { note: "<b>raw</b>", blob: "y".repeat(3000) }),
     ],
   },
-];
+]);

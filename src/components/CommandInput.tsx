@@ -1,11 +1,24 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
+import { Info } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 const MAX_TEXT_LENGTH = 500; // mirrors the route; the server stays the authority
 const GENERIC = "Could not submit the command. Nothing was saved. Try again.";
 const NETWORK = "Could not reach the server. Try again.";
 const SAVED_AUDIT_FAILED = "Command saved, but its audit event failed. Do not resubmit.";
+
+const FORMAT_HELP =
+  "Format: set joint _1 to 0.25 rad; joints _1 to _6; unit rad; separate several with ;";
+
+const EXAMPLES = [
+  "set joint _1 to 0.25 rad",
+  "set joint _6 to -1.0 rad",
+  "Pick up the cup and move it to the left",
+];
 
 type Notice = { kind: "error" | "warning"; message: string };
 
@@ -22,9 +35,13 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [focused, setFocused] = useState(false); // display only: grows the textarea
   const inFlight = useRef(false);
+  const id = useId();
+  const helpId = `${id}-help`;
+  const countId = `${id}-count`;
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: { preventDefault: () => void }) {
     e.preventDefault();
     if (inFlight.current || !text.trim()) return;
     inFlight.current = true;
@@ -41,6 +58,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
         });
       } catch {
         setNotice({ kind: "error", message: NETWORK });
+        toast.error(NETWORK);
         return;
       }
 
@@ -50,17 +68,21 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
 
       if (res.status === 201) {
         setText("");
+        toast.success("Command submitted");
         onSubmitted(commandId);
       } else if (res.status === 400) {
         const msg = typeof body.error === "string" ? body.error.slice(0, 200) : GENERIC;
         setNotice({ kind: "error", message: msg });
+        toast.error(msg);
       } else if (res.status === 500 && commandId) {
         // Saved, but its audit event failed. Clear the input and offer no retry.
         setText("");
         setNotice({ kind: "warning", message: SAVED_AUDIT_FAILED });
+        toast.warning(SAVED_AUDIT_FAILED, { duration: 10000 });
         onSubmitted(commandId);
       } else {
         setNotice({ kind: "error", message: GENERIC });
+        toast.error(GENERIC);
       }
     } finally {
       inFlight.current = false;
@@ -68,33 +90,102 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
     }
   }
 
+  const expanded = focused || text.length > 0;
+  const showCount = focused || text.length > 400;
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <textarea
+    <form
+      onSubmit={handleSubmit}
+      // Focus is "inside the composer" while it stays on the textarea or a chip.
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
+      }}
+      className="surface-card flex flex-col gap-2 rounded-ui-lg p-3"
+    >
+      <label htmlFor={id} className="sr-only">
+        New command
+      </label>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <div className="relative min-w-0 sm:flex-1">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-2 left-3 font-mono text-sm text-primary select-none"
+        >
+          &gt;
+        </span>
+        <Textarea
+          id={id}
           value={text}
           onChange={(e) => {
             setText(e.target.value);
             setNotice(null);
           }}
-          rows={2}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              void handleSubmit(e);
+            }
+          }}
+          rows={expanded ? 2 : 1}
           maxLength={MAX_TEXT_LENGTH}
-          placeholder="Type a command for the robot..."
-          className="flex-1 rounded-md border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700"
+          placeholder="Type a command..."
+          aria-describedby={`${helpId} ${countId}`}
+          className="min-h-9 w-full min-w-0 resize-none bg-raised pr-14 pl-7 font-mono text-sm caret-primary transition-[height] duration-150 md:text-sm"
         />
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+        <kbd
+          aria-hidden="true"
+          title="Cmd or Ctrl + Enter submits"
+          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-2 py-1 font-mono text-[11px] leading-none text-muted-foreground"
         >
+          ⌘ ↵
+        </kbd>
+        </div>
+        <Button type="submit" disabled={submitting} className="w-full px-4 transition-colors duration-150 active:bg-primary/70 sm:w-auto">
           {submitting ? "Submitting..." : "Submit"}
-        </button>
+        </Button>
+      </div>
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="shrink-0">Try:</span>
+        {/* One scrollable row: no wrapping, snap scrolling, faded edges, hidden scrollbar. */}
+        <div className="chip-row -my-1 flex min-w-0 flex-1 snap-x snap-proximity items-center gap-2 overflow-x-auto px-1 py-1">
+        {EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+            type="button"
+            // Keep focus in the textarea so the composer does not collapse when a chip is used.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setText(ex);
+              setNotice(null);
+            }}
+            className="keycap inline-flex h-7 shrink-0 snap-start items-center rounded-ui-sm px-3 font-mono text-xs whitespace-nowrap text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:text-foreground active:translate-y-px active:shadow-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            {ex}
+          </button>
+        ))}
+        </div>
+      </div>
+      <div
+        className={`flex items-start justify-between gap-3 text-xs text-muted-foreground ${
+          showCount ? "" : "sr-only"
+        }`}
+      >
+        <p
+          id={helpId}
+          title={FORMAT_HELP}
+          className={`flex min-w-0 items-center gap-2 leading-4 ${focused ? "" : "sr-only"}`}
+        >
+          <Info aria-hidden="true" className="size-3 shrink-0" />
+          <span className="truncate">{FORMAT_HELP}</span>
+        </p>
+        <span id={countId} className="shrink-0 tabular-nums">
+          {text.length}/{MAX_TEXT_LENGTH}
+        </span>
       </div>
       {notice && (
         <p
           role="alert"
           className={`text-sm ${
-            notice.kind === "warning" ? "text-orange-600" : "text-red-600"
+            notice.kind === "warning" ? "text-status-failed-accent" : "text-destructive"
           }`}
         >
           {notice.message}

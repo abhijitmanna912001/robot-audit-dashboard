@@ -10,12 +10,21 @@ import {
   readSource,
   readValidator,
 } from "@/lib/payload";
+import { text } from "@/lib/payload";
+import { ChevronRight } from "lucide-react";
+import { kindLabel } from "@/lib/kind-label";
+import { cn } from "@/lib/utils";
+import { CopyButton } from "./CopyButton";
 
-type Row = { label: string; value: string | string[] };
+// `copy` adds a copy button next to a short single-line value (the plan hash).
+type Row = { label: string; value: string | string[]; copy?: boolean; mono?: boolean };
 
-function add(rows: Row[], label: string, value: string | string[] | undefined) {
+// Mono is only for ids, hashes and rule ids.
+const MONO = new Set(["planId", "planHash", "critic planHash", "errors", "triggeredRules", "actions", "raw kind"]);
+
+function add(rows: Row[], label: string, value: string | string[] | undefined, copy = false) {
   if (value === undefined || (Array.isArray(value) && value.length === 0)) return;
-  rows.push({ label, value });
+  rows.push({ label, value, copy: copy && typeof value === "string", mono: MONO.has(label) });
 }
 
 const orDash = (v: string | number | undefined) => (v === undefined ? "?" : String(v));
@@ -34,13 +43,14 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
     case "plan_generated": {
       const failure = readPlanFailure(e.payload);
       if (failure) {
-        add(rows, "error kind", failure.kind);
+        add(rows, "error", kindLabel(failure.kind));
+        add(rows, "raw kind", failure.kind);
         add(rows, "error detail", failure.detail);
         return { rows, dryRun: false };
       }
       const p = readPlan(e.payload);
       add(rows, "planId", p.planId);
-      add(rows, "planHash", p.planHash);
+      add(rows, "planHash", p.planHash, true);
       const lines = p.actions.map((a) => {
         const base = `${orDash(a.actionId)}: ${orDash(a.target)} = ${orDash(a.value)} ${orDash(a.unit)}`;
         return a.reason ? `${base} (${a.reason})` : base;
@@ -71,9 +81,10 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       const rules = [...c.triggeredRules];
       if (c.extraRules > 0) rules.push(`+${c.extraRules} more`);
       add(rows, "triggeredRules", rules);
-      add(rows, "planHash", c.planHash);
-      if (c.responsePlanHash !== c.planHash) add(rows, "critic planHash", c.responsePlanHash);
-      add(rows, "error kind", c.error?.kind);
+      add(rows, "planHash", c.planHash, true);
+      if (c.responsePlanHash !== c.planHash) add(rows, "critic planHash", c.responsePlanHash, true);
+      add(rows, "error", kindLabel(c.error?.kind));
+      add(rows, "raw kind", c.error?.kind);
       add(rows, "HTTP status", c.error?.httpStatus === undefined ? undefined : String(c.error.httpStatus));
       add(rows, "error detail", c.error?.detail);
       return { rows, dryRun: false };
@@ -91,42 +102,71 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
   }
 }
 
+// Native details/summary with our own chevron instead of the browser marker. Keyboard
+// behaviour (Tab, Enter, Space) is the browser's own.
+const summaryClass =
+  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-1 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden";
+
+function Chevron() {
+  return (
+    <ChevronRight
+      aria-hidden="true"
+      className="size-3.5 shrink-0 transition-transform duration-150 group-open:rotate-90"
+    />
+  );
+}
+
 export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | "payload"> }) {
   const { rows, dryRun, raw } = build(event);
+  const type = (
+    <p className="font-mono text-xs text-muted-foreground">{text(event.eventType) ?? "unknown"}</p>
+  );
 
   if (raw !== undefined) {
     return (
-      <details className="mt-1 text-xs">
-        <summary className="cursor-pointer text-zinc-500">Raw payload</summary>
-        <pre className="mt-1 whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
+      <details className="group mt-2 text-xs">
+        <summary className={summaryClass}>
+          <Chevron />
+          Raw payload
+        </summary>
+        <div className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
+          {type}
+          <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
+        </div>
       </details>
     );
   }
-  if (rows.length === 0 && !dryRun) return null;
-
   return (
-    <details className="mt-1 text-xs">
-      <summary className="cursor-pointer text-zinc-500">
+    <details className="group mt-2 text-xs">
+      <summary className={summaryClass}>
+        <Chevron />
         Details
         {dryRun && (
-          <span className="ml-2 rounded-full bg-sky-200 px-2 py-0.5 font-medium uppercase text-sky-900 dark:bg-sky-900 dark:text-sky-100">
+          <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-1 font-medium uppercase tracking-wide text-status-info-foreground">
             dry run
           </span>
         )}
       </summary>
-      <dl className="mt-1 space-y-1">
+      <dl className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
+        <div className="min-w-0">
+          <dt className="sr-only">event type</dt>
+          <dd>{type}</dd>
+        </div>
         {rows.map((r) => (
           <div key={r.label} className="min-w-0">
-            <dt className="text-zinc-500">{r.label}</dt>
-            <dd className="wrap-anywhere font-mono">
+            <dt className="text-muted-foreground">{r.label}</dt>
+            <dd className={cn("wrap-anywhere flex min-w-0 items-start gap-1", r.mono && "font-mono")}>
               {Array.isArray(r.value) ? (
-                <ul className="list-inside list-disc">
+                <ul className="min-w-0 list-inside list-disc">
                   {r.value.map((line, i) => (
                     <li key={i}>{line}</li>
                   ))}
                 </ul>
               ) : (
-                r.value
+                <>
+                  <span className="min-w-0">{r.value}</span>
+                  {r.copy && <CopyButton value={r.value} label={r.label} />}
+                </>
               )}
             </dd>
           </div>
