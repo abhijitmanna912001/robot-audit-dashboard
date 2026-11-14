@@ -1,16 +1,38 @@
-// Elapsed time of a command, from its first to its last audit event. Pure.
-type EventLike = { createdAt?: unknown };
+// Display-only processing and queue durations, derived from audit timestamps. Pure.
+type EventLike = { eventType?: unknown; createdAt?: unknown };
+const timestamp = (event: EventLike | null | undefined): number =>
+  typeof event?.createdAt === "string" ? Date.parse(event.createdAt) : NaN;
 
-// Milliseconds between the earliest and latest valid timestamp. Needs two valid events.
+function planTime(events: readonly EventLike[]): number | undefined {
+  const times = events.filter((e) => e?.eventType === "plan_generated").map(timestamp).filter(Number.isFinite);
+  return times.length > 0 ? Math.min(...times) : undefined;
+}
+
+// Processing starts at the earliest valid plan, including a recorded planner failure.
+// Retries do not reset the clock. Without a plan or a later sample, do not invent a duration.
 export function elapsedMs(events: readonly EventLike[]): number | undefined {
   if (!Array.isArray(events)) return undefined;
-  const times: number[] = [];
-  for (const e of events) {
-    const t = typeof e?.createdAt === "string" ? Date.parse(e.createdAt) : NaN;
-    if (Number.isFinite(t)) times.push(t);
-  }
-  if (times.length < 2) return undefined;
-  return Math.max(...times) - Math.min(...times);
+  const start = planTime(events);
+  if (start === undefined) return undefined;
+  const times = events.map(timestamp).filter((t) => Number.isFinite(t) && t >= start);
+  return times.length >= 2 ? Math.max(...times) - start : undefined;
+}
+
+// A completed queue wait needs both a receipt and a plan. No live clock is inferred.
+export function workerWaitMs(events: readonly EventLike[]): number | undefined {
+  if (!Array.isArray(events)) return undefined;
+  const end = planTime(events);
+  if (end === undefined) return undefined;
+  const received = events.filter((e) => e?.eventType === "command_received").map(timestamp).filter(Number.isFinite);
+  if (received.length === 0) return undefined;
+  const wait = end - Math.min(...received);
+  return wait >= 0 ? wait : undefined;
+}
+
+export function workerWaitLabel(events: readonly EventLike[]): string | undefined {
+  const ms = workerWaitMs(events);
+  if (ms === undefined || ms <= 2000) return undefined;
+  return `Waited ${formatElapsed(ms)} for the worker`;
 }
 
 // "under 1 s", "41 s", "2 min 5 s", "2 min", "1 h 3 min", "1 h".

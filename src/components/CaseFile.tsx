@@ -1,3 +1,4 @@
+import { elapsedLabel, workerWaitLabel } from "@/lib/elapsed";
 import type { AuditEvent, Command } from "@/types/draft";
 import { bannerTone, derivePipeline } from "@/lib/pipeline";
 import { summarize } from "@/lib/summary";
@@ -21,6 +22,8 @@ export function CaseFile({
   highlightIds?: ReadonlySet<string>;
 }) {
   const stamp = verdictStamp(command.status, events);
+  const processing = elapsedLabel(command.status, events);
+  const wait = workerWaitLabel(events);
   return (
     // @container: the layout inside responds to this column's width (not the window), so the
     // /dev-preview phone frame shows the real mobile layout.
@@ -32,6 +35,8 @@ export function CaseFile({
         <span className="shrink-0 rounded-ui-sm border border-border px-2 py-1 font-mono text-xs leading-4 tracking-wide text-muted-foreground">
           {stamp}
         </span>
+        {processing && <span className="hidden font-mono text-xs text-muted-foreground @case:inline">{processing}</span>}
+        {wait && <span className="sr-only">{wait}</span>}
         <span className="hidden shrink-0 font-mono text-xs text-muted-foreground @case:inline">
           {command.id.slice(0, 8)}
         </span>

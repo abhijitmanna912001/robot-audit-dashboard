@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { elapsedLabel, elapsedMs, formatElapsed } from "./elapsed.ts";
+import { elapsedLabel, elapsedMs, formatElapsed, workerWaitMs, workerWaitLabel } from "./elapsed.ts";
 
 const at = (s: number, ms = 0) => ({ createdAt: new Date(Date.UTC(2026, 10, 14, 10, 0, s, ms)).toISOString() });
 
@@ -21,26 +21,44 @@ test("formatElapsed rejects bad input", () => {
   for (const bad of [-1, NaN, Infinity, "5", null, undefined]) assert.equal(formatElapsed(bad as never), undefined);
 });
 
-test("elapsedMs: first to last, any order, needs two valid events", () => {
-  assert.equal(elapsedMs([at(0), at(41)]), 41_000);
-  assert.equal(elapsedMs([at(41), at(0), at(10)]), 41_000);
-  assert.equal(elapsedMs([at(5), at(5)]), 0);
-  assert.equal(elapsedMs([at(0)]), undefined);
-  assert.equal(elapsedMs([]), undefined);
-  assert.equal(elapsedMs([at(0), { createdAt: "not a date" }]), undefined);
-  assert.equal(elapsedMs([at(0), { createdAt: 5 }, { createdAt: null }, at(3)]), 3000);
-  assert.equal(elapsedMs([{}, null as never, at(1), at(2)]), 1000);
-  assert.equal(elapsedMs(null as never), undefined);
-  assert.equal(elapsedMs("x" as never), undefined);
+const ev = (eventType: string, seconds: number, ms = 0) => ({ eventType, ...at(seconds, ms) });
+
+test("elapsedMs excludes worker wait and is independent of event order", () => {
+  const events = [ev("command_received", 0), ev("plan_generated", 807), ev("execution_completed", 811)];
+  assert.equal(elapsedMs(events), 4000);
+  assert.equal(elapsedMs([...events].reverse()), 4000);
+  assert.equal(workerWaitMs(events), 807_000);
+  assert.equal(workerWaitLabel(events), "Waited 13 min 27 s for the worker");
 });
 
-test("elapsedLabel wording follows the status", () => {
-  const ev = [at(0), at(41)];
-  assert.equal(elapsedLabel("completed", ev), "Completed in 41 s");
-  assert.equal(elapsedLabel("rejected", ev), "Rejected after 41 s");
-  assert.equal(elapsedLabel("failed", ev), "Failed after 41 s");
-  assert.equal(elapsedLabel("executing", ev), "41 s so far");
-  assert.equal(elapsedLabel(undefined, [at(0), at(125)]), "2 min 5 s so far");
-  assert.equal(elapsedLabel("completed", [at(0)]), undefined);
-  assert.equal(elapsedLabel("completed", []), undefined);
+test("processing starts at the first plan even after retries or a planner failure", () => {
+  assert.equal(elapsedMs([ev("plan_generated", 4), ev("plan_generated", 8), ev("critic_result", 10)]), 6000);
+  assert.equal(elapsedMs([ev("plan_generated", 4), ev("execution_completed", 4)]), 0);
+});
+
+test("missing, malformed and reversed timestamps never invent timing", () => {
+  for (const events of [[], [at(0), at(41)], [ev("command_received", 0)], [ev("plan_generated", 1)], [ev("plan_generated", 5), ev("critic_result", 2)], [ev("plan_generated", 1), { createdAt: "bad" }], null, "x"]) {
+    assert.equal(elapsedMs(events as never), undefined);
+  }
+  assert.equal(elapsedMs([null, {}, { eventType: "plan_generated", createdAt: 5 }, ev("plan_generated", 1), ev("critic_result", 3)] as never), 2000);
+  assert.equal(workerWaitLabel([ev("command_received", 0), ev("critic_result", 9)]), undefined);
+  assert.equal(workerWaitLabel([ev("plan_generated", 9)]), undefined);
+  assert.equal(workerWaitMs([ev("command_received", 9), ev("plan_generated", 2)]), undefined);
+  assert.equal(workerWaitMs([{ eventType: "command_received", createdAt: "bad" }, ev("plan_generated", 2)]), undefined);
+  assert.equal(workerWaitMs(null as never), undefined);
+});
+
+test("wait labels are shown strictly over two seconds", () => {
+  assert.equal(workerWaitLabel([ev("command_received", 0), ev("plan_generated", 2)]), undefined);
+  assert.equal(workerWaitLabel([ev("command_received", 0), ev("plan_generated", 2, 1)]), "Waited 2 s for the worker");
+});
+
+test("elapsedLabel wording follows status and excludes queue time", () => {
+  const events = [ev("command_received", 0), ev("plan_generated", 807), ev("execution_completed", 848)];
+  assert.equal(elapsedLabel("completed", events), "Completed in 41 s");
+  assert.equal(elapsedLabel("rejected", events), "Rejected after 41 s");
+  assert.equal(elapsedLabel("failed", events), "Failed after 41 s");
+  assert.equal(elapsedLabel("executing", events), "41 s so far");
+  assert.equal(elapsedLabel(undefined, [ev("plan_generated", 0), ev("critic_result", 125)]), "2 min 5 s so far");
+  assert.equal(elapsedLabel("completed", [ev("command_received", 0), ev("critic_result", 125)]), undefined);
 });

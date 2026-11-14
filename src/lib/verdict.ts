@@ -1,7 +1,7 @@
 // Display data for the verdict card and the stepper, derived ONLY from audit events. Pure.
 // Payloads are untrusted: everything goes through the defensive readers in payload.ts, a missing
 // piece is left out (never invented), and nothing throws.
-import { elapsedMs, formatElapsed } from "./elapsed.ts";
+import { elapsedMs, formatElapsed, workerWaitLabel } from "./elapsed.ts";
 import { eventContext } from "./event-summary.ts";
 import { kindLabel } from "./kind-label.ts";
 import { readCritic, readExecution, readPlanFailure, readValidator, asRecord } from "./payload.ts";
@@ -88,6 +88,8 @@ export function verdictFacts(events: unknown): string[] {
     const ms = elapsedMs(list_ as never);
     const span = ms === undefined ? undefined : formatElapsed(ms);
     if (span !== undefined) out.push(`${span} elapsed`);
+    const wait = workerWaitLabel(list_ as never);
+    if (wait !== undefined) out.push(wait);
     return out.map(bindUnits);
   } catch {
     return [];
