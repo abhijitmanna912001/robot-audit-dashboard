@@ -17,6 +17,14 @@ Behaviour is driven by simple attributes that a test sets before the run.
 Reads are numbered from 1; on a fully successful run they are: 1 start,
 2 target wait, 3 target verify, 4 return wait, 5 restored verify. Movements
 are numbered 1 (target) and 2 (return).
+
+Supervised (process) tests. ``spawn_config()`` turns these attributes into
+plain data so ``tests.fake_twin_child`` can build an identical fake INSIDE a
+supervised child process. The child's calls come back as records and
+``mirror()`` appends them to this object's ``calls``, so the same assertions
+work. ``HANG`` blocks for ``hang_s`` seconds; if it was not ended by then and
+``resume_marker`` is set, it writes that file before raising: a test that
+terminated the child checks the file never appears (no resumed work).
 """
 
 from __future__ import annotations
@@ -59,6 +67,22 @@ FAST = Timeouts(
 HANG = "hang"
 
 
+def _encode(value: Any) -> Any:
+    """A fake's attribute value as plain data (see ``tests.fake_twin_child.decode``)."""
+    if isinstance(value, BaseException):
+        return {"raise": type(value).__name__}
+    if isinstance(value, StopResult):
+        return {"stop_result": value.confirmed}
+    if isinstance(value, RawTelemetry):
+        return {"raw_telemetry": {
+            "positions": _encode(value.positions), "source_type": _encode(value.source_type),
+            "timestamp": _encode(value.timestamp), "update_received": _encode(value.update_received),
+        }}
+    if isinstance(value, set):
+        return {"set": [_encode(v) for v in sorted(value)]}
+    return {"plain": value}
+
+
 class FakeTwin:
     def __init__(self, start: dict[str, float] | None = None) -> None:
         self.confirmations: Any = ALL_CONFIRMED
@@ -88,6 +112,8 @@ class FakeTwin:
         # read number -> a RawTelemetry, or a function (positions) -> RawTelemetry
         self.read_overrides: dict[int, Any] = {}
         self.release = threading.Event()
+        self.hang_s = 30.0  # how long HANG blocks before it gives up
+        self.resume_marker: Any = None  # file written if a HANG ever resumes on its own
         self._moves = 0
         self._reads = 0
 
@@ -101,10 +127,50 @@ class FakeTwin:
     def _maybe_fail(self, name: str, specific: Any = None) -> None:
         behaviour = specific if specific is not None else self.fail.get(name)
         if behaviour == HANG:
-            self.release.wait(timeout=30)
+            if not self.release.wait(timeout=self.hang_s) and self.resume_marker:
+                with open(self.resume_marker, "a", encoding="utf-8") as marker:
+                    marker.write(f"resumed after a hung {name}\n")
             raise RuntimeError("released")
         if isinstance(behaviour, BaseException):
             raise behaviour
+
+    # -- supervised (process) tests -----------------------------------------
+
+    def uses_hang(self) -> bool:
+        """True if any configured behaviour is HANG (only a supervised session can end it)."""
+        behaviours = [*self.fail.values(), *self.fail_move_number.values(), *self.fail_read_number.values()]
+        return any(isinstance(b, str) and b == HANG for b in behaviours)
+
+    def spawn_config(self) -> dict[str, Any]:
+        """This fake's behaviour as plain data, for a fake built in a child process."""
+        if any(callable(v) for v in self.read_overrides.values()):
+            raise ValueError("a callable read override cannot be sent to a child process")
+        return {
+            "positions": dict(self.positions),
+            "reported_runtime_target": _encode(self.reported_runtime_target),
+            "reported_twin_target": _encode(self.reported_twin_target),
+            "source_type": _encode(self.source_type),
+            "update_received": _encode(self.update_received),
+            "age_s": self.age_s,
+            "omit_timestamp": self.omit_timestamp,
+            "bad_timestamp": _encode(self.bad_timestamp),
+            "ignore_moves": sorted(self.ignore_moves),
+            "move_offset": self.move_offset,
+            "drift_on_move": [[n, dict(d)] for n, d in self.drift_on_move.items()],
+            "stop_result": _encode(self.stop_result),
+            "fail": {name: _encode(b) for name, b in self.fail.items()},
+            "fail_move_number": [[n, _encode(b)] for n, b in self.fail_move_number.items()],
+            "fail_read_number": [[n, _encode(b)] for n, b in self.fail_read_number.items()],
+            "read_overrides": [[n, _encode(v)] for n, v in self.read_overrides.items()],
+            "hang_s": self.hang_s,
+            "resume_marker": self.resume_marker,
+        }
+
+    def mirror(self, record: Any) -> None:
+        """A call made by the fake in a child process, recorded here as if it ran here."""
+        self.calls.append(tuple(record))
+        if self.recorder is not None:
+            self.recorder(record[0])
 
     def names(self) -> list[str]:
         return [call[0] for call in self.calls]

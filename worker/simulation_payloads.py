@@ -108,7 +108,8 @@ ERROR_KINDS = frozenset(
         "return_timeout",  # the arm did not return in time
         "restore_not_verified",  # the restored reading did not hold up
         "overall_timeout",  # the total execution deadline passed
-        "internal_error",  # anything else
+        "interrupted",  # KeyboardInterrupt (Ctrl-C) or SystemExit during the run
+        "internal_error",  # anything else, including an unexpected BaseException
     }
 )
 

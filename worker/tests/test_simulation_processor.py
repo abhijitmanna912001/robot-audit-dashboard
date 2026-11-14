@@ -42,17 +42,25 @@ from simulation_payloads import (
     validate_execution_failed,
     validate_execution_started,
 )
+from simulation_executor import StopResult
+from simulation_payloads import build_execution_failed
 from simulation_processor import (
+    MANUAL_VERIFICATION_NOTICE,
     SIMULATION_COMPLETED_MESSAGE,
     SIMULATION_FAILED_MESSAGE,
     SIMULATION_STARTED_MESSAGE,
+    STAGE_INTERRUPTED_RECORDING,
+    STAGE_INTERRUPTED_WRITE,
+    STAGE_SESSION_CLEANUP,
     SimulationBlockedError,
     SimulationProcessingError,
     main,
     process_one_simulation_command,
 )
+from simulation_supervisor import SupervisionError
 from tests import net_guard
 from tests.fake_twin import ALL_CONFIRMED, FAST, START, FakeTwin
+from tests.inprocess_session import InProcessProvider
 from tests.test_audit_store import FakeClient
 from tests.test_command_processor import WORKER_ID, command_row, critic_returning
 from tests.test_simulation_gates import ALL_TRUE, REAL_CYBERWAVE_GATES, use_canonical_gates
@@ -71,7 +79,13 @@ SIMULATION_MODULES = (
     "simulation_gates",
     "simulation_executor",
     "simulation_processor",
+    "simulation_supervisor",
+    "simulation_child",
 )
+# The ONE narrow exception to the import-isolation policy: the child entry module
+# may import ``os``, only to call ``os._exit`` inside ``_exit_now`` (its watchdog
+# and its closed-pipe exit). Every other simulation module keeps the full list.
+OS_EXIT_MODULE = "simulation_child"
 DECISION_EVENTS = ["plan_generated", "validator_result", "critic_result"]
 TWIN_SUCCESS = [
     "connect", "runtime_target", "twin_target", "read_telemetry", "move_joint",
@@ -118,7 +132,9 @@ class SimulationTestCase(OrchestrationTestCase):
         self.addCleanup(self.twin.release.set)
 
     def run_sim(self, **kwargs: Any) -> Any:
-        return process_one_simulation_command(WORKER_ID, twin=self.twin, timeouts=FAST, **kwargs)
+        return process_one_simulation_command(
+            WORKER_ID, twin=InProcessProvider(self.twin), timeouts=FAST, **kwargs
+        )
 
     def store_side_effects(
         self,
@@ -247,8 +263,10 @@ class CommandLineTests(SimulationTestCase):
             names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
             attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
             with self.subTest(module=module):
-                self.assertFalse({"environ", "getenv", "os", "load_dotenv"} & (names | attrs))
-                self.assertNotIn("os", imports_of(module))
+                self.assertFalse({"environ", "getenv", "load_dotenv"} & (names | attrs))
+                if module != OS_EXIT_MODULE:
+                    self.assertNotIn("os", names | attrs)
+                    self.assertNotIn("os", imports_of(module))
         with mock.patch.dict("os.environ", {
             "CYBERWAVE_MODE": "live", "SIMULATION_TARGET": "live", "EXECUTION_TARGET": "hardware",
             "CYBERWAVE_SOURCE_TYPE": "edge", "LIVE": "1", "ROBOT_LIVE": "true",
@@ -268,7 +286,7 @@ class CommandLineTests(SimulationTestCase):
 
     def test_a_full_run_through_main_reports_safely(self) -> None:
         with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
-                mock.patch.object(simulation_processor, "_production_twin", return_value=self.twin):
+                mock.patch.object(simulation_processor, "_production_twin", return_value=InProcessProvider(self.twin)):
             code, text = self.run_main(["--simulation", "--confirm-write"])
         self.assertEqual(code, 0)
         self.assertIn("Simulation completed; status now completed", text)
@@ -541,7 +559,9 @@ class ApprovalReverificationTests(SimulationTestCase):
 
     def lifecycle(self, approved: Any) -> Any:
         result = ProcessResult(outcome="plan_checked", command_id=approved.snapshot.command_id)
-        return simulation_processor._simulation_lifecycle(result, approved, self.twin, None, FAST)
+        return simulation_processor._simulation_lifecycle(
+            result, approved, InProcessProvider(self.twin), None, FAST
+        )
 
     def assert_refused(self, approved: Any, kind: str = "approval_invalid") -> None:
         outcome = self.lifecycle(approved)
@@ -916,7 +936,7 @@ class RealStoreTests(SimulationTestCase):
         critic = self.calls.review_plan.side_effect
         self._stop_patchers()  # use the real audit_store functions
         result = process_one_simulation_command(
-            WORKER_ID, twin=self.twin, client=client, critic=critic, timeouts=FAST
+            WORKER_ID, twin=InProcessProvider(self.twin), client=client, critic=critic, timeouts=FAST
         )
         return result, client
 
@@ -961,6 +981,333 @@ class RealStoreTests(SimulationTestCase):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Interruptions and process supervision in the audit lifecycle (A2)
+# --------------------------------------------------------------------------
+
+
+class CustomStop(BaseException):
+    """An unexpected BaseException that is neither Ctrl-C nor SystemExit."""
+
+
+class InterruptionLifecycleTests(SimulationTestCase):
+    def run_interrupted(self, exc_type: type[BaseException]) -> BaseException:
+        with self.assertRaises(exc_type) as ctx:
+            self.run_sim()
+        return ctx.exception
+
+    def failed_event(self) -> dict[str, Any]:
+        failed = self.event("execution_failed")  # exactly one write attempt
+        validate_execution_failed(failed)
+        return failed
+
+    def test_ctrl_c_before_execution_started_is_recorded_in_the_documented_order(self) -> None:
+        interrupt = KeyboardInterrupt()
+        with mock.patch.object(simulation_processor, "_preflight", side_effect=interrupt):
+            raised = self.run_interrupted(KeyboardInterrupt)
+        self.assertIs(raised, interrupt)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "not_needed"))
+        self.assertNotIn("execution_started", self.event_types())
+        self.assertEqual(self.transitions()[-1], ("approved", "failed"))
+        self.assertIn("status failed", " ".join(raised.__notes__))
+        self.assert_twin_untouched()
+
+    def test_ctrl_c_before_dispatch(self) -> None:
+        self.twin.fail["connect"] = KeyboardInterrupt()
+        self.run_interrupted(KeyboardInterrupt)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "not_needed"))
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+        self.assert_nothing_sent()
+        order = self.order()
+        self.assertLess(order.index("execution_failed"), order.index("status:failed"))
+
+    def test_ctrl_c_after_dispatch_with_a_confirmed_stop(self) -> None:
+        self.twin.fail_move_number[1] = KeyboardInterrupt()
+        raised = self.run_interrupted(KeyboardInterrupt)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "confirmed"))
+        self.assertEqual(self.twin.names().count("stop"), 1)
+        self.assertEqual(len(self.twin.moves()), 1)
+        self.assertNotIn(MANUAL_VERIFICATION_NOTICE, failed["error"]["detail"])
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+        order = self.order()
+        self.assertLess(order.index("twin:stop"), order.index("execution_failed"))
+        self.assertIn("movement sent yes", " ".join(raised.__notes__))
+
+    def test_ctrl_c_after_dispatch_without_a_reliable_stop_says_the_outcome_is_unknown(self) -> None:
+        self.twin.fail_move_number[1] = KeyboardInterrupt()
+        self.twin.stop_result = StopResult(confirmed=False)
+        raised = self.run_interrupted(KeyboardInterrupt)
+        failed = self.failed_event()
+        self.assertEqual(failed["stop"], "unconfirmed")
+        self.assertTrue(failed["error"]["detail"].startswith(MANUAL_VERIFICATION_NOTICE))
+        self.assertIn(MANUAL_VERIFICATION_NOTICE, " ".join(raised.__notes__))
+
+    def test_system_exit_after_dispatch_keeps_its_code(self) -> None:
+        exit_request = SystemExit(7)
+        self.twin.fail_move_number[1] = exit_request
+        raised = self.run_interrupted(SystemExit)
+        self.assertIs(raised, exit_request)
+        self.assertEqual(raised.code, 7)
+        self.assertEqual(self.failed_event()["error"]["kind"], "interrupted")
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+
+    def test_a_custom_base_exception_is_an_internal_error_and_continues(self) -> None:
+        custom = CustomStop()
+        self.twin.fail_move_number[1] = custom
+        raised = self.run_interrupted(CustomStop)
+        self.assertIs(raised, custom)
+        failed = self.failed_event()
+        self.assertEqual(failed["error"]["kind"], "internal_error")
+        self.assertIn("CustomStop", failed["error"]["detail"])
+
+    def test_a_failed_execution_failed_write_after_ctrl_c_needs_manual_recovery(self) -> None:
+        self.twin.fail_move_number[1] = KeyboardInterrupt()
+        self.store_side_effects(events={"execution_failed": WriteError("insert failed")})
+        with self.assertRaises(SimulationProcessingError) as ctx:
+            self.run_sim()
+        self.assertEqual(ctx.exception.stage, STAGE_EXECUTION_FAILED_WRITE)
+        self.assertIsInstance(ctx.exception.__cause__, KeyboardInterrupt)
+        self.assertTrue(ctx.exception.movement_dispatched)
+        self.assertNotIn(("executing", "failed"), self.transitions())  # never claimed failed
+        self.assertEqual(self.event_types().count("execution_failed"), 1)
+
+    def test_a_failed_status_change_after_ctrl_c_needs_manual_recovery(self) -> None:
+        self.twin.fail_move_number[1] = KeyboardInterrupt()
+        self.store_side_effects(statuses={("executing", "failed"): StateConflictError("no row")})
+        with self.assertRaises(SimulationProcessingError) as ctx:
+            self.run_sim()
+        self.assertEqual(ctx.exception.stage, STAGE_FAILED_UPDATE)
+        self.assertIsInstance(ctx.exception.__cause__, KeyboardInterrupt)
+        self.assertEqual(self.event_types().count("execution_failed"), 1)  # not written again
+        self.assertEqual(self.transitions().count(("executing", "failed")), 1)  # attempted once only
+
+    def test_ctrl_c_during_an_audit_write_writes_nothing_further(self) -> None:
+        self.store_side_effects(events={"execution_started": KeyboardInterrupt()})
+        with self.assertRaises(SimulationProcessingError) as ctx:
+            self.run_sim()
+        self.assertEqual(ctx.exception.stage, STAGE_INTERRUPTED_WRITE)
+        self.assertIsInstance(ctx.exception.__cause__, KeyboardInterrupt)
+        self.assertIsNone(ctx.exception.event_written)  # unknown
+        self.assertNotIn("execution_failed", self.event_types())
+        self.assertNotIn(("approved", "executing"), self.transitions())
+        self.assert_twin_untouched()
+
+    def test_ctrl_c_during_the_failed_status_change_writes_nothing_further(self) -> None:
+        self.twin.ignore_moves = {1}
+        self.store_side_effects(statuses={("executing", "failed"): KeyboardInterrupt()})
+        with self.assertRaises(SimulationProcessingError) as ctx:
+            self.run_sim()
+        self.assertEqual(ctx.exception.stage, STAGE_INTERRUPTED_WRITE)
+        self.assertEqual(self.event_types().count("execution_failed"), 1)
+        self.assertTrue(ctx.exception.movement_dispatched)
+
+    def test_a_twin_session_that_cannot_start_is_recorded_before_anything_is_sent(self) -> None:
+        provider = InProcessProvider(self.twin)
+        with mock.patch.object(provider, "start", side_effect=RuntimeError("spawn failed")):
+            result = process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual((result.execution, result.error_kind), ("failed", "connection_failed"))
+        self.assertEqual(self.failed_event()["stop"], "not_needed")
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+        self.assert_twin_untouched()
+
+    def test_a_twin_process_that_cannot_be_confirmed_stopped_is_reported_after_recording(self) -> None:
+        provider = InProcessProvider(self.twin)
+        real_start = provider.start
+
+        def start_with_stuck_close() -> Any:
+            session = real_start()
+            session.close = mock.Mock(side_effect=SupervisionError("stuck"))
+            return session
+
+        with mock.patch.object(provider, "start", start_with_stuck_close):
+            with self.assertRaises(SimulationProcessingError) as ctx:
+                process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual(ctx.exception.stage, STAGE_SESSION_CLEANUP)
+        self.assertIn("execution_completed", self.event_types())  # the outcome was recorded first
+        self.assertEqual(self.transitions()[-1], ("executing", "completed"))
+
+    def test_raw_twins_are_not_session_providers(self) -> None:
+        with self.assertRaises(SimulationBlockedError):
+            process_one_simulation_command(WORKER_ID, twin=self.twin, timeouts=FAST)
+        self.assertEqual(self.call_names(), [])
+
+    def test_the_cli_reports_an_unknown_physical_outcome(self) -> None:
+        self.twin.ignore_moves = {1}
+        self.twin.stop_result = StopResult(confirmed=False)
+        result = self.run_sim()
+        self.assertTrue(result.manual_verification_required)
+        self.assertTrue(result.error_detail.startswith(MANUAL_VERIFICATION_NOTICE))
+        self.assertIn("PHYSICAL OUTCOME UNKNOWN", simulation_processor._report(result))
+        self.assertIn("Manual verification required", simulation_processor._report(result))
+
+    def test_the_cli_re_raises_ctrl_c_after_printing_what_was_recorded(self) -> None:
+        interrupt = KeyboardInterrupt()
+        interrupt.add_note("Simulation outcome recorded before the interruption continued: test")
+        out = io.StringIO()
+        with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                mock.patch.object(simulation_processor, "_production_twin", return_value=InProcessProvider(self.twin)), \
+                mock.patch.object(simulation_processor, "process_one_simulation_command", side_effect=interrupt), \
+                redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                main(["--simulation", "--confirm-write"])
+        self.assertIs(ctx.exception, interrupt)
+        self.assertIn("Simulation outcome recorded", out.getvalue())
+
+    def test_the_cli_re_raises_ctrl_c_after_a_manual_recovery_message(self) -> None:
+        interrupt = KeyboardInterrupt()
+        error = SimulationProcessingError(
+            "INTERRUPTED DURING A WRITE: test", command_id="c", stage=STAGE_INTERRUPTED_WRITE,
+            event_written=None, movement_dispatched=False,
+        )
+        error.__cause__ = interrupt
+        out = io.StringIO()
+        with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                mock.patch.object(simulation_processor, "_production_twin", return_value=InProcessProvider(self.twin)), \
+                mock.patch.object(simulation_processor, "process_one_simulation_command", side_effect=error), \
+                redirect_stdout(out):
+            with self.assertRaises(KeyboardInterrupt):
+                main(["--simulation", "--confirm-write"])
+        self.assertIn("FAILED at interrupted_write", out.getvalue())
+
+    # -- recording windows: interruptions OUTSIDE an audit-store call -------
+
+    def interrupted_recording(self) -> SimulationProcessingError:
+        with self.assertRaises(SimulationProcessingError) as ctx:
+            self.run_sim()
+        error = ctx.exception
+        self.assertEqual(error.stage, STAGE_INTERRUPTED_RECORDING)
+        self.assertIsInstance(error.__cause__, KeyboardInterrupt)  # the original, kept
+        self.assertIn("Manual recovery needed", str(error))
+        self.assertIn("do NOT write a second execution_failed", str(error))
+        return error
+
+    def raise_after(self, method: str, value: str) -> Any:
+        """Patch _Progress.<method> so it raises Ctrl-C right AFTER confirming ``value``."""
+        original = getattr(simulation_processor._Progress, method)
+
+        def patched(progress: Any, confirmed: str) -> None:
+            original(progress, confirmed)
+            if confirmed == value:
+                raise KeyboardInterrupt
+
+        return mock.patch.object(simulation_processor._Progress, method, patched)
+
+    def test_window_while_building_the_execution_failed_payload(self) -> None:
+        self.twin.ignore_moves = {1}  # an ordinary failure after dispatch
+        self.twin.stop_result = StopResult(confirmed=False)  # so the outcome is unknown
+        with mock.patch.object(simulation_processor, "build_execution_failed", side_effect=KeyboardInterrupt):
+            error = self.interrupted_recording()
+        self.assertIn("building the execution_failed payload (not written)", str(error))
+        self.assertIn("last status confirmed by this run: 'executing'", str(error))
+        self.assertIs(error.event_written, False)  # never claimed written
+        self.assertNotIn("execution_failed", self.event_types())  # not even attempted
+        self.assertNotIn(("executing", "failed"), self.transitions())
+        self.assertIn(MANUAL_VERIFICATION_NOTICE, str(error))  # a movement may have been sent
+
+    def test_window_after_execution_failed_was_written_before_the_status_change(self) -> None:
+        self.twin.ignore_moves = {1}
+        with self.raise_after("confirm", "execution_failed"):
+            error = self.interrupted_recording()
+        self.assertIn("after execution_failed was written", str(error))
+        self.assertIs(error.event_written, True)
+        self.assertEqual(self.event_types().count("execution_failed"), 1)  # no second attempt
+        self.assertNotIn(("executing", "failed"), self.transitions())  # no status change
+        self.assertIn("execution_failed", error.events_written)
+
+    def test_window_after_the_failed_status_change(self) -> None:
+        self.twin.ignore_moves = {1}
+        with self.raise_after("confirm_status", "failed"):
+            error = self.interrupted_recording()
+        self.assertIn("last status confirmed by this run: 'failed'", str(error))
+        self.assertEqual(self.transitions().count(("executing", "failed")), 1)
+        self.assertEqual(self.event_types().count("execution_failed"), 1)
+
+    def test_window_while_building_the_completion_record(self) -> None:
+        with mock.patch.object(simulation_processor, "build_execution_completed", side_effect=KeyboardInterrupt):
+            error = self.interrupted_recording()
+        self.assertIn("building the execution_completed record (not written)", str(error))
+        self.assertIn("verified the restoration", str(error))
+        self.assertNotIn("execution_completed", self.event_types())
+        self.assertNotIn("execution_failed", self.event_types())  # nothing invented instead
+        self.assertEqual(self.transitions()[-1], ("approved", "executing"))
+
+    def test_window_after_execution_completed_was_written_before_the_status_change(self) -> None:
+        with self.raise_after("confirm", "execution_completed"):
+            error = self.interrupted_recording()
+        self.assertIs(error.event_written, True)
+        self.assertEqual(self.event_types().count("execution_completed"), 1)
+        self.assertNotIn(("executing", "completed"), self.transitions())
+        self.assertNotIn("execution_failed", self.event_types())
+
+    def test_window_after_execution_started_was_written_before_executing(self) -> None:
+        with self.raise_after("confirm", "execution_started"):
+            error = self.interrupted_recording()
+        self.assertIn("last status confirmed by this run: 'approved'", str(error))
+        self.assertNotIn(("approved", "executing"), self.transitions())
+        self.assertNotIn("execution_failed", self.event_types())
+        self.assert_twin_untouched()
+
+    def test_window_while_recording_an_executing_conflict(self) -> None:
+        self.store_side_effects(statuses={("approved", "executing"): StateConflictError("no row")})
+        with mock.patch.object(simulation_processor, "build_execution_failed", side_effect=KeyboardInterrupt):
+            error = self.interrupted_recording()
+        self.assertIn("approved -> executing matched no row", str(error))
+        self.assertNotIn("execution_failed", self.event_types())
+        self.assert_twin_untouched()
+
+    def test_window_while_recording_an_earlier_interruption(self) -> None:
+        first = KeyboardInterrupt()
+        with mock.patch.object(simulation_processor, "_preflight", side_effect=first), \
+                mock.patch.object(simulation_processor, "build_execution_failed", side_effect=KeyboardInterrupt):
+            error = self.interrupted_recording()
+        self.assertIsNot(error.__cause__, first)  # the interruption of the recording
+        self.assertIn("interrupted the recording of an earlier KeyboardInterrupt", str(error))
+        self.assertNotIn("execution_failed", self.event_types())
+        self.assertEqual(self.transitions()[-1], ("received", "approved"))
+
+    def test_a_cleanup_failure_keeps_the_primary_failure_kind(self) -> None:
+        self.twin.reported_twin_target = "live"  # not_simulation: nothing sent
+        provider = InProcessProvider(self.twin)
+        real_start = provider.start
+
+        def start_with_stuck_close() -> Any:
+            session = real_start()
+            session.close = mock.Mock(side_effect=SupervisionError("stuck"))
+            return session
+
+        with mock.patch.object(provider, "start", start_with_stuck_close):
+            with self.assertRaises(SimulationProcessingError) as ctx:
+                process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual(ctx.exception.stage, STAGE_SESSION_CLEANUP)
+        self.assertEqual(ctx.exception.failure_kind, "not_simulation")
+        self.assertEqual(self.failed_event()["error"]["kind"], "not_simulation")
+
+    def test_ctrl_c_during_cleanup_with_a_stuck_child_keeps_both(self) -> None:
+        provider = InProcessProvider(self.twin)
+        real_start = provider.start
+        interrupt = KeyboardInterrupt()
+
+        def start_with_interrupted_close() -> Any:
+            session = real_start()
+            session.cleanup_failure = "the main twin process could not be confirmed stopped"
+            session.close = mock.Mock(side_effect=interrupt)
+            return session
+
+        with mock.patch.object(provider, "start", start_with_interrupted_close):
+            with self.assertRaises(SimulationProcessingError) as ctx:
+                process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual(ctx.exception.stage, STAGE_SESSION_CLEANUP)
+        self.assertIs(ctx.exception.__cause__, interrupt)  # the interruption is not lost
+        self.assertIn("could not be confirmed stopped", str(ctx.exception))
+        self.assertIn("execution_completed", self.event_types())  # the outcome was recorded first
+
+    def test_interrupted_is_on_the_payload_allowlist(self) -> None:
+        validate_execution_failed(build_execution_failed("interrupted", "the run was interrupted", "not_needed"))
+
+
 class IsolationTests(SimulationTestCase):
     FORBIDDEN_IMPORTS = {
         "cyberwave", "cyberwave_client", "discover_cyberwave_assets", "test_cyberwave_connection",
@@ -978,7 +1325,34 @@ class IsolationTests(SimulationTestCase):
     def test_simulation_modules_do_not_import_the_sdk_or_any_network_library(self) -> None:
         for module in SIMULATION_MODULES:
             with self.subTest(module=module):
-                self.assertFalse(imports_of(module) & self.FORBIDDEN_IMPORTS)
+                forbidden = self.FORBIDDEN_IMPORTS - ({"os"} if module == OS_EXIT_MODULE else set())
+                self.assertFalse(imports_of(module) & forbidden)
+
+    def test_the_os_exception_is_only_os_exit_in_one_function(self) -> None:
+        tree = source_tree(OS_EXIT_MODULE)
+        uses = []
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
+                        uses.append((function.name, node.attr))
+        self.assertEqual(sorted(set(uses)), [("_exit_now", "_exit")])
+        all_os = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "os"]
+        self.assertEqual(len(all_os), 1)  # the one os._exit call, nothing else
+        self.assertEqual(imports_of(OS_EXIT_MODULE) & self.FORBIDDEN_IMPORTS, {"os"})
+        # The child module imports only the standard library at module level:
+        # spawn imports it in the child before the network guard can be installed.
+        top_level = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top_level |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top_level.add(node.module.split(".")[0])
+        self.assertEqual(
+            top_level,
+            {"__future__", "importlib", "multiprocessing", "os", "signal", "sys", "threading",
+             "time", "typing"},
+        )
 
     def test_no_worker_module_calls_affect_or_a_movement_method(self) -> None:
         modules = sorted(p.stem for p in WORKER_DIR.glob("*.py"))
@@ -1025,7 +1399,7 @@ class IsolationTests(SimulationTestCase):
     def test_importing_the_simulation_modules_loads_no_cyberwave_module(self) -> None:
         code = (
             "import sys, simulation_processor, simulation_executor, sim_telemetry, "
-            "simulation_gates, simulation_payloads; "
+            "simulation_gates, simulation_payloads, simulation_supervisor, simulation_child; "
             "print(sorted(m for m in sys.modules if 'cyberwave' in m))"
         )
         out = subprocess.run(

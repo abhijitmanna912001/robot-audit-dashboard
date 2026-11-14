@@ -795,8 +795,9 @@ printed as `unverifiedPositions`, for diagnosis only.
 ### Time limits
 
 `simulation_executor.Timeouts`. The defaults are also the caps: a caller may tighten a
-limit, never loosen it. Every twin call runs on a worker thread and is abandoned when its
-limit passes, so no call can block the worker.
+limit, never loosen it. Every twin call has an absolute `time.monotonic()` deadline and is
+made in a supervised child process (see "Process supervision"); a call that does not finish
+by its deadline ends that child process. Nothing keeps running in an abandoned thread.
 
 | Limit | Seconds |
 |---|---|
@@ -816,17 +817,113 @@ The movement phases add up to at most 55 s and failure recovery (stop, one last 
 disconnect) to 11 s. The movement phases are cut off 11 s before the total deadline, so
 recovery always fits inside it. Polling interval while waiting: 0.2 s.
 
+Deadlines, all absolute (`T0` is when the rehearsal starts, after the twin processes are
+READY):
+
+| Deadline | Definition |
+|---|---|
+| Overall | `T0 + total_s` |
+| Normal work (every call, movements included) | overall minus the recovery reserve (`stop_s + telemetry_read_s + disconnect_s`). A timeout of a call cut short by this deadline is `overall_timeout`. No movement call can use the recovery reserve |
+| Terminating a timed-out or crashed twin process | `TERMINATE_LIMIT_S` (1 s) for the whole terminate / wait / kill / wait / verify sequence. Not taken from the stop budget |
+| Stop | `min(R0 + stop_s, overall + 1 s - telemetry_read_s - disconnect_s)`, where `R0` is when failure handling starts. No stop is attempted once it has passed |
+| Last reading, disconnect | their own budgets after the stop, through a live session only; neither is started once overall + 1 s has passed |
+
+Fixed outside `Timeouts`: twin-process start-up `CHILD_START_LIMIT_S` (15 s, before `T0`;
+nothing is connected or sent during it) and session cleanup `CLEANUP_LIMIT_S` (2 s for
+closing every twin process). Worst case: 15 s + `total_s` + 1 s + 2 s.
+
+### Process supervision
+
+`simulation_supervisor.py` (parent) and `simulation_child.py` (child), `multiprocessing`
+with the `spawn` start method on every platform:
+
+- **The twin lives in a child process** that owns its connection for the whole session and
+  runs one requested method at a time. The parent keeps every decision: the sequence, the
+  deadlines, the stop policy, whether a movement may have been sent, and the audit
+  lifecycle.
+- **The adapter is a key, not a path.** `TwinSpec.adapter` must be in
+  `simulation_child.ADAPTER_KEYS`: `production` always refuses (there is no Cyberwave
+  adapter), `fake` is the test fake and is accepted only in test mode with the network
+  guard installed in the child before any worker module is imported. Building a twin must
+  be side-effect free: no connection and no remote operation before the gated `connect`.
+- **Two-phase dispatch.** `prepare` (the child checks it may move and answers `intent`;
+  nothing is sent), then the parent records that the movement may now have been sent, then
+  `go`. Only after `go` may the child call `move_joint`. If the child fails after `go`, the
+  movement counts as possibly sent and is never retried. At most two movements per session.
+- **Termination.** A request that misses its deadline, a crash, a Ctrl-C while a request is
+  in flight, or a Ctrl-C during a pipe send (the channel may hold a partial message) ends the
+  child: terminate, wait, kill, wait, verify that it exited, close the pipe and the process
+  handle. Each child has ONE absolute termination deadline, set by the first attempt; a
+  later attempt reuses it and never gets a new budget. A child that cannot be confirmed
+  stopped does not replace the request's own error (timeout, crash): it is recorded as
+  `cleanup_failure` and reported by `close()`.
+- **Cleanup.** `close()` has one absolute deadline, `now + CLEANUP_LIMIT_S`: half for a
+  graceful shutdown, the rest for terminating what is still alive. Every step runs even if
+  Ctrl-C is pressed meanwhile. A Ctrl-C received during cleanup is re-raised, with any
+  cleanup failure attached as a note, never hidden behind `SupervisionError`; without one,
+  a stuck child raises `SupervisionError` (stage `session_cleanup`, after the outcome was
+  recorded, keeping the primary failure kind).
+- **No child without its parent.** A watchdog thread in each child waits on the parent's
+  process sentinel and on a deadline (re-armed with the rehearsal deadline); if the parent
+  disappears or the deadline passes, the child exits at once without another twin call. A
+  closed pipe has the same effect.
+- **Ctrl-C belongs to the parent.** Each child installs "ignore" for SIGINT as the first
+  step of its entry point (`simulation_child.child_main`) and reports its SIGINT
+  disposition in READY (`sigint_ignored`; a test asserts it is `SIG_IGN`). That test shows
+  the handler is installed; it does not show how a real console Ctrl-C is delivered.
+  Limits:
+  - **Actual Windows console Ctrl-C delivery to the child processes has not been
+    verified.** On Windows a console Ctrl-C reaches every process attached to the console;
+    sending one in a test would interrupt the test runner too. A POSIX-only test sends
+    SIGINT to a running child and checks that it survives (skipped on Windows; Ctrl-Break
+    is a different signal and is not used as a substitute).
+  - **A Ctrl-C during start-up can end a child.** Before the child has installed its
+    handler (while spawn is still importing modules), a Ctrl-C can terminate it. The parent
+    then handles it as a start-up failure: the session does not start (`SessionStartError`),
+    it is recorded as `connection_failed` with `stop: "not_needed"` (or as `interrupted`,
+    also `not_needed`, if the same Ctrl-C reached the parent too), and no twin connection
+    or movement happens.
+- **Spawn re-imports the parent's main module.** With `spawn`, each child first imports the
+  module the parent was started from. Under pytest that is pytest itself. Under a
+  production launch (`python simulation_processor.py`) every child would first re-import
+  `simulation_processor` and its module-level imports (import-only: no network, no `.env`
+  read). **That production launch path has not been tested**, and today it cannot be
+  reached: `main()` exits with code 3 at the gate check before `_production_twin()` (a
+  test checks that no twin process is started). A smoke test approximates it: a temporary
+  script launched as `__main__` imports `simulation_processor` and starts a session with
+  the `production` adapter; the child re-imports that script, and the production adapter
+  refuses to build a twin. It shows the spawn mechanics only. The production adapter still
+  refuses, and no live connection or movement is permitted.
+- **Limits.** Ending a local process does not cancel anything a remote service may already
+  have accepted. If the worker process itself is killed, nothing can be recorded (see
+  "Failure and manual recovery").
+
 ### Stop / cancel
 
 The stop method is **not known**. The twin interface has a `stop` method, and only a fake
 implements it. Rules that are already enforced:
 
-- `stop: "not_needed"` when no movement call was started. No stop is attempted.
-- Once a movement call was started (even if that call raised or timed out, since it may
-  still have been sent), stop is called **once**. `"confirmed"` only if it returned the
-  documented success (`StopResult(confirmed=True)`); an exception, a timeout, `None`,
-  `True` or anything else is `"unconfirmed"`.
+- `stop: "not_needed"` when no movement may have been sent (the dispatch intent was never
+  acknowledged). No stop is attempted.
+- Once a movement may have been sent (even if that call raised, timed out or its process
+  crashed), stop is called **at most once**, never retried, and not at all once its
+  deadline has passed. Through the live twin process it is `"confirmed"` only if the gates
+  were valid before and after the call and it returned the documented success
+  (`StopResult(confirmed=True)`); an exception, a timeout, `None`, `True` or anything else
+  is `"unconfirmed"`.
+- **A stop from a fresh session is never a confirmation.** After the twin process that
+  sent the movement had to be terminated, the only possible stop is from a NEW session (a
+  standby child). That needs a documented Cyberwave guarantee, which does not exist: that a
+  stop for the twin from any session cancels a joint movement started by another session,
+  also after that session disconnected, with a response that proves the arm stopped. The
+  adapter declares `fresh_session_stop`; the production key may only declare
+  `"unsupported"` (no standby, no stop: `"unconfirmed"`). Tests use `"best_effort"` with
+  the fake, which shows only that the call is made once and recorded `"unconfirmed"`, not
+  how a real twin behaves.
 - After a failure nothing else is sent: no retry, and no automatic return to the start.
+- Whenever a movement may have been sent and the stop is not `"confirmed"`, the recorded
+  failure detail and the CLI output state: **physical outcome unknown; manual verification
+  required.**
 
 ### Failure and manual recovery
 
@@ -843,16 +940,24 @@ Nothing is retried, ever: not a movement, not an event, not a status update.
 | `execution_completed` could not be written | stage `execution_completed_write`. Status stays `executing`. The readings are in the message | restored and verified |
 | `executing -> completed` did not apply | stage `completed_update`. Not retried, event not written again, simulation not run again | restored and verified |
 | `approved -> executing` matched no row | stage `executing_update`. `execution_failed` attempted once, status left alone | not moved |
+| Ctrl-C / `SystemExit` before `execution_started` | `execution_failed` (`interrupted`, `not_needed`), `approved -> failed`, then the interruption continues | not moved |
+| Ctrl-C / `SystemExit` during the rehearsal | stop at most once if a movement may have been sent (a second Ctrl-C abandons it: `unconfirmed`); twin processes closed; `execution_failed` (`interrupted`); `executing -> failed` only if it was written; then the interruption continues with a note of what was recorded | as for the failure point |
+| Any other unexpected `BaseException` | the same, with kind `internal_error` | as above |
+| An interruption DURING an audit write | stage `interrupted_write`. That write's outcome is unknown: nothing further is written, no further status change | as above |
+| An interruption OUTSIDE an audit call while recording (building the `execution_failed` or completion payload, or between a confirmed write and its status change) | stage `interrupted_recording`, chained from the interruption. The message names the exact lifecycle step and the last confirmed durable state (events confirmed written, last status confirmed). Nothing further is written, nothing retried, no status changed; a payload that was only built is never reported as written | as above |
+| A twin process cannot be confirmed stopped | stage `session_cleanup`, after the outcome was recorded. Stop the local process first | as above |
+| The worker process itself is killed | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves | **unknown** |
 
 The manual steps are the same as under "Manual recovery" above, with one difference: for a
 simulation failure, read `movement_dispatched`, `stop` and the last reading first. If a
-movement was sent and the stop is `unconfirmed`, look at the twin in Cyberwave before doing
-anything else. Interrupting the worker (Ctrl-C) while it is executing tries the stop once
-and then exits; the command stays `executing` with no failure event and needs a person.
+movement may have been sent and the stop is `unconfirmed`, the physical outcome is unknown:
+look at the twin in Cyberwave before doing anything else. The recorded detail and the CLI
+output say so.
 
-Error kinds are a fixed list (`simulation_payloads.ERROR_KINDS`). Details are fixed text
-plus at most an exception class name, at most 200 characters. No SDK error text, URL,
-header, credential or key is written to an event or printed.
+Error kinds are a fixed list (`simulation_payloads.ERROR_KINDS`; `interrupted` is for
+Ctrl-C and `SystemExit`). Details are fixed text plus at most an exception class name, at
+most 200 characters. No SDK error text, URL, header, credential or key is written to an
+event or printed.
 
 ## Safety rules for this code
 

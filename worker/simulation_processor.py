@@ -27,13 +27,30 @@ exercised only by offline tests with a fake twin:
    cannot be written: nothing is connected, read or moved.
 4. ``approved -> executing``. If it does not apply: nothing is connected, read
    or moved; ``execution_failed`` with ``stop: "not_needed"``.
-5. ``run_rehearsal``: verify simulation, start reading, move, verify, return,
-   verify restored. See ``simulation_executor.py``.
+5. The supervised twin session is started (``twin.start()``; children READY
+   before the rehearsal clock), then ``run_rehearsal``: verify simulation, start
+   reading, move, verify, return, verify restored. See ``simulation_executor.py``
+   and ``simulation_supervisor.py``. The session is closed (every child process
+   verified gone) before the outcome is recorded.
 6. Success: ``execution_completed`` (start, target and restored readings), then
    ``executing -> completed``. The completion event is built only from a
    verified restoration.
 7. Failure: ``execution_failed`` (fixed error kind, the real stop result, the
-   last reading only if one validated), then ``executing -> failed``.
+   last reading only if one validated), then ``executing -> failed``. When a
+   movement may have been sent and the stop is not confirmed, the recorded detail
+   and the CLI output say that the physical outcome is unknown and manual
+   verification is required.
+
+Interruption (Ctrl-C, ``SystemExit``, any other ``BaseException``): outside an
+audit write, exactly one ``execution_failed`` (kind ``interrupted``, or
+``internal_error`` for an unexpected ``BaseException``) is attempted, then the
+conditional status change only if it was written, then the ORIGINAL exception
+continues with a note describing what was recorded. An interruption DURING an
+audit write leaves that write's outcome unknown: nothing further is written and
+``SimulationProcessingError`` (stage ``interrupted_write``) asks for manual
+recovery. If this process is killed outright, nothing can be recorded: the
+command stays as it was (for example ``executing``) for manual recovery, and the
+twin children end themselves (their watchdog sees the parent gone).
 
 Every payload is checked by ``simulation_payloads.validate_simulation_event``
 before the write. The event is always written before its status change, each
@@ -58,7 +75,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import audit_store
 from audit_store import StateConflictError
@@ -87,6 +104,7 @@ from simulation_executor import (
     RehearsalFailure,
     RehearsalSuccess,
     Timeouts,
+    interruption_kind,
     run_rehearsal,
 )
 from simulation_gates import (
@@ -101,6 +119,7 @@ from simulation_gates import (
 )
 from simulation_payloads import (
     MAX_TEXT_LENGTH,
+    STOP_CONFIRMED,
     STOP_NOT_NEEDED,
     STOP_UNCONFIRMED,
     TOLERANCE_RAD,
@@ -110,6 +129,7 @@ from simulation_payloads import (
     build_execution_started,
     validate_simulation_event,
 )
+from simulation_supervisor import SupervisionError, canonical_gate_blockers, merge_blockers
 
 __all__ = [
     "SIMULATION_COMPLETED_MESSAGE",
@@ -126,6 +146,18 @@ __all__ = [
 SIMULATION_STARTED_MESSAGE = "Simulation started: SO-101 digital twin, simulation only"
 SIMULATION_COMPLETED_MESSAGE = "Simulation completed: joint _1 moved, verified and restored"
 SIMULATION_FAILED_MESSAGE = "Simulation failed: see the error and the stop result"
+
+# Stages of SimulationProcessingError added by process supervision (A2).
+STAGE_INTERRUPTED_WRITE = "interrupted_write"  # an audit write was interrupted: unknown
+STAGE_SESSION_CLEANUP = "session_cleanup"  # a twin child could not be confirmed stopped
+# An interruption OUTSIDE an audit call while the lifecycle was building or
+# between records (for example while the execution_failed payload was built,
+# or after an event was written but before its status change).
+STAGE_INTERRUPTED_RECORDING = "interrupted_recording"
+
+# Stated in the recorded failure and the CLI output whenever a movement may have
+# been sent and no reliable stop was established.
+MANUAL_VERIFICATION_NOTICE = "Physical outcome unknown; manual verification required."
 
 
 class SimulationBlockedError(Exception):
@@ -186,6 +218,8 @@ class SimulationResult:
     movement_dispatched: bool = False
     # completed: {"start", "target", "restored"}; failed: {"last": ...} if read
     telemetry: dict[str, Any] | None = None
+    # A movement may have been sent and the stop is not confirmed.
+    manual_verification_required: bool = False
 
 
 def _production_twin() -> Any:
@@ -210,21 +244,25 @@ def process_one_simulation_command(
 ) -> SimulationResult:
     """Claim and process at most one command through the simulation lifecycle.
 
-    ``twin`` implements ``simulation_executor.SimulationTwin`` and is required:
-    there is no default and no Cyberwave implementation (tests pass a fake). If
-    its ``confirmations`` are not the canonical ``CYBERWAVE_GATES`` object (exact
-    type and identity) with every gate confirmed, ``SimulationBlockedError`` is
-    raised BEFORE anything is claimed. ``timeouts`` may only be tightened.
+    ``twin`` is the supervised twin-session provider and is required: there is
+    no default and no Cyberwave implementation (in production it would be a
+    ``simulation_supervisor.ProcessSessionProvider``; tests pass a provider of a
+    fake). Its gate check AND the parent's canonical ``CYBERWAVE_GATES`` must be
+    fully confirmed, otherwise ``SimulationBlockedError`` is raised BEFORE
+    anything is claimed; so is it for anything that cannot start a supervised
+    session. ``timeouts`` may only be tightened.
 
     Raises whatever the claim raises, ``CommandProcessingError`` for a failed
     write in the decision part, and ``SimulationProcessingError`` for one in the
     simulation lifecycle.
     """
-    blockers = twin_gate_blockers(twin)
+    blockers = _provider_gate_blockers(twin)
     if blockers:
         raise SimulationBlockedError("; ".join(blockers))
     if not isinstance(timeouts, Timeouts):
         raise TypeError("timeouts must be a Timeouts instance.")
+    if not callable(getattr(twin, "start", None)):
+        raise SimulationBlockedError("no supervised twin session provider was given")
 
     decided = decide_one_command(worker_id, client=client, critic=critic)
     if decided.approved is None:
@@ -241,12 +279,29 @@ def process_one_simulation_command(
 # --------------------------------------------------------------------------
 
 
+def _provider_gate_blockers(twin: Any) -> tuple[str, ...]:
+    """The session provider's own gate check plus the parent's canonical gates."""
+    if callable(getattr(type(twin), "gate_blockers", None)):
+        try:
+            own = tuple(twin.gate_blockers())
+        except Exception:
+            own = ("the twin session gate check failed",)
+    else:
+        own = twin_gate_blockers(twin)
+    return merge_blockers(own, canonical_gate_blockers())
+
+
 def _write_event(
     command_id: str, event_type: str, message: str, payload: dict[str, Any], client: Any | None
 ) -> None:
     """The only way a simulation event is written: validated first, one insert."""
     validate_simulation_event(event_type, payload)
-    audit_store.append_event(command_id, event_type, message, payload, client=client)
+    try:
+        audit_store.append_event(command_id, event_type, message, payload, client=client)
+    except Exception:
+        raise
+    except BaseException as exc:
+        raise _InterruptedWrite(f"the {event_type} insert", exc) from exc
 
 
 def _verify_approval(approved: Any) -> PlanSnapshot:
@@ -279,7 +334,7 @@ def _verify_approval(approved: Any) -> PlanSnapshot:
 def _preflight(approved: ApprovedPlan, twin: Any) -> None:
     snapshot = _verify_approval(approved)
     action = require_first_rehearsal_plan(snapshot)
-    blockers = twin_gate_blockers(twin)
+    blockers = _provider_gate_blockers(twin)
     if blockers:
         raise GateError("gate_unconfirmed", f"movement is blocked: {blockers[0]}")
     revalidate_against_shared_limits(snapshot.plan_id, [action])
@@ -306,6 +361,153 @@ def _snapshot_payload(snapshot: Any) -> dict[str, Any] | None:
         return None
 
 
+@dataclass
+class _Progress:
+    """What this run knows for certain, for a manual-recovery message.
+
+    ``events_written`` and ``status`` change ONLY after the audit store confirmed
+    the write (``confirm`` / ``confirm_status``), so a report never claims an
+    event that was merely built. ``stage`` names the lifecycle step in progress.
+    """
+
+    events_written: list[str]
+    dispatched: bool = False
+    stop: str | None = None
+    kind: str | None = None
+    detail: str | None = None
+    last: dict[str, Any] | None = None
+    restored_verified: bool = False
+    status: str = "approved"  # the last status this run confirmed
+    stage: str = "the pre-checks"
+    stage_event_written: bool | None = False  # the event this stage is about
+    intended_status: str | None = None
+    earlier_interruption: str | None = None
+    # An interruption re-raised on purpose, matched by IDENTITY. Known minor limit:
+    # if the very same exception object were raised again in a later recording
+    # window it would pass through unconverted. A real Ctrl-C creates a new object
+    # each time; only a test that reuses one instance could hit this.
+    passthrough: BaseException | None = None
+    session: Any = None  # a twin session that is open and must be closed
+
+    def at(self, stage: str, *, event_written: bool | None = False, intended: str | None = None) -> None:
+        self.stage = stage
+        self.stage_event_written = event_written
+        self.intended_status = intended
+
+    def confirm(self, event_type: str) -> None:
+        """``event_type`` was confirmed written by the audit store."""
+        self.events_written.append(event_type)
+        self.at(f"after {event_type} was written", event_written=True, intended=self.intended_status)
+
+    def confirm_status(self, status: str) -> None:
+        """The conditional status change to ``status`` was confirmed."""
+        self.status = status
+        self.at(f"after the status change to '{status}'", event_written=True)
+
+    def durable(self) -> str:
+        return (
+            f"events confirmed written: {', '.join(self.events_written) or 'none'}; "
+            f"last status confirmed by this run: '{self.status}'"
+        )
+
+    def summary(self) -> str:
+        if self.restored_verified:
+            return "Movement sent; this run verified the restoration of all six joints."
+        text = (
+            f"Movement sent: {'YES (it may have been sent)' if self.dispatched else 'no'}. "
+            f"Stop: {self.stop or 'not attempted'}."
+        )
+        if self.dispatched and self.stop != STOP_CONFIRMED:
+            text += f" {MANUAL_VERIFICATION_NOTICE}"
+        return text
+
+
+class _InterruptedWrite(BaseException):
+    """An audit write was interrupted: its outcome is unknown. Not an Exception on
+    purpose, so no ``except Exception`` handler treats it as an ordinary failure
+    (which would write a further event)."""
+
+    def __init__(self, label: str, original: BaseException) -> None:
+        super().__init__(label)
+        self.label = label
+        self.original = original
+
+
+def _set_status(command_id: str, expected: str, status: str, client: Any | None) -> Any:
+    """The only way a simulation status change is made: one conditional update."""
+    try:
+        return audit_store.set_command_status(
+            command_id, expected_status=expected, status=status, client=client
+        )
+    except Exception:
+        raise
+    except BaseException as exc:
+        raise _InterruptedWrite(f"the {expected} -> {status} status update", exc) from exc
+
+
+def _add_outcome_note(exc: BaseException, result: SimulationResult) -> None:
+    note = (
+        "Simulation outcome recorded before the interruption continued: "
+        f"execution {result.execution}, status {result.final_status}, "
+        f"error {result.error_kind or 'none'}, "
+        f"movement sent {'yes' if result.movement_dispatched else 'no'}, "
+        f"stop {result.stop or 'n/a'}."
+    )
+    if result.manual_verification_required:
+        note += f" {MANUAL_VERIFICATION_NOTICE}"
+    try:
+        exc.add_note(note)
+    except Exception:
+        pass
+
+
+def _record_then_reraise(progress: _Progress, exc: BaseException, record: Any) -> NoReturn:
+    """Record the failure caused by ``exc``, then continue with ``exc`` itself."""
+    progress.earlier_interruption = type(exc).__name__
+    try:
+        result = record()
+    except SimulationProcessingError as error:
+        raise error from exc
+    _add_outcome_note(exc, result)
+    progress.passthrough = exc
+    raise exc
+
+
+def _interrupted_text(exc: BaseException, when: str) -> str:
+    name = type(exc).__name__
+    if interruption_kind(exc) == "interrupted":
+        return f"the run was interrupted ({name}) {when}"
+    return f"the run ended on an unexpected {name} {when}"
+
+
+def _close_session(session: Any) -> tuple[str | None, BaseException | None]:
+    """Close the session. Never raises. Returns (a cleanup problem, an interruption).
+
+    An interruption during cleanup is returned as is (``close()`` finished every
+    termination step first); a cleanup failure that came with it is still
+    returned as the problem, never lost.
+    """
+    try:
+        session.close()
+    except SupervisionError:
+        return "the twin process could not be confirmed stopped", None
+    except Exception as exc:
+        return f"closing the twin session failed ({type(exc).__name__})", None
+    except BaseException as exc:
+        failure = getattr(session, "cleanup_failure", None)
+        return (failure if type(failure) is str else None), exc
+    return None, None
+
+
+def _close_open_session(progress: _Progress) -> str:
+    """Close a session still open after an unexpected interruption. Never raises."""
+    session, progress.session = progress.session, None
+    if session is None:
+        return ""
+    problem, _late = _close_session(session)
+    return f" Twin session closed; cleanup: {problem}." if problem else " Twin session closed."
+
+
 def _simulation_lifecycle(
     decision: ProcessResult,
     approved: ApprovedPlan,
@@ -313,10 +515,77 @@ def _simulation_lifecycle(
     client: Any | None,
     timeouts: Timeouts,
 ) -> SimulationResult:
+    progress = _Progress(events_written=list(approved.events_written))
+    snapshot = approved.snapshot
+    try:
+        return _lifecycle_steps(decision, approved, twin, client, timeouts, progress)
+    except _InterruptedWrite as stopped:
+        cleanup = _close_open_session(progress)
+        raise SimulationProcessingError(
+            f"INTERRUPTED DURING A WRITE for command {snapshot.command_id}, plan "
+            f"{snapshot.plan_id}: {stopped.label} was interrupted "
+            f"({type(stopped.original).__name__}). Its outcome is unknown, so nothing further "
+            "was written and this run changed no status after it. Last confirmed durable "
+            f"state: {progress.durable()}. {progress.summary()}{cleanup} Manual recovery "
+            "needed: check the timeline and the status before changing anything.",
+            command_id=snapshot.command_id,
+            stage=STAGE_INTERRUPTED_WRITE,
+            event_written=None,
+            plan_id=snapshot.plan_id,
+            events_written=tuple(progress.events_written),
+            intended_status=progress.intended_status,
+            movement_dispatched=progress.dispatched,
+            failure_kind=progress.kind,
+            failure_detail=progress.detail,
+            stop=progress.stop,
+            last_telemetry=progress.last,
+        ) from stopped.original
+    except Exception:
+        raise
+    except BaseException as exc:
+        if exc is progress.passthrough:
+            raise  # recorded first; the interruption continues on purpose
+        # An interruption OUTSIDE an audit call: while a record was being built,
+        # or between a confirmed write and the next step. Nothing further is
+        # written, nothing is retried and no status is changed.
+        cleanup = _close_open_session(progress)
+        earlier = (
+            f" (it interrupted the recording of an earlier {progress.earlier_interruption})"
+            if progress.earlier_interruption else ""
+        )
+        raise SimulationProcessingError(
+            f"INTERRUPTED WHILE RECORDING for command {snapshot.command_id}, plan "
+            f"{snapshot.plan_id}: {type(exc).__name__}{earlier} during {progress.stage}. Last "
+            f"confirmed durable state: {progress.durable()}. Nothing further was written, no "
+            f"write was retried and no status was changed after the interruption. "
+            f"{progress.summary()}{cleanup} Manual recovery needed: check the timeline and the "
+            "status before changing anything; do NOT write a second execution_failed.",
+            command_id=snapshot.command_id,
+            stage=STAGE_INTERRUPTED_RECORDING,
+            event_written=progress.stage_event_written,
+            plan_id=snapshot.plan_id,
+            events_written=tuple(progress.events_written),
+            intended_status=progress.intended_status,
+            movement_dispatched=progress.dispatched,
+            failure_kind=progress.kind,
+            failure_detail=progress.detail,
+            stop=progress.stop,
+            last_telemetry=progress.last,
+        ) from exc
+
+
+def _lifecycle_steps(
+    decision: ProcessResult,
+    approved: ApprovedPlan,
+    twin: Any,
+    client: Any | None,
+    timeouts: Timeouts,
+    progress: _Progress,
+) -> SimulationResult:
     snapshot = approved.snapshot
     command_id = snapshot.command_id
     plan_id = snapshot.plan_id
-    events_written = list(approved.events_written)
+    events_written = progress.events_written
 
     def fail(
         known_status: str,
@@ -328,13 +597,16 @@ def _simulation_lifecycle(
         last: dict[str, Any] | None = None,
         dispatched: bool = False,
     ) -> SimulationResult:
+        progress.dispatched, progress.stop = dispatched, stop
+        progress.kind, progress.detail, progress.last = kind, detail, last
         return _record_failure(
             decision, snapshot, client, events_written,
             known_status=known_status, kind=kind, detail=detail, context=context,
-            stop=stop, last=last, dispatched=dispatched,
+            stop=stop, last=last, dispatched=dispatched, progress=progress,
         )
 
     # 1. Pre-checks. Pure: nothing is connected, read or sent.
+    progress.at("the pre-checks (nothing connected or sent)")
     try:
         _preflight(approved, twin)
     except GateError as exc:
@@ -347,8 +619,20 @@ def _simulation_lifecycle(
             "approved", "internal_error", f"pre-check failed unexpectedly ({type(exc).__name__})",
             f"a pre-check failed unexpectedly ({type(exc).__name__}). Nothing was sent.",
         )
+    except BaseException as exc:
+        # Interrupted before execution_started: execution_failed, then
+        # approved -> failed (the documented order), then the interruption.
+        interrupted = exc
+        _record_then_reraise(progress, interrupted, lambda: fail(
+            "approved", interruption_kind(interrupted),
+            _interrupted_text(interrupted, "before the simulation started"),
+            f"the run was interrupted ({type(interrupted).__name__}) before the simulation "
+            "started. Nothing was connected or sent.",
+        ))
 
     # 2. execution_started. Nothing else happens unless it is written.
+    progress.at("the execution_started insert (its outcome is unknown if interrupted here)",
+                event_written=None)
     try:
         _write_event(
             command_id, "execution_started", SIMULATION_STARTED_MESSAGE,
@@ -364,15 +648,17 @@ def _simulation_lifecycle(
             + ("; it MAY have been written" if started is None else "; not written")
             + ". Nothing was connected, read or sent.",
         )
-    events_written.append("execution_started")
+    progress.confirm("execution_started")
 
     # 3. approved -> executing. The simulation is touched only if this succeeded.
+    progress.at("the approved -> executing status update (its outcome is unknown if "
+                "interrupted here)", event_written=True, intended="executing")
     try:
-        audit_store.set_command_status(
-            command_id, expected_status="approved", status="executing", client=client
-        )
+        _set_status(command_id, "approved", "executing", client)
     except StateConflictError as exc:
         # Someone else changed the status: it is not known, so it is not touched.
+        progress.at("recording that approved -> executing matched no row: building "
+                    "execution_failed (not written)", event_written=False)
         note = _append_failed_once(
             command_id,
             build_execution_failed(
@@ -381,7 +667,7 @@ def _simulation_lifecycle(
                 STOP_NOT_NEEDED,
             ),
             client,
-            events_written,
+            progress,
         )
         raise SimulationProcessingError(
             f"EXECUTING UPDATE FAILED for command {command_id}, plan {plan_id}: approved -> "
@@ -409,12 +695,109 @@ def _simulation_lifecycle(
             f"approved -> executing failed ({_describe(exc)}); {_status_state(exc)}. "
             "Nothing was connected, read or sent.",
         )
+    progress.confirm_status("executing")
 
-    # 4. The rehearsal, on the snapshot that was validated and approved.
-    outcome = run_rehearsal(snapshot, twin, timeouts)
+    # 4. The supervised twin session: children started and READY before the
+    #    rehearsal clock. Nothing is connected or sent while it starts.
+    progress.at("starting the twin session (nothing connected or sent)")
+    try:
+        session = twin.start()
+    except Exception as exc:
+        return fail(
+            "executing", "connection_failed",
+            f"the twin process could not be started ({type(exc).__name__}); nothing was sent",
+            f"the twin process could not be started ({type(exc).__name__}). Nothing was "
+            "connected or sent.",
+        )
+    except BaseException as exc:
+        interrupted = exc
+        _record_then_reraise(progress, interrupted, lambda: fail(
+            "executing", interruption_kind(interrupted),
+            _interrupted_text(interrupted, "while the twin process was starting"),
+            f"the run was interrupted ({type(interrupted).__name__}) while the twin process "
+            "was starting. Nothing was connected or sent.",
+        ))
+
+    # 5. The rehearsal, on the snapshot that was validated and approved. The
+    #    session is closed (every child verified gone) before anything is recorded.
+    progress.session = session
+    progress.at("the rehearsal")
+    interrupt: BaseException | None = None
+    try:
+        outcome: Any = run_rehearsal(snapshot, session, timeouts)
+    except Exception as exc:  # run_rehearsal never raises Exception; fail closed anyway
+        outcome = RehearsalFailure(
+            kind="internal_error",
+            detail=f"the rehearsal raised unexpectedly ({type(exc).__name__})",
+            stop=STOP_UNCONFIRMED, last_telemetry=None,
+            target_dispatched=True, return_dispatched=False,
+        )
+    except BaseException as exc:
+        interrupt = exc
+        outcome = getattr(exc, "rehearsal_outcome", None)
+    progress.at("closing the twin session")
+    cleanup_problem, late = _close_session(session)
+    progress.session = None
+    if interrupt is None:
+        interrupt = late
+    if interrupt is not None:
+        progress.earlier_interruption = type(interrupt).__name__
+    if interrupt is not None and not isinstance(outcome, (RehearsalSuccess, RehearsalFailure)):
+        outcome = RehearsalFailure(
+            kind=interruption_kind(interrupt),
+            detail="the run was interrupted before it reported an outcome",
+            stop=STOP_UNCONFIRMED, last_telemetry=None,
+            target_dispatched=True, return_dispatched=False,
+        )
+
+    try:
+        result = _record_rehearsal(
+            outcome, fail, decision, snapshot, client, events_written, progress
+        )
+    except SimulationProcessingError as error:
+        if interrupt is not None:
+            raise error from interrupt
+        raise
+    if cleanup_problem is not None:
+        dispatched = bool(result.movement_dispatched)
+        raise SimulationProcessingError(
+            f"TWIN PROCESS CLEANUP FAILED for command {command_id}, plan {plan_id}: "
+            f"{cleanup_problem}. The outcome was recorded (execution {result.execution}, "
+            f"status {result.final_status}). A local twin process may still be running: "
+            "stop it before anything else."
+            + (f" {MANUAL_VERIFICATION_NOTICE}" if dispatched else ""),
+            command_id=command_id,
+            stage=STAGE_SESSION_CLEANUP,
+            event_written=True,
+            plan_id=plan_id,
+            events_written=tuple(events_written),
+            intended_status=result.final_status,
+            movement_dispatched=dispatched,
+            failure_kind=result.error_kind,
+            failure_detail=result.error_detail,
+            stop=result.stop,
+        ) from interrupt
+    if interrupt is not None:
+        _add_outcome_note(interrupt, result)
+        progress.passthrough = interrupt
+        raise interrupt
+    return result
+
+
+def _record_rehearsal(
+    outcome: Any,
+    fail: Any,
+    decision: ProcessResult,
+    snapshot: PlanSnapshot,
+    client: Any | None,
+    events_written: list[str],
+    progress: _Progress,
+) -> SimulationResult:
+    command_id = snapshot.command_id
+    plan_id = snapshot.plan_id
     if isinstance(outcome, RehearsalFailure):
         moved = (
-            "A movement call WAS started: the arm may have moved."
+            "A movement call MAY have been sent: the arm may have moved."
             if outcome.target_dispatched
             else "No movement was sent."
         )
@@ -423,7 +806,7 @@ def _simulation_lifecycle(
             f"the simulation failed ({outcome.kind}). {moved} Stop: {outcome.stop}.",
             stop=outcome.stop,
             last=_snapshot_payload(outcome.last_telemetry),
-            dispatched=outcome.target_dispatched,
+            dispatched=outcome.target_dispatched or outcome.return_dispatched,
         )
     if not isinstance(outcome, RehearsalSuccess):
         return fail(
@@ -431,8 +814,11 @@ def _simulation_lifecycle(
             "the rehearsal returned no usable result; whether a movement was sent is unknown.",
             stop=STOP_UNCONFIRMED, dispatched=True,
         )
+    progress.dispatched, progress.stop, progress.restored_verified = True, None, True
 
-    # 5. execution_completed, built only from the verified readings.
+    # 6. execution_completed, built only from the verified readings.
+    progress.at("building the execution_completed record (not written)",
+                event_written=False, intended="completed")
     try:
         telemetry = {
             "start": outcome.start.to_payload(),
@@ -452,6 +838,8 @@ def _simulation_lifecycle(
             last=_snapshot_payload(outcome.restored),
             dispatched=True,
         )
+    progress.at("the execution_completed insert (its outcome is unknown if interrupted here)",
+                event_written=None, intended="completed")
     try:
         _write_event(command_id, "execution_completed", SIMULATION_COMPLETED_MESSAGE, completed, client)
     except Exception as exc:
@@ -477,13 +865,13 @@ def _simulation_lifecycle(
             movement_dispatched=True,
             last_telemetry=telemetry["restored"],
         ) from None
-    events_written.append("execution_completed")
+    progress.confirm("execution_completed")
 
-    # 6. executing -> completed. Never retried; the event is never written again.
+    # 7. executing -> completed. Never retried; the event is never written again.
+    progress.at("the executing -> completed status update (its outcome is unknown if "
+                "interrupted here)", event_written=True, intended="completed")
     try:
-        audit_store.set_command_status(
-            command_id, expected_status="executing", status="completed", client=client
-        )
+        _set_status(command_id, "executing", "completed", client)
     except Exception as exc:
         raise SimulationProcessingError(
             f"STATUS UPDATE FAILED for command {command_id}, plan {plan_id}: "
@@ -500,6 +888,7 @@ def _simulation_lifecycle(
             movement_dispatched=True,
             last_telemetry=telemetry["restored"],
         ) from None
+    progress.confirm_status("completed")
 
     return SimulationResult(
         outcome="executed",
@@ -512,9 +901,11 @@ def _simulation_lifecycle(
 
 
 def _append_failed_once(
-    command_id: str, payload: dict[str, Any], client: Any | None, events_written: list[str]
+    command_id: str, payload: dict[str, Any], client: Any | None, progress: _Progress
 ) -> str:
     """Try ONCE to write execution_failed. Returns a sentence for an error message."""
+    progress.at("the execution_failed insert (its outcome is unknown if interrupted here)",
+                event_written=None)
     try:
         _write_event(command_id, "execution_failed", SIMULATION_FAILED_MESSAGE, payload, client)
     except Exception as exc:
@@ -524,7 +915,7 @@ def _append_failed_once(
             + ("; it MAY have been written." if written is None else "; it was not written.")
             + " The failure is NOT recorded in the audit log."
         )
-    events_written.append("execution_failed")
+    progress.confirm("execution_failed")
     return "execution_failed was written."
 
 
@@ -541,6 +932,7 @@ def _record_failure(
     stop: str,
     last: dict[str, Any] | None,
     dispatched: bool,
+    progress: _Progress,
 ) -> SimulationResult:
     """execution_failed first; ONLY if written, ``known_status -> failed``.
 
@@ -549,6 +941,12 @@ def _record_failure(
     """
     command_id = snapshot.command_id
     plan_id = snapshot.plan_id
+    progress.at("building the execution_failed payload (not written)",
+                event_written=False, intended="failed")
+    manual = dispatched and stop != STOP_CONFIRMED
+    if manual:
+        # The notice comes first so a long detail can never truncate it away.
+        detail = f"{MANUAL_VERIFICATION_NOTICE} {detail}"[:MAX_TEXT_LENGTH].rstrip()
     try:
         payload = build_execution_failed(kind, detail, stop, last)
     except SimulationPayloadError:
@@ -561,6 +959,7 @@ def _record_failure(
         f"Stop: {stop}. Last reading: "
         + (json.dumps(last, sort_keys=True) if last is not None else "none")
         + "."
+        + (f" {MANUAL_VERIFICATION_NOTICE}" if manual else "")
     )
     extra = {
         "movement_dispatched": dispatched,
@@ -569,6 +968,8 @@ def _record_failure(
         "stop": stop,
         "last_telemetry": last,
     }
+    progress.at("the execution_failed insert (its outcome is unknown if interrupted here)",
+                event_written=None, intended="failed")
     try:
         _write_event(command_id, "execution_failed", SIMULATION_FAILED_MESSAGE, payload, client)
     except Exception as exc:
@@ -591,12 +992,12 @@ def _record_failure(
             intended_status="failed",
             **extra,
         ) from None
-    events_written.append("execution_failed")
+    progress.confirm("execution_failed")
 
+    progress.at(f"the {known_status} -> failed status update (its outcome is unknown if "
+                "interrupted here)", event_written=True, intended="failed")
     try:
-        audit_store.set_command_status(
-            command_id, expected_status=known_status, status="failed", client=client
-        )
+        _set_status(command_id, known_status, "failed", client)
     except Exception as exc:
         raise SimulationProcessingError(
             f"STATUS UPDATE FAILED for command {command_id}, plan {plan_id}: {context} "
@@ -612,6 +1013,7 @@ def _record_failure(
             intended_status="failed",
             **extra,
         ) from None
+    progress.confirm_status("failed")
 
     return SimulationResult(
         outcome="executed",
@@ -623,6 +1025,7 @@ def _record_failure(
         stop=stop,
         movement_dispatched=dispatched,
         telemetry={"last": last} if last is not None else None,
+        manual_verification_required=manual,
     )
 
 
@@ -648,6 +1051,11 @@ def _report(result: SimulationResult) -> str:
     )
     if result.execution == "failed":
         line += f" Error: {result.error_kind} ({result.error_detail}). Stop: {result.stop}."
+    if result.manual_verification_required:
+        line += (
+            " PHYSICAL OUTCOME UNKNOWN: a movement may have been sent and no reliable stop "
+            "was established. Manual verification required."
+        )
     if result.telemetry is not None:
         line += " Readings: " + json.dumps(result.telemetry, sort_keys=True)
     return line + " Simulation only: no physical hardware."
@@ -694,11 +1102,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         twin = _production_twin()
         result = process_one_simulation_command(args.worker_id, twin=twin)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # The outcome was recorded first (see the notes); the interruption then
+        # ends the program exactly as it would have.
+        for note in getattr(exc, "__notes__", None) or ():
+            print(redact(note))
+        raise
     except SimulationBlockedError as exc:
         print(f"BLOCKED: {exc}. Nothing was claimed, written or sent.")
         return 3
     except CommandProcessingError as exc:
         print(f"FAILED at {exc.stage}: {redact(exc)}")
+        if isinstance(exc.__cause__, (KeyboardInterrupt, SystemExit)):
+            raise exc.__cause__
         return 1
     except Exception as exc:
         print(f"Claim failed, nothing processed: {redact(_describe(exc))}")

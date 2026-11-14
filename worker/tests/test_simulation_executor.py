@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import multiprocessing
 import time
 import types
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -26,6 +28,8 @@ from simulation_executor import (
 )
 from simulation_gates import LiveSimulationGates, load_shared_limits
 from tests.fake_twin import ALL_CONFIRMED, FAST, HANG, START, FakeTwin
+from tests.fake_twin_child import open_process_session
+from tests.inprocess_session import InProcessSession
 from tests.test_simulation_gates import (
     ALL_TRUE,
     REAL_CYBERWAVE_GATES,
@@ -50,8 +54,23 @@ SUCCESS_CALLS = [
 DEFAULT_PLAN: Any = object()  # sentinel: "use the permitted first-rehearsal plan"
 
 
+def assert_no_child_processes(test: unittest.TestCase) -> None:
+    """No supervised twin process may outlive a test (orphans, unfinished work)."""
+    left = [p.name for p in multiprocessing.active_children()]
+    test.assertEqual(left, [], "a twin child process was left running")
+
+
+def open_session(test: unittest.TestCase, twin: FakeTwin, **spec_options: Any) -> Any:
+    """A STARTED session for ``twin``: supervised (real child process) when the fake
+    uses HANG, which only process supervision can end; otherwise in this process."""
+    if twin.uses_hang() or spec_options:
+        return open_process_session(test, twin, **spec_options)
+    return InProcessSession(twin)
+
+
 class ExecutorCase(unittest.TestCase):
     def setUp(self) -> None:
+        self.addCleanup(assert_no_child_processes, self)  # runs last
         # TEST ONLY: the fake twin's ALL_CONFIRMED becomes the canonical object,
         # so the identity check can pass. Undone after each test.
         use_canonical_gates(self, ALL_CONFIRMED)
@@ -63,11 +82,16 @@ class ExecutorCase(unittest.TestCase):
         use_canonical_gates(self, gates)
         self.twin.confirmations = gates
 
-    def run_it(self, snap: Any = DEFAULT_PLAN, timeouts: Timeouts = FAST) -> Any:
+    def run_it(self, snap: Any = DEFAULT_PLAN, timeouts: Timeouts = FAST, **spec_options: Any) -> Any:
+        # The session (and any child process) is started BEFORE the timed call,
+        # like the processor starts it before the rehearsal clock.
+        self.session = open_session(self, self.twin, **spec_options)
         started = time.monotonic()
-        outcome = run_rehearsal(snapshot() if snap is DEFAULT_PLAN else snap, self.twin, timeouts)
-        self.elapsed = time.monotonic() - started
-        return outcome
+        try:
+            return run_rehearsal(snapshot() if snap is DEFAULT_PLAN else snap, self.session, timeouts)
+        finally:
+            self.elapsed = time.monotonic() - started
+            self.session.close()
 
     def failure(self, kind: str, **kwargs: Any) -> RehearsalFailure:
         outcome = self.run_it(**kwargs)
@@ -150,7 +174,7 @@ class RestrictionAndSnapshotTests(ExecutorCase):
         self.assertEqual(check.call_count, 2)
 
     def test_the_executor_takes_a_snapshot_and_no_command_text(self) -> None:
-        self.assertEqual(list(inspect.signature(run_rehearsal).parameters), ["snapshot", "twin", "timeouts"])
+        self.assertEqual(list(inspect.signature(run_rehearsal).parameters), ["snapshot", "session", "timeouts"])
 
 
 class GateTests(ExecutorCase):
@@ -636,7 +660,7 @@ class StopTests(ExecutorCase):
                     twin.fail["stop"] = behaviour
                 else:
                     twin.stop_result = behaviour
-                rehearsal = simulation_executor._Rehearsal(snapshot(), twin, FAST)
+                rehearsal = simulation_executor._Rehearsal(snapshot(), InProcessSession(twin), FAST)
                 rehearsal.target_dispatched = True
                 first = rehearsal._attempt_stop()
                 second = rehearsal._attempt_stop()  # a second request makes no call
@@ -733,6 +757,165 @@ class TimeoutTests(ExecutorCase):
     def test_a_successful_run_does_not_wait_for_the_limits(self) -> None:
         self.run_it(timeouts=DEFAULT_TIMEOUTS)
         self.assertLess(self.elapsed, 2.0)
+
+
+class CustomStop(BaseException):
+    """An unexpected BaseException that is neither Ctrl-C nor SystemExit."""
+
+
+def raise_in_parent_on(name: str, exc: BaseException) -> Any:
+    """A recorder that raises ``exc`` IN THE PARENT when the child reports ``name``."""
+
+    def recorder(call: str) -> None:
+        if call == name:
+            raise exc
+
+    return recorder
+
+
+class SupervisedInterruptionTests(ExecutorCase):
+    """Interruptions with a REAL supervised child (the twin runs in another process)."""
+
+    def interrupted(self, exc: BaseException, at: str, **spec_options: Any) -> RehearsalFailure:
+        self.twin.recorder = raise_in_parent_on(at, exc)
+        with self.assertRaises(type(exc)) as ctx:
+            self.run_it(fresh_session_stop="best_effort", **spec_options)
+        self.assertIs(ctx.exception, exc)  # the ORIGINAL exception continues
+        outcome = ctx.exception.rehearsal_outcome
+        self.assertIsInstance(outcome, RehearsalFailure)
+        self.assertLessEqual(len(outcome.detail), 200)
+        return outcome
+
+    def test_ctrl_c_before_dispatch(self) -> None:
+        outcome = self.interrupted(KeyboardInterrupt(), at="connect")
+        self.assertEqual((outcome.kind, outcome.stop), ("interrupted", "not_needed"))
+        self.assertFalse(outcome.target_dispatched)
+        self.assertFalse(outcome.manual_verification_required)
+        self.assertEqual(self.twin.moves(), [])
+        self.assertNotIn("stop", self.twin.names())
+
+    def test_ctrl_c_after_the_dispatch_intent_was_acknowledged(self) -> None:
+        outcome = self.interrupted(KeyboardInterrupt(), at="move_joint")
+        self.assertEqual(outcome.kind, "interrupted")
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(outcome.stop, "unconfirmed")  # only a fresh session was left
+        self.assertTrue(outcome.manual_verification_required)
+        self.assertEqual(self.twin.names().count("stop"), 1)  # at most once
+        self.assertEqual(len(self.twin.moves()), 1)  # never retried
+
+    def test_system_exit_after_dispatch(self) -> None:
+        exit_request = SystemExit(7)
+        outcome = self.interrupted(exit_request, at="move_joint")
+        self.assertEqual(outcome.kind, "interrupted")
+        self.assertEqual(exit_request.code, 7)
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(len(self.twin.moves()), 1)
+
+    def test_a_custom_base_exception_after_dispatch_is_an_internal_error(self) -> None:
+        outcome = self.interrupted(CustomStop(), at="move_joint")
+        self.assertEqual(outcome.kind, "internal_error")
+        self.assertIn("CustomStop", outcome.detail)
+        self.assertTrue(outcome.manual_verification_required)
+
+    def test_a_hung_move_is_never_retried_and_a_fresh_stop_is_never_confirmed(self) -> None:
+        self.twin.fail_move_number[1] = HANG
+        self.twin.stop_result = StopResult(confirmed=True)  # what the fresh session's fake says
+        outcome = self.failure("dispatch_failed", fresh_session_stop="best_effort")
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(outcome.stop, "unconfirmed")
+        self.assertTrue(outcome.manual_verification_required)
+        self.assertEqual(len(self.twin.moves()), 1)
+        self.assertEqual(self.twin.names().count("stop"), 1)
+
+    def test_without_a_fresh_session_stop_nothing_is_sent_after_termination(self) -> None:
+        self.twin.fail_move_number[1] = HANG
+        outcome = self.failure("dispatch_failed", fresh_session_stop="unsupported")
+        self.assertEqual(outcome.stop, "unconfirmed")
+        self.assertTrue(outcome.manual_verification_required)
+        self.assertNotIn("stop", self.twin.names())
+        self.assertEqual(len(self.twin.moves()), 1)
+
+    def test_a_stop_through_the_live_session_can_be_confirmed(self) -> None:
+        self.twin.ignore_moves = {1}  # target never reached; the child stays healthy
+        outcome = self.failure("target_timeout", fresh_session_stop="unsupported")
+        self.assertEqual(outcome.stop, "confirmed")
+        self.assertFalse(outcome.manual_verification_required)
+        self.assertEqual(self.twin.names().count("stop"), 1)
+
+
+class StubSession:
+    """A session whose every call raises a chosen supervisor error (no process)."""
+
+    fresh_session_stop = "unsupported"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.healthy = True
+        self.calls: list[str] = []
+
+    def gate_blockers(self) -> tuple[str, ...]:
+        return ()
+
+    def arm(self, until: float) -> None:
+        pass
+
+    def call(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        self.calls.append(method)
+        self.healthy = False  # as after a terminated child
+        raise self.error
+
+    def call_with_gates(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        return self.call(method, args, deadline)
+
+    def dispatch_move(self, *args: Any) -> None:
+        raise AssertionError("no movement expected")
+
+    def standby_stop(self, deadline: float) -> Any:
+        raise AssertionError("no stop expected")
+
+    def close(self, limit_s: float = 0.0) -> None:
+        pass
+
+
+class DeadlineAndClassificationTests(ExecutorCase):
+    def test_the_disconnect_is_not_started_after_its_deadline(self) -> None:
+        rehearsal = simulation_executor._Rehearsal(snapshot(), InProcessSession(self.twin), FAST)
+        rehearsal.connect_attempted = True
+        rehearsal.deadline = time.monotonic() - simulation_executor.TERMINATE_LIMIT_S - 0.01
+        rehearsal._disconnect()
+        self.assertNotIn("disconnect", self.twin.names())
+
+    def test_a_disconnect_inside_its_deadline_still_runs(self) -> None:
+        rehearsal = simulation_executor._Rehearsal(snapshot(), InProcessSession(self.twin), FAST)
+        rehearsal.connect_attempted = True
+        rehearsal._disconnect()
+        self.assertEqual(self.twin.names(), ["disconnect"])
+
+    def test_a_termination_failure_never_replaces_the_failure_kind(self) -> None:
+        from simulation_supervisor import SessionCrashed, SessionTimeout
+
+        tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.1)
+        for name, error, timeouts, kind in (
+            ("timeout capped by the work deadline", SessionTimeout("x"), tight, "overall_timeout"),
+            ("timeout of the call's own limit", SessionTimeout("x"), FAST, "connection_failed"),
+            ("crash", SessionCrashed("x"), FAST, "connection_failed"),
+        ):
+            with self.subTest(case=name):
+                # The supervisor recorded "could not be confirmed stopped" as
+                # diagnostic information; the failure kind is still the primary one.
+                outcome = run_rehearsal(snapshot(), StubSession(error), timeouts)
+                self.assertIsInstance(outcome, RehearsalFailure)
+                self.assertEqual(outcome.kind, kind, outcome.detail)
+                self.assertEqual(outcome.stop, "not_needed")
+
+
+class ThreadIsolationTests(unittest.TestCase):
+    def test_the_executor_and_supervisor_start_no_thread(self) -> None:
+        for module in ("simulation_executor", "simulation_supervisor"):
+            source = (Path(__file__).resolve().parents[1] / f"{module}.py").read_text("utf-8")
+            with self.subTest(module=module):
+                self.assertNotIn("threading", source)
+                self.assertNotIn("Thread(", source)
 
 
 if __name__ == "__main__":

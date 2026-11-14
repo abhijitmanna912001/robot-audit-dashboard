@@ -2,8 +2,8 @@
 
 Separate from the dry run (``dry_run.py``), which is unchanged and sends
 nothing. This module writes no audit event and touches no database: it only
-drives a twin through ``SimulationTwin`` and reports what happened. The audit
-lifecycle around it is ``simulation_processor.py``.
+drives a twin SESSION and reports what happened. The audit lifecycle around it
+is ``simulation_processor.py``.
 
 IMPORTANT, current state: **nothing in this repository implements
 ``SimulationTwin`` for Cyberwave.** No code here or anywhere else in the worker
@@ -17,18 +17,25 @@ The sequence refuses to send anything unless BOTH the SDK runtime and the twin
 itself report exactly ``"simulation"``; a missing, ambiguous or different answer
 is a refusal. There is no live-hardware value, selector or fallback.
 
+Process supervision (A2). The twin runs in a supervised child process
+(``simulation_supervisor``). Every twin call has an ABSOLUTE monotonic deadline;
+a call that does not finish by it ends the child process, so nothing keeps
+running in an abandoned local thread and a terminated child sends nothing else.
+Ending a local process does not cancel anything a remote service may already
+have accepted.
+
 The sequence (``run_rehearsal``), for the one permitted plan (joint ``_1`` to
 0.25 rad):
 
 1. re-hash the approved ``PlanSnapshot`` and re-check the first-rehearsal
    restriction (the command text is never read);
-2. require the twin to carry the canonical ``CYBERWAVE_GATES`` object itself
-   (exact type and identity, ``simulation_gates.twin_gate_blockers``) and every
-   gate in it to be confirmed;
+2. require the gates: the session's own check (in the child: the twin carries
+   the canonical ``CYBERWAVE_GATES`` object itself, exact type and identity)
+   and the parent's canonical gates, every gate confirmed;
 3. connect, then verify the SDK runtime target and the twin target;
 4. read and validate the START positions of all six joints;
 5. re-check the plan and the return target against ``shared/so101-limits.json``;
-6. send ONE movement: ``_1`` to 0.25 rad;
+6. send ONE movement, through the two-phase dispatch handshake: ``_1`` to 0.25;
 7. wait, bounded, until ``_1`` is within 0.01 rad of 0.25, then take a fresh
    TARGET reading and verify ``_1`` and that the other five joints did not move;
 8. send ONE return movement: ``_1`` to its captured start position;
@@ -36,24 +43,53 @@ The sequence (``run_rehearsal``), for the one permitted plan (joint ``_1`` to
    reading and verify all six within 0.01 rad of the start.
 
 At most two movement calls are ever made, never a third, and nothing is
-retried. Every adapter call runs with a time limit; the whole sequence,
-including failure recovery, has one total deadline (``Timeouts``).
+retried.
+
+Deadlines (absolute ``time.monotonic()``; ``T0`` is when ``run_rehearsal``
+starts, after the session's children were started and READY):
+
+* overall ``D_total = T0 + total_s``;
+* normal work ``D_work = D_total - recovery_reserve_s``. Every call, movements
+  included, is cut off at ``D_work``, so no movement call can use the recovery
+  reserve; a timeout of a call whose budget was capped by ``D_work`` is
+  ``overall_timeout``;
+* termination of a timed-out or crashed child: ``TERMINATE_LIMIT_S`` (inside
+  the supervisor call, one absolute deadline per child, never granted twice),
+  NOT taken from the stop budget. A child that cannot be confirmed stopped does
+  not change the failure kind (the timeout or crash stays the primary failure);
+  it is reported by the session's cleanup;
+* recovery starts at ``R0`` (failure handling begins, after any termination).
+  The stop deadline is ``min(R0 + stop_s, D_total + TERMINATE_LIMIT_S -
+  telemetry_read_s - disconnect_s)``; no stop is attempted once it has passed.
+  The last read and the disconnect keep their own budgets after that, and
+  neither is started once ``D_total + TERMINATE_LIMIT_S`` has passed.
 
 On a failure:
 
-* before any movement was sent: no stop is attempted, ``stop = "not_needed"``;
-  a gate refusal always happens here, before anything is connected or sent;
-* after a movement call was started (even if that call raised or hung, since it
-  may still have been sent): the twin's stop method is called at most ONCE, as
-  a best effort, even if the twin's confirmations no longer pass the canonical
-  gate check. It is not called if the stop deadline has already passed. The
-  result is ``"confirmed"`` only if the canonical gates were valid before and
-  after the call AND it returned exactly ``StopResult(confirmed=True)``; an
-  exception, a timeout, invalid gates or anything else is ``"unconfirmed"``.
-  The stop is never retried. No further movement is sent: not a retry, and not
-  a return to the start;
+* before any movement may have been sent (the dispatch intent was not
+  acknowledged): no stop is attempted, ``stop = "not_needed"``; a gate refusal
+  always happens here, before anything is connected or sent;
+* after a movement may have been sent (acknowledged intent: even if the call
+  raised, hung or the child died, it may still have been sent): at most ONE
+  best-effort stop call, never retried, even if the gates no longer pass.
+  Through the live session it is ``"confirmed"`` only if the gates (parent and
+  child) were valid before and after AND it returned exactly
+  ``StopResult(confirmed=True)``. If the session's child had to be terminated,
+  the only possible stop is from a FRESH session (``standby_stop``, only when
+  the adapter declares it): that result is never a confirmation. Anything else
+  is ``"unconfirmed"``. ``RehearsalFailure.manual_verification_required`` is
+  True whenever a movement may have been sent and the stop is not confirmed:
+  the physical outcome is then unknown;
 * ``last_telemetry`` is set only from a reading that validated: one fresh read
-  after a movement failure, or the start reading when nothing had moved.
+  through a live session after a movement failure, or the start reading when
+  nothing had moved.
+
+Interruption. ``KeyboardInterrupt``, ``SystemExit`` or any other
+``BaseException`` during the run: the stop rules above apply (a second
+interruption abandons the stop: ``unconfirmed``), then the ORIGINAL exception
+is re-raised with the outcome attached as ``rehearsal_outcome`` (a
+``RehearsalFailure`` of kind ``interrupted``, or ``internal_error`` for an
+unexpected ``BaseException``), so the caller can record it.
 
 Error kinds are the fixed set in ``simulation_payloads.ERROR_KINDS``; details
 are fixed text plus, at most, an exception class name. No SDK error text,
@@ -63,7 +99,6 @@ credential, header or URL is ever put in a detail.
 from __future__ import annotations
 
 import math
-import threading
 import time
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
@@ -85,7 +120,6 @@ from simulation_gates import (
     require_first_rehearsal_plan,
     require_within_shared_limits,
     revalidate_against_shared_limits,
-    twin_gate_blockers,
 )
 from simulation_payloads import (
     JOINT_NAMES,
@@ -93,6 +127,17 @@ from simulation_payloads import (
     STOP_CONFIRMED,
     STOP_NOT_NEEDED,
     STOP_UNCONFIRMED,
+)
+from simulation_supervisor import (
+    CLEANUP_LIMIT_S,
+    TERMINATE_LIMIT_S,
+    SessionCrashed,
+    SessionRefused,
+    SessionTimeout,
+    SessionUnusable,
+    TwinCallFailed,
+    canonical_gate_blockers,
+    merge_blockers,
 )
 
 __all__ = [
@@ -102,6 +147,7 @@ __all__ = [
     "SimulationTwin",
     "StopResult",
     "Timeouts",
+    "interruption_kind",
     "run_rehearsal",
 ]
 
@@ -180,7 +226,11 @@ class SimulationTwin(Protocol):
 
     There is deliberately no method or argument that selects a target: an
     implementation is for the simulation and nothing else. Every method must
-    honour its time limit; the sequence also enforces it from outside.
+    honour its time limit; the supervisor also enforces it from outside.
+
+    Construction must be side-effect free: building the twin (in the supervised
+    child) must not open a connection or perform any remote operation. The
+    first remote operation is the explicit, gated ``connect`` call.
     """
 
     # The confirmations this implementation relies on. It must BE
@@ -210,6 +260,7 @@ class SimulationTwin(Protocol):
         """Release the connection."""
 
 
+
 @dataclass(frozen=True)
 class RehearsalSuccess:
     """Target reached, verified, returned and all six joints verified restored."""
@@ -225,8 +276,13 @@ class RehearsalFailure:
     detail: str  # fixed text, at most 200 characters
     stop: str  # confirmed, unconfirmed or not_needed
     last_telemetry: JointSnapshot | None
-    target_dispatched: bool  # a movement call to the target was started
-    return_dispatched: bool  # a return movement call was started
+    target_dispatched: bool  # the target movement may have been sent
+    return_dispatched: bool  # the return movement may have been sent
+
+    @property
+    def manual_verification_required(self) -> bool:
+        """A movement may have been sent and no reliable stop was established."""
+        return (self.target_dispatched or self.return_dispatched) and self.stop != STOP_CONFIRMED
 
 
 class _Abort(Exception):
@@ -236,36 +292,31 @@ class _Abort(Exception):
         self.detail = detail[:MAX_TEXT_LENGTH]
 
 
-class _CallTimeout(Exception):
-    """An adapter call did not return within its time limit."""
+def interruption_kind(exc: BaseException) -> str:
+    """``interrupted`` for Ctrl-C and exit requests; ``internal_error`` for anything else."""
+    return "interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "internal_error"
 
 
-def _bounded(call: Callable[[], Any], timeout_s: float) -> Any:
-    """Run ``call`` on a daemon thread and wait at most ``timeout_s``.
+def _interruption_detail(exc: BaseException, dispatched: bool) -> str:
+    name = type(exc).__name__
+    sent = "after a movement may have been sent" if dispatched else "before any movement was sent"
+    if interruption_kind(exc) == "interrupted":
+        return f"the run was interrupted ({name}) {sent}"
+    return f"the run ended on an unexpected {name} {sent}"
 
-    A call that does not return in time is abandoned (the thread cannot be
-    killed) and ``_CallTimeout`` is raised, so no adapter can block the worker.
-    """
-    box: dict[str, Any] = {}
 
-    def run() -> None:
-        try:
-            box["value"] = call()
-        except BaseException as exc:  # re-raised in the caller's thread
-            box["error"] = exc
-
-    thread = threading.Thread(target=run, name="simulation-call", daemon=True)
-    thread.start()
-    thread.join(timeout_s)
-    if thread.is_alive():
-        raise _CallTimeout()
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
+def _attach_outcome(exc: BaseException, outcome: Any) -> None:
+    try:
+        exc.rehearsal_outcome = outcome  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_SESSION_METHODS = ("gate_blockers", "arm", "call", "call_with_gates", "dispatch_move", "standby_stop")
 
 
 # --------------------------------------------------------------------------
@@ -274,43 +325,66 @@ def _utc_now() -> datetime:
 
 
 class _Rehearsal:
-    def __init__(self, snapshot: Any, twin: Any, timeouts: Timeouts) -> None:
+    def __init__(self, snapshot: Any, session: Any, timeouts: Timeouts) -> None:
         self.snapshot = snapshot
-        self.twin = twin
+        self.session = session
         self.timeouts = timeouts
         started = time.monotonic()
-        self.deadline = started + timeouts.total_s
+        self.deadline = started + timeouts.total_s  # D_total
         # Movement phases stop here, so recovery always fits before the deadline.
-        self.work_deadline = self.deadline - timeouts.recovery_reserve_s
+        self.work_deadline = self.deadline - timeouts.recovery_reserve_s  # D_work
+        self.recovery_start: float | None = None  # R0
         self.target_dispatched = False
         self.return_dispatched = False
         self.start: JointSnapshot | None = None
         self.connect_attempted = False
         self.stop_attempted = False  # the stop method is called at most once
 
-    # -- time-limited calls --------------------------------------------------
+    # -- deadlines -----------------------------------------------------------
 
-    def _budget(self, limit_s: float) -> float:
-        remaining = self.work_deadline - time.monotonic()
+    def _work_budget(self, limit_s: float) -> tuple[float, bool]:
+        """(absolute deadline of the call, whether ``D_work`` capped it)."""
+        now = time.monotonic()
+        remaining = self.work_deadline - now
         if remaining <= 0:
             raise _Abort("overall_timeout", "the total execution deadline passed")
-        return min(limit_s, remaining)
+        return now + min(limit_s, remaining), remaining <= limit_s
 
-    def _call(self, what: str, call: Callable[[float], Any], limit_s: float, kind: str) -> Any:
-        budget = self._budget(limit_s)
+    def _stop_deadline(self) -> float:
+        r0 = self.recovery_start if self.recovery_start is not None else time.monotonic()
+        hard = (
+            self.deadline + TERMINATE_LIMIT_S
+            - self.timeouts.telemetry_read_s - self.timeouts.disconnect_s
+        )
+        return min(r0 + self.timeouts.stop_s, hard)
+
+    # -- time-limited calls --------------------------------------------------
+
+    def _abort_for(self, exc: Exception, what: str, kind: str, capped: bool) -> _Abort:
+        if isinstance(exc, SessionTimeout):
+            if capped or time.monotonic() >= self.work_deadline:
+                return _Abort("overall_timeout", f"the total execution deadline passed during {what}")
+            return _Abort(kind, f"{what} did not return within its time limit")
+        if isinstance(exc, TwinCallFailed):
+            return _Abort(kind, f"{what} failed ({exc.class_name})")
+        if isinstance(exc, SessionCrashed):
+            return _Abort(kind, f"{what} failed (the twin process exited unexpectedly)")
+        if isinstance(exc, (SessionRefused, SessionUnusable)):
+            return _Abort(kind, f"{what} could not be made (the twin session refused it)")
+        return _Abort(kind, f"{what} failed ({type(exc).__name__})")
+
+    def _call(self, what: str, method: str, args: Callable[[float], tuple[Any, ...]], limit_s: float, kind: str) -> Any:
+        deadline, capped = self._work_budget(limit_s)
         try:
-            return _bounded(lambda: call(budget), budget)
-        except _CallTimeout:
-            if time.monotonic() >= self.work_deadline:
-                raise _Abort("overall_timeout", f"the total execution deadline passed during {what}") from None
-            raise _Abort(kind, f"{what} did not return within its time limit") from None
+            return self.session.call(method, args(max(0.0, deadline - time.monotonic())), deadline)
         except Exception as exc:
-            raise _Abort(kind, f"{what} failed ({type(exc).__name__})") from None
+            raise self._abort_for(exc, what, kind, capped) from None
 
     def _read(self, label: str, limit_s: float, not_before: datetime | None) -> JointSnapshot:
         raw = self._call(
             f"the {label} telemetry read",
-            lambda budget: self.twin.read_telemetry(budget),
+            "read_telemetry",
+            lambda budget: (budget,),
             limit_s,
             "telemetry_unavailable",
         )
@@ -354,27 +428,48 @@ class _Rehearsal:
 
     # -- steps ---------------------------------------------------------------
 
+    def _gate_blockers(self) -> tuple[str, ...]:
+        try:
+            own = tuple(self.session.gate_blockers())
+        except Exception:
+            own = ("the twin session gate check failed",)
+        return merge_blockers(own, canonical_gate_blockers())
+
     def _require_gates(self) -> None:
-        blockers = twin_gate_blockers(self.twin)
+        blockers = self._gate_blockers()
         if blockers:
             raise _Abort("gate_unconfirmed", f"movement is blocked: {blockers[0]}")
 
     def _require_simulation(self) -> None:
-        for what, read in (
-            ("the SDK runtime target", lambda _budget: self.twin.runtime_target()),
-            ("the twin target", lambda _budget: self.twin.twin_target()),
+        for what, method in (
+            ("the SDK runtime target", "runtime_target"),
+            ("the twin target", "twin_target"),
         ):
-            reported = self._call(f"reading {what}", read, self.timeouts.mode_check_s, "not_simulation")
+            reported = self._call(f"reading {what}", method, lambda _budget: (), self.timeouts.mode_check_s, "not_simulation")
             if type(reported) is not str or reported != EXECUTION_TARGET:
                 raise _Abort("not_simulation", f"{what} is not verified as simulation; nothing was sent")
 
-    def _move(self, what: str, joint: str, value_rad: float) -> None:
-        self._call(
-            what,
-            lambda _budget: self.twin.move_joint(joint, value_rad),
-            self.timeouts.dispatch_s,
-            "dispatch_failed",
-        )
+    def _move(self, what: str, joint: str, value_rad: float, *, returning: bool) -> None:
+        """One movement through the dispatch handshake.
+
+        The "may have been sent" flag is set by the session's acknowledgement,
+        BEFORE the child is allowed to call ``move_joint``. A refusal or a crash
+        before that acknowledgement means nothing was sent.
+        """
+        deadline, capped = self._work_budget(self.timeouts.dispatch_s)
+
+        def acknowledged() -> None:
+            if returning:
+                self.return_dispatched = True
+            else:
+                self.target_dispatched = True
+
+        try:
+            self.session.dispatch_move(joint, value_rad, deadline, acknowledged)
+        except SessionRefused:
+            raise _Abort("dispatch_failed", f"{what} was refused by the twin process before it was sent") from None
+        except Exception as exc:
+            raise self._abort_for(exc, what, "dispatch_failed", capped) from None
 
     def _sequence(self) -> RehearsalSuccess:
         try:
@@ -386,7 +481,8 @@ class _Rehearsal:
         self.connect_attempted = True
         self._call(
             "the simulation connection",
-            lambda budget: self.twin.connect(budget),
+            "connect",
+            lambda budget: (budget,),
             self.timeouts.connect_s,
             "connection_failed",
         )
@@ -411,13 +507,11 @@ class _Rehearsal:
             raise _Abort("rehearsal_restriction", "the action is not the permitted first movement")
         others = {name: start.joints[name] for name in JOINT_NAMES if name != joint}
 
-        # The one movement to the target. Marked as dispatched BEFORE the call:
-        # a call that raises or hangs may still have been sent.
+        # The one movement to the target, through the dispatch handshake.
         if self.target_dispatched or self.return_dispatched:
             raise _Abort("internal_error", "a movement was already sent in this run")
-        self.target_dispatched = True
         sent_at = _utc_now()
-        self._move("the target movement", joint, target)
+        self._move("the target movement", joint, target, returning=False)
         self._wait_until(
             "target",
             self.timeouts.target_move_s,
@@ -437,9 +531,8 @@ class _Rehearsal:
         # The one return movement, only after the target was verified.
         if self.return_dispatched:
             raise _Abort("internal_error", "a return movement was already sent in this run")
-        self.return_dispatched = True
         returned_at = _utc_now()
-        self._move("the return movement", joint, start.joints[joint])
+        self._move("the return movement", joint, start.joints[joint], returning=True)
         self._wait_until(
             "restored position",
             self.timeouts.return_move_s,
@@ -459,61 +552,98 @@ class _Rehearsal:
     # -- failure recovery ----------------------------------------------------
 
     def _attempt_stop(self) -> str:
-        """Best-effort stop after a dispatch: at most ONE call, never retried.
+        """Best-effort stop after a possible dispatch: at most ONE call, never retried.
 
-        Only reached once a movement call was started (``_failure`` and the
-        interruption path check ``target_dispatched``). The call is made even
-        when the twin's confirmations no longer pass ``twin_gate_blockers``: a
-        movement may be under way, and trying to stop it costs nothing. Those
-        gates only decide whether the answer may be believed.
+        Only reached once a movement may have been sent. Through the live
+        session the call is made even when the gates no longer pass (a movement
+        may be under way; trying to stop it costs nothing); the gates only
+        decide whether the answer may be believed. ``confirmed`` requires ALL
+        of: the parent's and the child's gate checks valid both before and after
+        the call, and a result of exactly type ``StopResult`` with ``confirmed
+        is True``. Returning without raising is never enough.
 
-        ``confirmed`` requires ALL of: the canonical gates valid both before and
-        after the call, and a result of exactly type ``StopResult`` with
-        ``confirmed is True``. Returning without raising is never enough. An
-        expired deadline means no call. Anything else is ``unconfirmed``.
+        If the session's child was terminated, the only stop left is one from a
+        FRESH session (``standby_stop``, if the adapter declares it). No
+        documented guarantee says that such a stop cancels a movement started by
+        the terminated session, so its result is ALWAYS ``unconfirmed``.
+
+        An expired stop deadline means no call. Anything else is ``unconfirmed``.
         """
         if self.stop_attempted:
             return STOP_UNCONFIRMED  # never a second call
-        budget = min(self.timeouts.stop_s, self.deadline - time.monotonic())
+        stop_deadline = self._stop_deadline()
+        budget = stop_deadline - time.monotonic()
         if budget <= 0:
             return STOP_UNCONFIRMED
         self.stop_attempted = True
-        gates_valid_before = not twin_gate_blockers(self.twin)
-        try:
-            result = _bounded(lambda: self.twin.stop(budget), budget)
-        except (_CallTimeout, Exception):
+        if getattr(self.session, "healthy", False):
+            parent_before = not self._gate_blockers()
+            try:
+                result, child_before, child_after = self.session.call_with_gates(
+                    "stop", (budget,), stop_deadline
+                )
+            except Exception:
+                return STOP_UNCONFIRMED
+            if (
+                parent_before
+                and child_before
+                and child_after
+                and not self._gate_blockers()
+                and type(result) is StopResult
+                and result.confirmed is True
+            ):
+                return STOP_CONFIRMED
             return STOP_UNCONFIRMED
-        if (
-            gates_valid_before
-            and not twin_gate_blockers(self.twin)
-            and type(result) is StopResult
-            and result.confirmed is True
-        ):
-            return STOP_CONFIRMED
-        return STOP_UNCONFIRMED
+        try:
+            self.session.standby_stop(stop_deadline)
+        except Exception:
+            pass
+        return STOP_UNCONFIRMED  # a fresh session's stop is never a confirmation
 
     def _last_telemetry(self) -> JointSnapshot | None:
-        """One fresh, independent read. None unless it validates."""
-        budget = min(self.timeouts.telemetry_read_s, self.deadline - time.monotonic())
-        if budget <= 0:
+        """One fresh, independent read through the live session. None unless it validates."""
+        if not getattr(self.session, "healthy", False):
+            return None
+        now = time.monotonic()
+        deadline = min(now + self.timeouts.telemetry_read_s,
+                       self.deadline + TERMINATE_LIMIT_S - self.timeouts.disconnect_s)
+        if deadline - now <= 0:
             return None
         try:
-            raw = _bounded(lambda: self.twin.read_telemetry(budget), budget)
+            raw = self.session.call("read_telemetry", (deadline - now,), deadline)
             return validate_telemetry(raw, now=_utc_now())
-        except (_CallTimeout, TelemetryRejected, Exception):
+        except (TelemetryRejected, Exception):
             return None
 
     def _disconnect(self) -> None:
-        if not self.connect_attempted:
+        """One bounded disconnect through a live session. Never started after its deadline.
+
+        Its absolute deadline is ``D_total + TERMINATE_LIMIT_S`` (the end of the
+        recovery window), and at most ``disconnect_s`` from now.
+        """
+        if not self.connect_attempted or not getattr(self.session, "healthy", False):
             return
-        budget = max(0.05, min(self.timeouts.disconnect_s, self.deadline - time.monotonic()))
+        now = time.monotonic()
+        deadline = min(now + self.timeouts.disconnect_s, self.deadline + TERMINATE_LIMIT_S)
+        if deadline <= now:
+            return
         try:
-            _bounded(self.twin.disconnect, budget)
-        except (_CallTimeout, Exception):
+            self.session.call("disconnect", (), deadline)
+        except Exception:
             pass  # cleanup only; the outcome is already decided
 
+    def _disconnect_quietly(self) -> BaseException | None:
+        """The disconnect; a Ctrl-C during it is returned, not raised."""
+        try:
+            self._disconnect()
+        except BaseException as exc:
+            return exc
+        return None
+
     def _failure(self, kind: str, detail: str) -> RehearsalFailure:
-        if self.target_dispatched:
+        if self.recovery_start is None:
+            self.recovery_start = time.monotonic()
+        if self.target_dispatched or self.return_dispatched:
             stop = self._attempt_stop()
             last = self._last_telemetry()
         else:
@@ -527,33 +657,71 @@ class _Rehearsal:
             return_dispatched=self.return_dispatched,
         )
 
+    def _interrupted(self, exc: BaseException) -> RehearsalFailure:
+        """The failure after an interruption. Never raises."""
+        if self.recovery_start is None:
+            self.recovery_start = time.monotonic()
+        dispatched = self.target_dispatched or self.return_dispatched
+        if dispatched:
+            try:
+                stop = self._attempt_stop()
+            except BaseException:  # a second interruption abandons the stop
+                stop = STOP_UNCONFIRMED
+        else:
+            stop = STOP_NOT_NEEDED
+        return RehearsalFailure(
+            kind=interruption_kind(exc),
+            detail=_interruption_detail(exc, dispatched)[:MAX_TEXT_LENGTH],
+            stop=stop,
+            last_telemetry=None if dispatched else self.start,
+            target_dispatched=self.target_dispatched,
+            return_dispatched=self.return_dispatched,
+        )
+
+    def _outcome(self) -> RehearsalSuccess | RehearsalFailure:
+        try:
+            return self._sequence()
+        except _Abort as abort:
+            return self._failure(abort.kind, abort.detail)
+        except Exception as exc:  # fail closed: never a success
+            return self._failure("internal_error", f"unexpected error ({type(exc).__name__})")
+
     def run(self) -> RehearsalSuccess | RehearsalFailure:
         try:
-            try:
-                return self._sequence()
-            except _Abort as abort:
-                return self._failure(abort.kind, abort.detail)
-            except Exception as exc:  # fail closed: never a success
-                return self._failure("internal_error", f"unexpected error ({type(exc).__name__})")
-            except BaseException:
-                # Interrupted (for example Ctrl-C). If a movement may be under
-                # way, try the stop once before the interruption continues.
-                if self.target_dispatched:
-                    self._attempt_stop()
-                raise
-        finally:
-            self._disconnect()
+            self.session.arm(self.deadline + TERMINATE_LIMIT_S + CLEANUP_LIMIT_S)
+        except Exception:
+            pass  # a dead child shows up on the first call
+        try:
+            outcome = self._outcome()
+        except BaseException as exc:
+            # Interrupted (Ctrl-C, SystemExit, anything else). If a movement may
+            # be under way, the stop is tried once; then the ORIGINAL exception
+            # continues, carrying the outcome for the audit lifecycle.
+            outcome = self._interrupted(exc)
+            self._disconnect_quietly()
+            _attach_outcome(exc, outcome)
+            raise
+        late = self._disconnect_quietly()
+        if late is not None:
+            _attach_outcome(late, outcome)
+            raise late
+        return outcome
 
 
 def run_rehearsal(
-    snapshot: Any, twin: Any, timeouts: Timeouts = DEFAULT_TIMEOUTS
+    snapshot: Any, session: Any, timeouts: Timeouts = DEFAULT_TIMEOUTS
 ) -> RehearsalSuccess | RehearsalFailure:
     """Run the first-rehearsal sequence once. Never retries, never raises ``Exception``.
 
     ``snapshot`` is the immutable ``PlanSnapshot`` that was validated and
-    approved; ``twin`` implements ``SimulationTwin``. The caller must already
-    have written ``execution_started`` and moved the command to ``executing``.
+    approved; ``session`` is a STARTED twin session (in production a
+    ``simulation_supervisor.ProcessTwinSession``); its owner closes it. The
+    caller must already have written ``execution_started`` and moved the command
+    to ``executing``. A ``BaseException`` (for example Ctrl-C) propagates, with
+    the outcome attached as ``rehearsal_outcome``.
     """
     if not isinstance(timeouts, Timeouts):
         raise TypeError("timeouts must be a Timeouts instance.")
-    return _Rehearsal(snapshot, twin, timeouts).run()
+    if not all(callable(getattr(session, name, None)) for name in _SESSION_METHODS):
+        raise TypeError("session must be a started twin session.")
+    return _Rehearsal(snapshot, session, timeouts).run()
