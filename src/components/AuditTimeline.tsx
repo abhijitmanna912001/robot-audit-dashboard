@@ -95,14 +95,14 @@ export function AuditTimeline({
           <li
             key={e.id}
             className={cn(
-              "relative grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 rounded-ui-sm @case:grid-cols-[5rem_1.75rem_minmax(0,1fr)] @case:gap-x-4",
+              "relative grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 rounded-ui-sm @case:grid-cols-[max-content_1.75rem_minmax(0,1fr)] @case:gap-x-4",
               last ? "pb-0" : "pb-7",
               highlightIds?.has(e.id) && "event-flash",
             )}
           >
-            <div className="col-start-2 mb-2 flex flex-wrap items-center gap-x-3 font-mono text-xs leading-4 text-muted-foreground @case:col-start-1 @case:row-start-1 @case:mb-0 @case:block @case:pt-1 @case:text-right">
+            <div className="col-start-2 mb-2 flex min-w-24 flex-wrap items-center gap-x-3 font-mono text-xs leading-4 text-muted-foreground @case:col-start-1 @case:row-start-1 @case:mb-0 @case:block @case:pt-1 @case:text-right">
               <LocalTime iso={e.createdAt} className="block" />
-              {gap && <span className="block tabular-nums @case:mt-1">{gap}</span>}
+              {gap && <span className="block whitespace-nowrap tabular-nums @case:mt-1">{gap}</span>}
             </div>
             <div className="relative col-start-1 row-span-2 row-start-1 flex justify-center @case:col-start-2 @case:row-span-1">
               {!last && (

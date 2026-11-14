@@ -100,7 +100,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
       }}
-      className="surface-card flex flex-col gap-3 rounded-ui-lg p-4"
+      className="surface-card flex shrink-0 flex-col gap-3 rounded-ui-lg p-4"
     >
       <label htmlFor={id} className="text-sm font-semibold tracking-tight">
         New command
@@ -143,10 +143,10 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           {submitting ? "Submitting..." : "Submit command"}
         </Button>
       </div>
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="shrink-0">Try:</span>
+      <div className="flex items-start gap-2 text-xs leading-4 text-muted-foreground">
+        <span className="shrink-0 pt-2">Try:</span>
         {/* Examples wrap within the composer, including on narrow screens. */}
-        <div className="-my-1 flex min-w-0 flex-1 flex-wrap items-center gap-2 px-1 py-1">
+        <div className="flex min-w-0 flex-1 flex-wrap items-start gap-2">
         {EXAMPLES.map((ex, i) => (
           <button
             key={ex}
@@ -159,7 +159,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               setText(ex);
               setNotice(null);
             }}
-            className="keycap inline-flex min-h-8 max-w-full items-center rounded-ui-sm px-2 py-1 text-left font-mono text-xs break-words text-muted-foreground outline-none transition-colors duration-150 hover:border-primary hover:text-foreground active:bg-accent focus-visible:ring-3 focus-visible:ring-ring/30"
+            className="keycap inline-flex min-h-8 min-w-0 max-w-full items-center rounded-ui-sm px-2 py-1 text-left font-mono text-xs leading-4 wrap-anywhere whitespace-normal text-muted-foreground outline-none transition-colors duration-150 hover:border-primary hover:text-foreground active:bg-accent focus-visible:ring-3 focus-visible:ring-ring/30"
           >
             {["Joint 1", "Joint 6", "Unsupported"][i]}
           </button>

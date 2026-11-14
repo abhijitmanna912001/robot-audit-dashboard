@@ -44,3 +44,18 @@ export function formatLocal(
   }).format(d);
   return `${date}, ${time}`;
 }
+
+// Relative age for a timestamp tooltip. Uses an injected clock, never a timer or fetch.
+export function formatRelative(iso: string, now: Date): string | undefined {
+  const time = new Date(iso).getTime();
+  const current = now.getTime();
+  if (!Number.isFinite(time) || !Number.isFinite(current)) return undefined;
+  const delta = current - time;
+  const seconds = Math.floor(Math.abs(delta) / 1000);
+  if (seconds === 0) return "just now";
+  const [value, unit] = seconds < 60 ? [seconds, "s"]
+    : seconds < 3600 ? [Math.floor(seconds / 60), "min"]
+    : seconds < 86400 ? [Math.floor(seconds / 3600), "h"]
+    : [Math.floor(seconds / 86400), "d"];
+  return delta >= 0 ? `${value} ${unit} ago` : `in ${value} ${unit}`;
+}

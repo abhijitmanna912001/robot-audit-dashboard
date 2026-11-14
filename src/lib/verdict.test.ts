@@ -81,3 +81,12 @@ test("stageDetails: dry run wording and no repeated lines", () => {
     for (const d of Object.values(stageDetails(set))) assert.ok(!words.includes((d as string).toLowerCase()));
   }
 });
+
+test("verdict separates worker wait from processing and omits processing without a plan", () => {
+  const received = { eventType: "command_received", payload: {}, createdAt: "2026-11-14T10:00:00Z" };
+  const planned = { eventType: "plan_generated", payload: {}, createdAt: "2026-11-14T10:13:27Z" };
+  const completed = { eventType: "execution_completed", payload: { dryRun: true }, createdAt: "2026-11-14T10:13:31Z" };
+  assert.deepEqual(verdictFacts([received, planned, completed]), [bindUnits("4 s elapsed"), bindUnits("Waited 13 min 27 s for the worker")]);
+  assert.deepEqual(verdictFacts([received, planned]), [bindUnits("Waited 13 min 27 s for the worker")]);
+  assert.deepEqual(verdictFacts([received, completed]), []);
+});

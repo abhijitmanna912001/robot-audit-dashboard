@@ -182,7 +182,7 @@ export function Dashboard({
         </div>
       )}
       <div className="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 flex-col gap-6 px-4 py-6 sm:px-8 lg:grid lg:grid-cols-[336px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:gap-8 lg:py-8">
-        <section aria-label="Commands" className="scroll-subtle flex min-w-0 flex-col gap-5 lg:min-h-0 lg:overflow-y-auto lg:p-1.5 lg:pr-4 lg:[scrollbar-gutter:stable]">
+        <section aria-label="Commands" className="command-scrollport scroll-subtle flex min-w-0 flex-col gap-5 lg:min-h-0 lg:overflow-y-auto lg:border-y lg:border-border lg:px-2 lg:py-3 lg:pr-4 lg:[scrollbar-gutter:stable]">
           <CommandInput onSubmitted={handleSubmitted} />
           {selected && (
             <a href="#audit-record" className="self-start rounded-ui-sm py-1 text-sm font-medium text-primary underline underline-offset-4 lg:hidden">
@@ -214,7 +214,7 @@ export function Dashboard({
           aria-label="Selected command audit"
           tabIndex={-1}
           key={selectedId ?? "none"}
-          className="scroll-subtle min-w-0 scroll-pt-6 lg:min-h-0 lg:overflow-y-auto lg:p-1.5 lg:pr-3 lg:[scrollbar-gutter:stable]"
+          className="case-scrollport scroll-subtle min-w-0 lg:min-h-0 lg:overflow-y-auto lg:px-1.5 lg:pb-1.5 lg:pr-3 lg:[scrollbar-gutter:stable]"
         >
           {selected ? (
             <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />

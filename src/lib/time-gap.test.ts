@@ -10,10 +10,10 @@ test("formatGap: ranges", () => {
   assert.equal(formatGap(t(0), t(2, 100)), "+2.1 s");
   assert.equal(formatGap(t(0), t(9, 960)), "+10 s");
   assert.equal(formatGap(t(0), t(41)), "+41 s");
-  assert.equal(formatGap(t(0), t(125)), "+2 min 5 s");
-  assert.equal(formatGap(t(0), t(120)), "+2 min");
-  assert.equal(formatGap(t(0), t(3780)), "+1 h 3 min");
-  assert.equal(formatGap(t(0), t(3600)), "+1 h");
+  assert.equal(formatGap(t(0), t(125)), "+2m 5s");
+  assert.equal(formatGap(t(0), t(120)), "+2m");
+  assert.equal(formatGap(t(0), t(3780)), "+1h 3m");
+  assert.equal(formatGap(t(0), t(3600)), "+1h");
 });
 
 test("formatGap: malformed or out of order gives undefined", () => {
@@ -22,4 +22,10 @@ test("formatGap: malformed or out of order gives undefined", () => {
     assert.equal(formatGap(t(1), bad), undefined);
   }
   assert.equal(formatGap(t(5), t(1)), undefined);
+});
+
+test("long gaps use compact units at minute and hour boundaries", () => {
+  assert.equal(formatGap(t(0), t(807)), "+13m 27s");
+  assert.equal(formatGap(t(0), t(59, 999)), "+1m");
+  assert.equal(formatGap(t(0), t(3599, 999)), "+1h");
 });

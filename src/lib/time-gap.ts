@@ -18,9 +18,9 @@ export function formatGap(prevIso: unknown, iso: unknown): string | undefined {
   if (total < 3600) {
     const m = Math.floor(total / 60);
     const s = total % 60;
-    return s === 0 ? `+${m} min` : `+${m} min ${s} s`;
+    return s === 0 ? `+${m}m` : `+${m}m ${s}s`;
   }
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
-  return m === 0 ? `+${h} h` : `+${h} h ${m} min`;
+  return m === 0 ? `+${h}h` : `+${h}h ${m}m`;
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatLocal } from "./format.ts";
+import { formatLocal, formatRelative } from "./format.ts";
 
 const opts = { timeZone: "UTC", locale: "en-GB" };
 const now = new Date("2026-11-14T12:00:00Z");
@@ -29,4 +29,18 @@ test("bad input", () => {
   assert.equal(formatLocal("nope", now, opts), undefined);
   assert.equal(formatLocal("", now, opts), undefined);
   assert.equal(formatLocal("2026-11-13T09:15:02Z", new Date(NaN), { ...opts, withDate: true }), "09:15:02");
+});
+
+test("relative age keeps seconds, minutes, hours and days distinct", () => {
+  assert.equal(formatRelative("2026-11-14T12:00:00Z", now), "just now");
+  assert.equal(formatRelative("2026-11-14T11:59:15Z", now), "45 s ago");
+  assert.equal(formatRelative("2026-11-14T11:59:00Z", now), "1 min ago");
+  assert.equal(formatRelative("2026-11-14T11:00:00Z", now), "1 h ago");
+  assert.equal(formatRelative("2026-11-14T09:00:00Z", now), "3 h ago");
+  assert.equal(formatRelative("2026-11-12T12:00:00Z", now), "2 d ago");
+});
+test("relative age handles future timestamps and invalid dates", () => {
+  assert.equal(formatRelative("2026-11-14T15:00:00Z", now), "in 3 h");
+  assert.equal(formatRelative("invalid", now), undefined);
+  assert.equal(formatRelative("2026-11-14T09:00:00Z", new Date(NaN)), undefined);
 });
