@@ -144,10 +144,16 @@ class ProcessorTestCase(unittest.TestCase):
 
     def bound(self, name: str) -> dict[str, Any]:
         """The last call to ``name``, bound to the REAL audit_store signature."""
-        call = getattr(self.calls, name).call_args
-        bound = inspect.signature(REAL[name]).bind(*call.args, **call.kwargs)
-        bound.apply_defaults()
-        return dict(bound.arguments)
+        return self.bound_all(name)[-1]
+
+    def bound_all(self, name: str) -> list[dict[str, Any]]:
+        """Every call to ``name``, in order, bound to the REAL audit_store signature."""
+        result = []
+        for call in getattr(self.calls, name).call_args_list:
+            bound = inspect.signature(REAL[name]).bind(*call.args, **call.kwargs)
+            bound.apply_defaults()
+            result.append(dict(bound.arguments))
+        return result
 
 
 class NoCommandTests(ProcessorTestCase):
@@ -203,9 +209,11 @@ class OneCommandPerCallTests(ProcessorTestCase):
                 self.calls.claim_next_command.return_value = row
                 process_one_command(WORKER_ID)
                 self.assertEqual(self.calls.claim_next_command.call_count, 1)
-                # plan_generated, validator_result, critic_result at most.
-                self.assertLessEqual(self.calls.append_event.call_count, 3)
-                self.assertLessEqual(self.calls.set_command_status.call_count, 1)
+                # plan_generated, validator_result, critic_result, then (dry run)
+                # execution_started and execution_completed at most.
+                self.assertLessEqual(self.calls.append_event.call_count, 5)
+                # received -> approved, approved -> executing, executing -> completed.
+                self.assertLessEqual(self.calls.set_command_status.call_count, 3)
                 self.assertLessEqual(self.calls.review_plan.call_count, 1)
                 command_ids = {c.args[0] for c in self.calls.append_event.call_args_list}
                 self.assertLessEqual(len(command_ids), 1)
@@ -338,9 +346,9 @@ class StatusFailureTests(ProcessorTestCase):
 
 
 class SupportedCommandTests(ProcessorTestCase):
-    def test_supported_command_is_checked_and_approved_but_not_executed(self) -> None:
-        # Replaces the first slice's "planned_not_processed" test: a valid plan
-        # now goes through both checks and ends at 'approved', never further.
+    def test_supported_command_is_approved_then_dry_run_completed(self) -> None:
+        # A valid plan goes through both checks, is approved, and then runs the
+        # DRY-RUN lifecycle only: it ends 'completed' with dryRun events.
         self.calls.claim_next_command.return_value = command_row(
             "set joint _1 to 0.25 rad; set joint _2 to 0.1 rad"
         )
@@ -348,7 +356,8 @@ class SupportedCommandTests(ProcessorTestCase):
         self.assertEqual(result.outcome, "plan_checked")
         self.assertEqual(result.command_id, COMMAND_ID)
         self.assertEqual(result.action_count, 2)
-        self.assertEqual(result.final_status, "approved")
+        self.assertEqual(result.decision_status, "approved")
+        self.assertEqual((result.execution, result.final_status), ("completed", "completed"))
         self.assertEqual(
             self.call_names(),
             [
@@ -357,12 +366,19 @@ class SupportedCommandTests(ProcessorTestCase):
                 "review_plan",
                 "append_event",  # validator_result
                 "append_event",  # critic_result
-                "set_command_status",
+                "set_command_status",  # received -> approved
+                "append_event",  # execution_started
+                "set_command_status",  # approved -> executing
+                "append_event",  # execution_completed
+                "set_command_status",  # executing -> completed
             ],
         )
-        self.assertNotIn(
-            self.bound("set_command_status")["status"], {"executing", "completed"}
+        self.assertEqual(
+            [(c["expected_status"], c["status"]) for c in self.bound_all("set_command_status")],
+            [("received", "approved"), ("approved", "executing"), ("executing", "completed")],
         )
+        for call in self.bound_all("append_event")[3:]:
+            self.assertIs(call["payload"]["dryRun"], True)
 
     def test_row_without_id_writes_nothing_and_says_the_claim_may_exist(self) -> None:
         self.calls.claim_next_command.return_value = command_row(id=None)
@@ -415,14 +431,15 @@ class MainTests(ProcessorTestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"FAILED at {STAGE_STATUS_UPDATE}", out)
 
-    def test_valid_command_message_reports_checks_and_no_execution(self) -> None:
+    def test_valid_command_message_reports_checks_and_dry_run(self) -> None:
         self.calls.claim_next_command.return_value = command_row("set joint _1 to 0.1 rad")
         code, out = self.run_main("--confirm-write")
         self.assertEqual(code, 0)
         self.assertIn("Validator: pass", out)
         self.assertIn("Critic: approve", out)
         self.assertIn("received -> approved", out)
-        self.assertIn("Nothing was executed", out)
+        self.assertIn("Dry run: completed; status now completed", out)
+        self.assertIn("Nothing was sent to a robot", out)
 
     def test_rejected_command_message(self) -> None:
         self.calls.claim_next_command.return_value = command_row("set joint _6 to -1.0 rad")
@@ -530,13 +547,14 @@ class RealAuditStoreTests(unittest.TestCase):
             seen,
         )
 
-    def test_valid_command_end_to_end_is_approved_not_executed(self) -> None:
+    def test_valid_command_end_to_end_is_approved_then_dry_run_completed(self) -> None:
         self.client = FakeClient(
             commands=[command_row("set joint _1 to 0.25 rad", claimed_by=None, claimed_at=None)]
         )
         critic, seen = self.mock_critic("approve")
         result = process_one_command(WORKER_ID, client=self.client, critic=critic)
-        self.assertEqual(result.final_status, "approved")
+        self.assertEqual(result.decision_status, "approved")
+        self.assertEqual(result.final_status, "completed")
         self.assertEqual(
             self.ops(),
             [
@@ -546,18 +564,36 @@ class RealAuditStoreTests(unittest.TestCase):
                 ("audit_events", "insert"),  # validator_result
                 ("audit_events", "insert"),  # critic_result
                 ("commands", "update"),  # received -> approved
+                ("audit_events", "insert"),  # execution_started
+                ("commands", "update"),  # approved -> executing
+                ("audit_events", "insert"),  # execution_completed
+                ("commands", "update"),  # executing -> completed
             ],
         )
         events = self.client.tables["audit_events"]
         self.assertEqual(
             [e["event_type"] for e in events],
-            ["plan_generated", "validator_result", "critic_result"],
+            [
+                "plan_generated",
+                "validator_result",
+                "critic_result",
+                "execution_started",
+                "execution_completed",
+            ],
         )
-        self.assertEqual(self.command()["status"], "approved")
+        self.assertEqual(events[3]["payload"], {"dryRun": True})
+        self.assertIs(events[4]["payload"]["dryRun"], True)
+        self.assertEqual(self.command()["status"], "completed")
         self.assertEqual(self.command()["plan_id"], result.plan_id)
-        status_update = self.client.calls[-1]
-        self.assertEqual(status_update.values, {"status": "approved", "plan_id": result.plan_id})
-        self.assertIn(("eq", "status", "received"), status_update.filters)
+        updates = [c for c in self.client.calls if c.table == "commands" and c.op == "update"][1:]
+        self.assertEqual(
+            [(u.values, ("eq", "status", prev) in u.filters) for u, prev in zip(updates, ("received", "approved", "executing"))],
+            [
+                ({"status": "approved", "plan_id": result.plan_id}, True),
+                ({"status": "executing"}, True),
+                ({"status": "completed"}, True),
+            ],
+        )
         self.assertEqual(len(seen), 1)
         sent = json.loads(seen[0].content)
         self.assertEqual(sent["planId"], events[0]["payload"]["planId"])

@@ -153,9 +153,14 @@ Event type to status, for reference:
 | `plan_generated` with `outcome: "error"` | `failed` (`received -> failed`). No plan was generated. |
 | `validator_result` / `critic_result` | unchanged until both are in. Then `approved`, or `rejected` if either returned a `fail` or `reject` verdict, even if the other check errored. |
 | `critic_result` with `outcome: "error"` | `failed` (`received -> failed`), only if no check returned a `fail` or `reject` verdict. The critic gave no verdict. |
-| `execution_started` | `executing` |
-| `execution_completed` | `completed` |
-| `execution_failed` | `failed` |
+| `execution_started` | `executing` (`approved -> executing`), only after the event is written. The dry run runs only after this update succeeded. |
+| `execution_completed` | `completed` (`executing -> completed`), only after the event is written. |
+| `execution_failed` | `failed`, only after the event is written, from the status the worker knows the command has: `approved -> failed` when the dry run never started (`execution_started` not written, or `approved -> executing` not applied), `executing -> failed` when the dry run itself failed. If that status is not known (the command changed meanwhile), the status is left alone for manual recovery. |
+
+Each status change above is conditional on the expected current status (section 1), and the
+event is always written first: if the event insert fails, the status is not changed. Nothing is
+retried, no event is written twice, and the dry run never runs twice
+(`worker/command_processor.py`, `worker/README.md` "Manual recovery").
 
 ### Design choices
 
@@ -582,6 +587,16 @@ are both integrated**. A dry run does not drive the robot simulation. It is logg
 execution events (`execution_started`, then `execution_completed` or `execution_failed`) with
 `dryRun: true` in the payload. Real execution writes `dryRun: false`.
 
+**Implemented (dry run only):** `worker/command_processor.py` runs the dry run for a command whose
+validator passed and whose critic approved, after `received -> approved` was written. Order:
+`execution_started` `{ "dryRun": true }`, `approved -> executing`, the dry run
+(`worker/dry_run.py`: it re-hashes the approved plan snapshot and returns a summary; it sends
+nothing anywhere and never re-reads the command text), `execution_completed`
+`{ "dryRun": true, "summary" }`, `executing -> completed`. Failures write `execution_failed`
+`{ "dryRun": true, "error" }` (see the table in section 2). The worker only ever writes
+`dryRun: true`: there is no real execution path, and no flag, setting or environment variable
+that could create one. Real execution (`dryRun: false`) remains a future, separately agreed step.
+
 ## 7. Row Level Security and Realtime
 
 The SQL for this section is in `db/001_init.sql` and is applied. The blocks below are the
@@ -681,8 +696,10 @@ Accepted for the simulation-only meetup demo.
   still `received`, the dashboard summary already shows the planner failure. The manual recovery
   steps are in `worker/README.md`, "Manual recovery". The worker never retries an event insert,
   because `audit_events` rows cannot be deleted.
-- **An approved command is not executed yet.** `worker/command_processor.py` stops at
-  `approved`; the dry-run execution lifecycle is a later milestone.
+- **Approved commands are only dry-run.** `worker/command_processor.py` takes an approved
+  command through the dry-run lifecycle (section 6) to `completed` or `failed`. Nothing is sent
+  to a robot or a simulation. A dry-run event or status write that fails ambiguously leaves the
+  command `approved` or `executing` for manual recovery (`worker/README.md`).
 - **The worker claims the oldest eligible command.** In a rehearsal, an old unclaimed `received`
   command is processed before the one just submitted. Check the queue first.
 - **The route insert and a worker claim can interleave.** The worker can claim a command between

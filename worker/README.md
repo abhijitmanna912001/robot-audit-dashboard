@@ -2,12 +2,13 @@
 
 Robotics and execution side of the auditable robot agent. Simulation only.
 
-**This is a decision pipeline, not a working agent.** `command_processor.py` claims one
-command and plans it. A planner failure is recorded and the command set to `failed`. A
-valid plan is validated by the Python safety validator, sent to `/api/critic`, both
-results are recorded, and the command ends `approved`, `rejected` or `failed`. **Nothing
-is executed**: an approved command stays `approved`. No dry run, no Cyberwave call, no
-movement.
+**This is a decision pipeline with a dry run, not a working agent.** `command_processor.py`
+claims one command and plans it. A planner failure is recorded and the command set to
+`failed`. A valid plan is validated by the Python safety validator, sent to `/api/critic`,
+both results are recorded, and the command is decided `approved`, `rejected` or `failed`.
+An approved command then goes through the **dry-run** lifecycle and ends `completed` or
+`failed`. **Nothing is sent to a robot**: no Cyberwave call, no simulation, no movement,
+and no flag, setting or environment variable can change that.
 
 ## Status
 
@@ -19,7 +20,7 @@ movement.
 | Critic handling | Implemented, offline tests only | `critic_gate.py` builds the request and judges a response. `critic_client.py` sends it (one request, `x-critic-secret`, finite timeouts, no redirects, no retries). **The worker-to-critic request has not been made in a controlled live run yet** |
 | Plan snapshot | Implemented and tested | `plan_snapshot.py` freezes a plan as RFC 8785 canonical bytes; the validator, the critic and the audit event each get a copy of exactly the hashed plan |
 | Execution gate | Implemented, used only as a consistency check | `execution_gate.py` is a pure decision function. The processor calls it once before writing `approved`. It executes nothing |
-| Execution | Not implemented | No movement code exists. The next milestone is a dry run (`execution_started` / `execution_completed` with `dryRun: true`) |
+| Execution | Dry run only, offline tests only | `dry_run.py` re-hashes the approved plan snapshot and returns a summary; `command_processor.py` records `execution_started`, `execution_completed` or `execution_failed` with `dryRun: true`. No movement code exists, and there is no real-execution path or switch. **The dry-run lifecycle has only run against mocks and the in-memory fake** |
 | Audit logging | Implemented | `audit_store.py` is the canonical writer: claim a command, append one audit event (no retry), and conditional status updates checked against the agreed lifecycle. Used live once, by the planner-failure rehearsal. `supabase_client.py` is the older insert-only helper used by the smoke test |
 | Command processing | Implemented. Planner-failure path verified live; successful-plan path offline tests only | `command_processor.py` processes ONE command per run (no loop). Planner failures, validator and critic results and the final status are recorded. The planner-failure path ran once against the live database (14 Nov 2026: `command_received`, `plan_generated` error, status `failed`). **The successful-plan path (validator, critic, `approved`/`rejected`/`failed`) has only run against mocks** |
 | Planner | Implemented and tested, deterministic | `planner.py` parses ASCII-only `set joint _1 to 0.25 rad` clauses separated by `;`. No language model |
@@ -53,7 +54,8 @@ Facts that must not be lost:
 | `plan_snapshot.py` | Immutable snapshot of one plan (canonical bytes, plan id, hash) |
 | `execution_gate.py` | Allows only if validator and critic both passed the same plan. Executes nothing |
 | `planner.py` | Deterministic parser from command text to `set_joint` actions, or a structured planner error |
-| `command_processor.py` | Claim one command, plan, validate, ask the critic, record everything, set the final status. Manual run needs `--confirm-write` |
+| `command_processor.py` | Claim one command, plan, validate, ask the critic, record everything, set the status, dry-run an approved plan. Manual run needs `--confirm-write` |
+| `dry_run.py` | The offline dry run: checks the approved snapshot against its hash and describes it. Sends nothing |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
 | `discover_cyberwave_assets.py` | Manual script: read-only asset lookup, creates nothing |
@@ -457,8 +459,42 @@ an `error` decision, never an approval and never a skip.
    also asks the pure `execution_gate.decide_execution` to re-validate and re-hash the
    request, and treats a disagreement as a critic error.
 
-   **Approved plans are not executed.** The command stays `approved`; no
-   `execution_started` is written. The dry-run lifecycle is the next milestone.
+5. Approved plans only (validator pass AND critic approve, `received -> approved` written):
+   the **dry-run lifecycle** (docs/schema-draft.md sections 2 and 6).
+
+   | Step | Write | Only if |
+   |---|---|---|
+   | 1 | `execution_started` `{"dryRun": true}` | |
+   | 2 | `approved -> executing` | step 1 was written |
+   | 3 | `dry_run.run_dry_run(snapshot)` | step 2 succeeded |
+   | 4 | `execution_completed` `{"dryRun": true, "summary"}` | step 3 succeeded |
+   | 5 | `executing -> completed` | step 4 was written |
+
+   The dry run gets the same immutable `PlanSnapshot` that was validated and sent to the
+   critic. The command text is never parsed again. It re-hashes the snapshot, sends
+   nothing anywhere and returns a summary such as `Dry run only, nothing sent to a robot.
+   Would set a1: _1 = 0.25 rad.`.
+
+   | Failure | What happens |
+   |---|---|
+   | `execution_started` write fails | No dry run. `execution_failed` is written, then `approved -> failed`. |
+   | `approved -> executing` not applied (refused, or `WriteError`) | No dry run. `execution_failed`, then the conditional `approved -> failed` (it cannot overwrite `executing`). |
+   | `approved -> executing` matches no row (`StateConflictError`) | No dry run. `execution_failed` is attempted once; the status is unknown and not touched. Stage `executing_update`. |
+   | the dry run raises | `execution_failed`, then `executing -> failed`. |
+   | `execution_completed` write fails | The dry run succeeded; status stays `executing`. Stage `execution_completed_write`. |
+   | `executing -> completed` fails | `execution_completed` was written. Not retried, not written again, dry run not rerun. Stage `completed_update`. |
+   | `execution_failed` write fails | The failure is NOT in the audit log, so the status is not changed. Stage `execution_failed_write`. |
+   | `-> failed` fails after `execution_failed` | Stage `failed_update`. |
+
+   `execution_failed.error` is fixed text plus an exception class name (at most 200
+   characters), never exception text. Event messages: `Dry run started: nothing is sent to
+   a robot`, `Dry run completed: nothing was sent to a robot`, `Dry run failed: nothing was
+   sent to a robot`. The dashboard summary reads the payloads ("Executing (dry run)", "Dry
+   run completed", "Dry run failed").
+
+   `ProcessResult.decision_status` is what the checks decided. `final_status` is where this
+   run left the command, `execution` is the dry-run outcome and `execution_error` says why
+   it failed.
 
    **Validator "error" (new, unresolved contract question).** The validator never raises:
    it turns its own internal errors into `fail` (`INVALID_PLAN`). The processor still
@@ -494,8 +530,13 @@ rather than the one just typed, and whatever it claims is failed or stranded for
   checks ran, the other result event was still attempted, status untouched), or
 - every event is written but the status update fails (stage `status_update`).
 
+An approved command is left `approved` or `executing` for manual recovery when a dry-run
+write fails in a way the worker cannot resolve safely (stages `executing_update`,
+`execution_failed_write`, `failed_update`, `execution_completed_write`, `completed_update`).
+
 `CommandProcessingError` carries `command_id`, `stage` (`claim`, `event_write`,
-`validator_event_write`, `critic_event_write` or `status_update`), `event_written` (for
+`validator_event_write`, `critic_event_write`, `status_update`, or one of the dry-run
+stages above), `event_written` (for
 the failed stage: True, False, or None when unknown), and, for a valid plan, `plan_id`,
 `events_written` (event types confirmed written) and `intended_status` (what the status
 would have been set to). Nothing is retried automatically, and nothing releases a claim.
@@ -515,6 +556,11 @@ the dashboard, open the command and read its timeline and status.
 | `validator_event_write` / `critic_event_write` | `plan_generated`, plus the events in `events_written` | The message lists both checks' outcomes and `intended_status`. If an event with `event_written` None is in the timeline, do not write it again. A missing result cannot be rebuilt by the worker; decide by hand whether to set `intended_status` or `failed`. |
 | `status_update` after a valid plan | `plan_generated`, `validator_result` (unless the validator errored), `critic_result`; status still `received` | Set the status only, to `intended_status`, with `plan_id`. Do **not** write any event again. |
 | `claim` | nothing | A row may have been claimed: look for a `received` command whose `claimed_by` is this worker id. |
+| `executing_update` | ... `critic_result`, `execution_started`, maybe `execution_failed`; status changed by someone else | The dry run did not run. Do not change the status until you know who changed it and why. |
+| `execution_failed_write` | ... `execution_started` (maybe), no `execution_failed`; status `approved` or `executing` | The failure is not audited. If `event_written` is None, check the timeline first. Write `execution_failed` `{"dryRun": true, "error": ...}` once, then `approved|executing -> failed`. |
+| `failed_update` | ... `execution_failed`; status `approved` or `executing` | Set the status only, to `failed`, from the status it has now. Do **not** write `execution_failed` again. |
+| `execution_completed_write` | ... `execution_started`, maybe `execution_completed`; status `executing` | The dry run succeeded. If `execution_completed` is there, set `executing -> completed` only. If not, decide by hand; do not rerun the dry run. |
+| `completed_update` | ... `execution_completed`; status `executing` | Set `executing -> completed` only. Do **not** write `execution_completed` again and do not rerun the dry run. |
 
 Setting the status by hand, after reading the timeline (replace the id):
 
@@ -534,7 +580,7 @@ priority over status in `src/lib/summary.ts`). The status column shows `received
 status is fixed.
 
 Manual run (claims a real command, writes to Supabase and, for a valid plan, makes one
-request to the critic):
+request to the critic; an approved plan is dry-run and its execution events are written):
 
 ```
 .venv\Scripts\python.exe command_processor.py --confirm-write
@@ -544,8 +590,10 @@ request to the critic):
 
 - Simulation only. `SimulatedRobot` refuses to continue if the SDK client is not in
   simulation mode.
-- No movement code exists yet. It is to be added only behind the validator and critic
-  gates (fail closed). `command_processor.py` stops at `approved`.
+- No movement code exists. `command_processor.py` runs only the offline dry run
+  (`dry_run.py`) after both gates approved, and writes only `dryRun: true`. There is no
+  flag, setting, environment variable or injectable executor that could turn it into
+  simulation or physical execution; real execution would be a separate, agreed change.
 - Every test runs under the process-wide network guard (`tests/net_guard.py`, see "The
   test suite is network-isolated"). Critic responses come from `httpx.MockTransport` or
   an offline fake.

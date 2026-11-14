@@ -67,6 +67,20 @@ SUCCESS_ORDER = [
     "append_event",  # critic_result
     "set_command_status",
 ]
+# An approved plan continues with the dry-run lifecycle.
+DRY_RUN_ORDER = SUCCESS_ORDER + [
+    "append_event",  # execution_started
+    "set_command_status",  # approved -> executing
+    "append_event",  # execution_completed
+    "set_command_status",  # executing -> completed
+]
+SIX_EVENTS = [
+    "plan_generated",
+    "validator_result",
+    "critic_result",
+    "execution_started",
+    "execution_completed",
+]
 
 
 class OrchestrationTestCase(ProcessorTestCase):
@@ -100,7 +114,17 @@ class OrchestrationTestCase(ProcessorTestCase):
         return self.calls.review_plan.call_args.args[0]
 
     def status(self) -> str:
+        """The LAST status written by this run."""
         return self.bound("set_command_status")["status"]
+
+    def decision(self) -> str:
+        """The FIRST status written for a plan: received -> approved|rejected|failed."""
+        first = self.bound_all("set_command_status")[0]
+        self.assertEqual(first["expected_status"], "received")
+        return first["status"]
+
+    def transitions(self) -> list[tuple[str, str]]:
+        return [(c["expected_status"], c["status"]) for c in self.bound_all("set_command_status")]
 
 
 class FinalStatusPrecedenceTests(unittest.TestCase):
@@ -137,13 +161,10 @@ class FinalStatusPrecedenceTests(unittest.TestCase):
 class SuccessfulPlanTests(OrchestrationTestCase):
     def test_event_order_and_approved_status(self) -> None:
         result = process_one_command(WORKER_ID)
-        self.assertEqual(self.call_names(), SUCCESS_ORDER)
+        self.assertEqual(self.call_names(), DRY_RUN_ORDER)
+        self.assertEqual([t for t, _, _ in self.events()], SIX_EVENTS)
         self.assertEqual(
-            [t for t, _, _ in self.events()],
-            ["plan_generated", "validator_result", "critic_result"],
-        )
-        self.assertEqual(
-            self.bound("set_command_status"),
+            self.bound_all("set_command_status")[0],
             {
                 "command_id": COMMAND_ID,
                 "expected_status": "received",
@@ -154,9 +175,10 @@ class SuccessfulPlanTests(OrchestrationTestCase):
         )
         self.assertEqual(result.outcome, "plan_checked")
         self.assertEqual(
-            (result.validator_outcome, result.critic_outcome, result.final_status),
+            (result.validator_outcome, result.critic_outcome, result.decision_status),
             ("pass", "approve", "approved"),
         )
+        self.assertEqual((result.execution, result.final_status), ("completed", "completed"))
         self.assertEqual(result.plan_id, PLAN_ID)
 
     def test_plan_generated_payload_and_message(self) -> None:
@@ -187,7 +209,7 @@ class SuccessfulPlanTests(OrchestrationTestCase):
         self.assertEqual(request.plan_id, PLAN_ID)
         self.assertEqual(self.event("plan_generated")["planId"], PLAN_ID)
         self.assertEqual(self.event("validator_result")["planId"], PLAN_ID)
-        self.assertEqual(self.bound("set_command_status")["plan_id"], PLAN_ID)
+        self.assertEqual(self.bound_all("set_command_status")[0]["plan_id"], PLAN_ID)
 
     def test_critic_request_uses_the_hash_and_id_stored_in_the_audit_events(self) -> None:
         process_one_command(WORKER_ID)
@@ -337,14 +359,24 @@ class PrecedenceThroughTheProcessorTests(OrchestrationTestCase):
                 self.calls.review_plan.assert_called_once()  # the critic always ran
                 self.assertEqual(result.validator_outcome, validator)
                 self.assertEqual(result.critic_outcome, critic)
-                self.assertEqual(result.final_status, expected)
-                self.assertEqual(self.status(), expected)
+                self.assertEqual(result.decision_status, expected)
+                self.assertEqual(self.decision(), expected)
                 written = [t for t, _, _ in self.events()]
-                if validator == "error":
-                    # No agreed validator_result shape for an error: none written.
-                    self.assertEqual(written, ["plan_generated", "critic_result"])
+                checks = (
+                    ["plan_generated", "critic_result"]
+                    if validator == "error"  # no agreed validator_result shape for an error
+                    else ["plan_generated", "validator_result", "critic_result"]
+                )
+                if expected == "approved":
+                    # Only an approval enters the dry run, which completes.
+                    self.assertEqual(written, checks + ["execution_started", "execution_completed"])
+                    self.assertEqual(result.final_status, "completed")
                 else:
-                    self.assertEqual(written, ["plan_generated", "validator_result", "critic_result"])
+                    self.assertEqual(written, checks)  # no execution event at all
+                    self.assertEqual(result.final_status, expected)
+                    self.assertIsNone(result.execution)
+                    self.assertEqual(self.transitions(), [("received", expected)])
+                if validator != "error":
                     self.assertEqual(self.event("validator_result")["outcome"], validator)
                 self.assertEqual(self.event("critic_result")["outcome"], critic)
                 self.assertEqual(self.call_names()[-1], "set_command_status")
