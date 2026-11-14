@@ -7,11 +7,13 @@ robot. The network guard is active.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import io
 import json
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -24,9 +26,12 @@ from sim_telemetry import (
     RawTelemetry,
     TelemetryRejected,
     joints_outside_tolerance,
+    unix_seconds_to_iso_z,
+    unix_seconds_to_utc,
     validate_telemetry,
 )
-from simulation_payloads import validate_snapshot
+from simulation_gates import CYBERWAVE_GATES, live_simulation_blockers
+from simulation_payloads import parse_utc, validate_snapshot
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 11, 14, 8, 30, 1, 500000, tzinfo=timezone.utc)
@@ -34,12 +39,15 @@ POSITIONS = {"_1": 0.1, "_2": -0.2, "_3": 0.3, "_4": 0.0, "_5": 0.5, "_6": 0.05}
 ZEROS = {name: 0.0 for name in POSITIONS}
 
 
+NOW_TS = NOW.timestamp()  # Unix seconds, the unit of the incoming message's timestamp
+
+
 def raw(**overrides: Any) -> RawTelemetry:
+    """A fixture standing in for one incoming joint-state message. Not real telemetry."""
     values: dict[str, Any] = {
         "positions": dict(POSITIONS),
-        "source": "simulation",
-        "kind": "measured",
-        "observed_at": NOW - timedelta(milliseconds=200),
+        "source_type": "sim",
+        "timestamp": NOW_TS - 0.2,
         "update_received": True,
     }
     values.update(overrides)
@@ -54,14 +62,37 @@ class TelemetryCase(unittest.TestCase):
 
 
 class ValidReadingTests(TelemetryCase):
-    def test_a_fully_proven_reading_is_accepted(self) -> None:
+    def test_a_reading_in_the_required_form_is_accepted(self) -> None:
         snapshot = validate_telemetry(raw(), now=NOW)
         self.assertIsInstance(snapshot, JointSnapshot)
         self.assertEqual(dict(snapshot.joints), POSITIONS)
-        self.assertEqual(snapshot.read_at, NOW - timedelta(milliseconds=200))
+        # The message's Unix timestamp, converted. A float near today's epoch
+        # resolves to well under a microsecond.
+        self.assertLessEqual(
+            abs(snapshot.read_at - (NOW - timedelta(milliseconds=200))),
+            timedelta(microseconds=1),
+        )
         payload = snapshot.to_payload()
         self.assertEqual(payload["readAt"], "2026-11-14T08:30:01Z")
         validate_snapshot(payload)
+
+    def test_the_raw_reading_keeps_the_original_message_fields(self) -> None:
+        reading = raw()
+        validate_telemetry(reading, now=NOW)
+        self.assertEqual(reading.timestamp, NOW_TS - 0.2)  # the number, not a datetime
+        self.assertEqual(reading.source_type, "sim")
+        with self.assertRaises(AttributeError):
+            reading.timestamp = NOW_TS  # type: ignore[misc]
+
+    def test_raw_telemetry_has_no_caller_supplied_provenance_field(self) -> None:
+        names = [field.name for field in dataclasses.fields(RawTelemetry)]
+        self.assertEqual(names, ["positions", "source_type", "timestamp", "update_received"])
+        for label in ({"source": "simulation"}, {"kind": "measured"}, {"observed_at": NOW}):
+            with self.subTest(label=list(label)[0]):
+                with self.assertRaises(TypeError):
+                    RawTelemetry(positions=dict(POSITIONS), **label)
+        for name in ("SOURCE_SIMULATION", "KIND_MEASURED"):
+            self.assertFalse(hasattr(sim_telemetry, name), name)
 
     def test_the_snapshot_cannot_be_changed(self) -> None:
         snapshot = validate_telemetry(raw(), now=NOW)
@@ -70,9 +101,9 @@ class ValidReadingTests(TelemetryCase):
         with self.assertRaises(AttributeError):
             snapshot.read_at = NOW  # type: ignore[misc]
 
-    def test_a_non_utc_aware_time_is_converted_to_utc(self) -> None:
+    def test_the_snapshot_time_is_utc_whatever_zone_now_is_given_in(self) -> None:
         ist = timezone(timedelta(hours=5, minutes=30))
-        snapshot = validate_telemetry(raw(observed_at=NOW.astimezone(ist)), now=NOW)
+        snapshot = validate_telemetry(raw(), now=NOW.astimezone(ist))
         self.assertEqual(snapshot.read_at.utcoffset(), timedelta(0))
         self.assertEqual(snapshot.to_payload()["readAt"], "2026-11-14T08:30:01Z")
 
@@ -117,20 +148,52 @@ class ProvenanceTests(TelemetryCase):
         # What get_joints() gives today: positions only.
         self.assertEqual(self.reason(RawTelemetry(positions=dict(POSITIONS))), "source_unverified")
 
-    def test_real_simulation_source_is_required(self) -> None:
-        self.assertEqual(self.reason(raw(source=None)), "source_unverified")
-        for source in ("live", "edge", "sim", "Simulation", "simulation ", "", True, 1):
-            with self.subTest(source=source):
-                self.assertEqual(self.reason(raw(source=source)), "not_simulation_source")
+    def test_only_the_exact_source_type_sim_is_accepted(self) -> None:
+        self.assertEqual(sim_telemetry.SOURCE_TYPE_SIM, "sim")
+        self.assertIsInstance(validate_telemetry(raw(source_type="sim"), now=NOW), JointSnapshot)
 
-    def test_commanded_targets_are_not_telemetry(self) -> None:
-        self.assertEqual(self.reason(raw(kind="commanded")), "commanded_not_measured")
+    def test_a_missing_source_type_is_refused(self) -> None:
+        self.assertEqual(self.reason(raw(source_type=None)), "source_unverified")
 
-    def test_placeholders_and_unknown_kinds_are_refused(self) -> None:
-        self.assertEqual(self.reason(raw(kind="placeholder")), "placeholder")
-        for kind in (None, "default", "edited", "Measured", "", True):
-            with self.subTest(kind=kind):
-                self.assertEqual(self.reason(raw(kind=kind)), "kind_unverified")
+    def test_command_messages_are_refused(self) -> None:
+        # sim_tele and edit are commands from the frontend, not simulator state.
+        for source_type in ("sim_tele", "edit"):
+            with self.subTest(source_type=source_type):
+                self.assertEqual(
+                    self.reason(raw(source_type=source_type)), "commanded_not_measured"
+                )
+
+    def test_hardware_sources_are_refused(self) -> None:
+        for source_type in ("edge", "edge_leader", "edge_follower", "tele"):
+            with self.subTest(source_type=source_type):
+                self.assertEqual(
+                    self.reason(raw(source_type=source_type)), "not_simulation_source"
+                )
+
+    def test_near_misses_of_sim_are_refused(self) -> None:
+        # No trimming, no case folding, no synonym.
+        for source_type in (
+            "Sim", "SIM", " sim", "sim ", "sim\n", "simulation", "simulator",
+            "mujoco", "playground", "live", "",
+        ):
+            with self.subTest(source_type=repr(source_type)):
+                self.assertEqual(self.reason(raw(source_type=source_type)), "source_unverified")
+
+    def test_a_source_type_of_the_wrong_type_is_refused(self) -> None:
+        class StrSubclass(str):
+            pass
+
+        for source_type in (True, 1, 0.0, b"sim", ["sim"], {"source_type": "sim"}, StrSubclass("sim")):
+            with self.subTest(source_type=repr(source_type)):
+                self.assertEqual(self.reason(raw(source_type=source_type)), "source_invalid")
+
+    def test_the_source_sets_match_the_wire_contract_values(self) -> None:
+        # The seven source_type values of cyberwave-contracts 0.1.4, each handled.
+        self.assertEqual(sim_telemetry.COMMAND_SOURCE_TYPES, {"sim_tele", "edit"})
+        self.assertEqual(
+            sim_telemetry.HARDWARE_SOURCE_TYPES, {"edge", "edge_leader", "edge_follower", "tele"}
+        )
+        self.assertNotIn("sim", sim_telemetry.COMMAND_SOURCE_TYPES | sim_telemetry.HARDWARE_SOURCE_TYPES)
 
     def test_a_reading_without_a_received_update_is_refused(self) -> None:
         for value in (None, False, "yes", 1):
@@ -143,16 +206,17 @@ class PlaceholderTests(TelemetryCase):
         for name, reading in {
             "sdk zero fill": RawTelemetry(positions=dict(ZEROS)),
             "no update": raw(positions=dict(ZEROS), update_received=False),
-            "no source": raw(positions=dict(ZEROS), source=None),
-            "not measured": raw(positions=dict(ZEROS), kind=None),
-            "commanded zeros": raw(positions=dict(ZEROS), kind="commanded"),
+            "no source": raw(positions=dict(ZEROS), source_type=None),
+            "unknown source": raw(positions=dict(ZEROS), source_type="simulation"),
+            "command zeros": raw(positions=dict(ZEROS), source_type="sim_tele"),
             "integer zeros": raw(positions={k: 0 for k in ZEROS}, update_received=None),
-            "negative zeros": raw(positions={k: -0.0 for k in ZEROS}, source="live"),
+            "negative zeros": raw(positions={k: -0.0 for k in ZEROS}, source_type="edge"),
         }.items():
             with self.subTest(case=name):
                 self.assertEqual(self.reason(reading), "placeholder_suspected")
 
-    def test_zeros_are_believed_only_with_full_proof(self) -> None:
+    def test_zeros_pass_only_when_the_message_says_sim_and_an_update_arrived(self) -> None:
+        # Passing is still not proof that the arm is at zero: see the gates test.
         snapshot = validate_telemetry(raw(positions=dict(ZEROS)), now=NOW)
         self.assertEqual(dict(snapshot.joints), ZEROS)
 
@@ -162,33 +226,144 @@ class PlaceholderTests(TelemetryCase):
         self.assertEqual(self.reason(reading), "source_unverified")
 
 
-class TimestampTests(TelemetryCase):
-    def test_missing_timestamp_is_refused(self) -> None:
-        self.assertEqual(self.reason(raw(observed_at=None)), "timestamp_missing")
+class UnixTimestampConversionTests(unittest.TestCase):
+    """Cyberwave's aggregated joint-state timestamp is Unix seconds. Fixtures only."""
 
-    def test_invalid_timestamps_are_refused(self) -> None:
+    KNOWN = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)  # 1700000000
+
+    def reason(self, value: Any) -> str:
+        with self.assertRaises(TelemetryRejected) as ctx:
+            unix_seconds_to_utc(value)
+        return ctx.exception.reason
+
+    def test_an_integer_timestamp_is_converted(self) -> None:
+        moment = unix_seconds_to_utc(1700000000)
+        self.assertEqual(moment, self.KNOWN)
+        self.assertEqual(moment.utcoffset(), timedelta(0))
+        self.assertEqual(unix_seconds_to_utc(1700000000.0), self.KNOWN)
+
+    def test_a_fractional_timestamp_is_converted(self) -> None:
+        self.assertEqual(
+            unix_seconds_to_utc(1700000000.5), self.KNOWN + timedelta(milliseconds=500)
+        )
+        self.assertEqual(
+            unix_seconds_to_utc(1700000000.25), self.KNOWN + timedelta(milliseconds=250)
+        )
+
+    def test_it_is_serialised_as_iso_8601_utc_ending_in_z(self) -> None:
+        self.assertEqual(unix_seconds_to_iso_z(1700000000), "2023-11-14T22:13:20Z")
+        # The payload form is whole seconds: a fraction is dropped, not rounded up.
+        self.assertEqual(unix_seconds_to_iso_z(1700000000.5), "2023-11-14T22:13:20Z")
+        self.assertEqual(unix_seconds_to_iso_z(1700000000.999), "2023-11-14T22:13:20Z")
+        text = unix_seconds_to_iso_z(NOW_TS)
+        self.assertEqual(text, "2026-11-14T08:30:01Z")
+        self.assertTrue(text.endswith("Z"))
+        self.assertNotIn("+00:00", text)
+
+    def test_round_trip(self) -> None:
+        for moment in (self.KNOWN, NOW.replace(microsecond=0), datetime(2030, 1, 1, tzinfo=timezone.utc)):
+            with self.subTest(moment=moment.isoformat()):
+                seconds = moment.timestamp()
+                self.assertEqual(unix_seconds_to_utc(seconds), moment)
+                self.assertEqual(parse_utc(unix_seconds_to_iso_z(seconds)), moment)
+                self.assertEqual(unix_seconds_to_utc(int(seconds)), moment)
+
+    def test_the_serialised_form_is_the_agreed_snapshot_timestamp(self) -> None:
+        snapshot = validate_telemetry(raw(), now=NOW)
+        payload = snapshot.to_payload()
+        self.assertEqual(payload["readAt"], unix_seconds_to_iso_z(NOW_TS - 0.2))
+        self.assertEqual(set(payload), {"readAt", "joints"})  # the snapshot shape is unchanged
+        validate_snapshot(payload)
+
+    def test_a_missing_timestamp_is_refused(self) -> None:
+        self.assertEqual(self.reason(None), "timestamp_missing")
+
+    def test_a_boolean_is_refused(self) -> None:
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertEqual(self.reason(value), "timestamp_invalid")
+
+    def test_a_string_or_any_other_type_is_refused(self) -> None:
         for name, value in {
+            "numeric string": "1700000000",
+            "iso string": "2026-11-14T08:30:01Z",
+            "empty string": "",
+            "aware datetime": NOW,
             "naive datetime": NOW.replace(tzinfo=None),
-            "string": "2026-11-14T08:30:01Z",
-            "epoch seconds": 1763109001.0,
-            "boolean": True,
+            "list": [1700000000],
+            "decimal": Decimal("1700000000"),
         }.items():
             with self.subTest(case=name):
-                self.assertEqual(self.reason(raw(observed_at=value)), "timestamp_invalid")
+                self.assertEqual(self.reason(value), "timestamp_invalid")
+
+    def test_nan_and_infinity_are_refused(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertEqual(self.reason(value), "timestamp_not_finite")
+
+    def test_zero_and_negative_values_are_refused(self) -> None:
+        for value in (0, 0.0, -0.0, -1, -0.001, -1700000000.0):
+            with self.subTest(value=value):
+                self.assertEqual(self.reason(value), "timestamp_not_positive")
+
+    def test_millisecond_or_finer_values_are_refused_not_rescaled(self) -> None:
+        for name, value in {
+            "milliseconds": 1700000000000,
+            "milliseconds float": NOW_TS * 1000,
+            "microseconds": 1700000000000000,
+            "nanoseconds": 1700000000000000000,
+            "the limit itself": sim_telemetry.MAX_UNIX_SECONDS,
+            "huge int": 10**400,
+        }.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.reason(value), "timestamp_not_seconds")
+        # Just under the limit is still seconds (and then stale by millennia).
+        self.assertIsInstance(unix_seconds_to_utc(4102444800), datetime)  # 2100-01-01
+
+
+class TimestampTests(TelemetryCase):
+    """The same rules through validate_telemetry, plus freshness and ordering."""
+
+    def test_missing_timestamp_is_refused(self) -> None:
+        self.assertEqual(self.reason(raw(timestamp=None)), "timestamp_missing")
+        self.assertEqual(
+            self.reason(RawTelemetry(positions=dict(POSITIONS), source_type="sim", update_received=True)),
+            "timestamp_missing",
+        )
+
+    def test_invalid_timestamps_are_refused(self) -> None:
+        for name, value, expected in (
+            ("boolean", True, "timestamp_invalid"),
+            ("numeric string", "1763109001", "timestamp_invalid"),
+            ("iso string", "2026-11-14T08:30:01Z", "timestamp_invalid"),
+            ("aware datetime", NOW, "timestamp_invalid"),
+            ("naive datetime", NOW.replace(tzinfo=None), "timestamp_invalid"),
+            ("nan", float("nan"), "timestamp_not_finite"),
+            ("infinity", float("inf"), "timestamp_not_finite"),
+            ("zero", 0, "timestamp_not_positive"),
+            ("negative", -NOW_TS, "timestamp_not_positive"),
+            ("milliseconds", NOW_TS * 1000, "timestamp_not_seconds"),
+        ):
+            with self.subTest(case=name):
+                self.assertEqual(self.reason(raw(timestamp=value)), expected)
 
     def test_stale_readings_are_refused(self) -> None:
-        self.assertEqual(self.reason(raw(observed_at=NOW - timedelta(seconds=2.5))), "stale")
-        self.assertEqual(self.reason(raw(observed_at=NOW - timedelta(hours=1))), "stale")
-        validate_telemetry(raw(observed_at=NOW - timedelta(seconds=1.9)), now=NOW)
+        self.assertEqual(self.reason(raw(timestamp=NOW_TS - 2.5)), "stale")
+        self.assertEqual(self.reason(raw(timestamp=NOW_TS - 3600)), "stale")
+        self.assertEqual(self.reason(raw(timestamp=1700000000)), "stale")
+        validate_telemetry(raw(timestamp=NOW_TS - 1.9), now=NOW)
 
     def test_future_readings_are_refused(self) -> None:
-        self.assertEqual(self.reason(raw(observed_at=NOW + timedelta(seconds=5))), "timestamp_in_future")
-        validate_telemetry(raw(observed_at=NOW + timedelta(milliseconds=100)), now=NOW)
+        self.assertEqual(self.reason(raw(timestamp=NOW_TS + 5)), "timestamp_in_future")
+        self.assertEqual(self.reason(raw(timestamp=NOW_TS + 0.6)), "timestamp_in_future")
+        validate_telemetry(raw(timestamp=NOW_TS + 0.1), now=NOW)
+        self.assertEqual(sim_telemetry.MAX_CLOCK_SKEW_S, 0.5)
 
     def test_a_reading_from_before_the_movement_is_refused(self) -> None:
         sent_at = NOW - timedelta(milliseconds=100)
         self.assertEqual(self.reason(raw(), not_before=sent_at), "stale_before_dispatch")
-        validate_telemetry(raw(observed_at=NOW), now=NOW, not_before=sent_at)
+        validate_telemetry(raw(timestamp=NOW_TS), now=NOW, not_before=sent_at)
+        validate_telemetry(raw(timestamp=int(NOW_TS) + 1), now=NOW, not_before=sent_at)
 
     def test_the_age_limit_can_only_be_tightened(self) -> None:
         self.assertEqual(self.reason(raw(), max_age_s=0.1), "stale")
@@ -201,6 +376,48 @@ class TimestampTests(TelemetryCase):
     def test_now_must_be_timezone_aware(self) -> None:
         with self.assertRaises(ValueError):
             validate_telemetry(raw(), now=NOW.replace(tzinfo=None))
+
+
+class TelemetryGatesStayClosedTests(TelemetryCase):
+    """Passing the validator is necessary, not proof. It opens nothing."""
+
+    TELEMETRY_GATES = (
+        "telemetry_is_actual_state_confirmed",
+        "telemetry_source_confirmed",
+        "measured_vs_placeholder_confirmed",
+    )
+
+    def test_the_three_telemetry_gates_are_false(self) -> None:
+        for name in self.TELEMETRY_GATES:
+            with self.subTest(gate=name):
+                self.assertIs(getattr(CYBERWAVE_GATES, name), False)
+
+    def test_all_six_gates_are_false(self) -> None:
+        self.assertEqual(len(dataclasses.fields(CYBERWAVE_GATES)), 6)
+        self.assertEqual(len(CYBERWAVE_GATES.unconfirmed()), 6)
+        self.assertFalse(CYBERWAVE_GATES.all_confirmed())
+
+    def test_a_reading_that_passes_validation_opens_no_gate(self) -> None:
+        self.assertIsInstance(validate_telemetry(raw(), now=NOW), JointSnapshot)
+        self.assertEqual(len(live_simulation_blockers()), 6)
+        for name in self.TELEMETRY_GATES:
+            self.assertIn(name, CYBERWAVE_GATES.unconfirmed())
+
+    def test_the_validator_cannot_reach_the_gates(self) -> None:
+        tree = ast.parse((WORKER_DIR / "sim_telemetry.py").read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+            elif isinstance(node, ast.Import):
+                imported |= {alias.name.split(".")[0] for alias in node.names}
+        self.assertEqual(
+            imported, {"__future__", "math", "dataclasses", "datetime", "types", "typing", "simulation_payloads"}
+        )
+
+    def test_the_module_states_that_passing_is_not_proof(self) -> None:
+        self.assertIn("NECESSARY, NOT PROOF", sim_telemetry.__doc__ or "")
+        self.assertIn("necessary, not proof", JointSnapshot.__doc__ or "")
 
 
 class ToleranceTests(unittest.TestCase):

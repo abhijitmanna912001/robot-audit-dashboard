@@ -688,8 +688,9 @@ class NoMovementTests(SimulationTestCase):
 
     def test_no_movement_when_telemetry_provenance_is_unverified(self) -> None:
         for name, arrange in {
-            "no source": lambda t: setattr(t, "source", None),
-            "commanded": lambda t: setattr(t, "kind", "commanded"),
+            "no source": lambda t: setattr(t, "source_type", None),
+            "command message": lambda t: setattr(t, "source_type", "sim_tele"),
+            "hardware source": lambda t: setattr(t, "source_type", "edge"),
             "no update": lambda t: setattr(t, "update_received", None),
             "stale": lambda t: setattr(t, "age_s", 60.0),
             "no timestamp": lambda t: setattr(t, "omit_timestamp", True),
@@ -1006,7 +1007,7 @@ class IsolationTests(SimulationTestCase):
                 imported |= {alias.name.split(".")[0] for alias in node.names}
         self.assertEqual(
             imported,
-            {"__future__", "threading", "datetime", "typing", "sim_telemetry",
+            {"__future__", "threading", "time", "typing", "sim_telemetry",
              "simulation_executor", "simulation_gates"},
         )
 

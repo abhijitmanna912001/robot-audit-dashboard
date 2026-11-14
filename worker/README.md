@@ -730,12 +730,60 @@ still lists `execution_failed` as `{ "dryRun": boolean, "error": string }`; for 
 
 ### Telemetry validation
 
-A successful SDK call is not proof. `sim_telemetry.validate_telemetry` accepts a reading
-only if all of these hold: exactly joints `_1` to `_6`, finite numbers; source verified as
-`"simulation"`; kind verified as `"measured"` (not `"commanded"`, not a placeholder); a state
-update actually arrived for this read; a timezone-aware acquisition time no older than 2 s,
-not in the future, and not from before the movement it is meant to verify. A zero-filled
-reading without that proof is `placeholder_suspected`. A missing fact is never defaulted.
+**What this is, and what it is not.** `sim_telemetry.validate_telemetry` validates the
+source label and the timestamp that are **supplied to it**. It is a validation layer. It is
+not a Cyberwave telemetry integration, and it does not establish where a reading came from.
+
+- Its input, `RawTelemetry` (`positions`, `source_type`, `timestamp`, `update_received`), is
+  a plain input structure. The `source_type` and `timestamp` fields are named after fields
+  of a Cyberwave joint-state message, and a future adapter is expected to copy them from a
+  message it actually received. Nothing can check that it did: any caller can construct a
+  `RawTelemetry` with `source_type="sim"` and a current timestamp, and it will pass.
+- **Today every reading that carries a `source_type` and a `timestamp` is a fixture.** They
+  are built by the tests and by the fake twin (`tests/fake_twin.py`) with synthetic values.
+- **No real Cyberwave telemetry has been received or verified by the worker.** No worker
+  code path hands the validator fields taken from a real incoming message. The one script
+  that reads from Cyberwave, `read_joint_telemetry.py`, goes through `get_joints()`, which
+  provides neither field, so its readings are always refused.
+- A successful SDK call is not proof either.
+
+A reading is accepted only if all of these hold:
+
+- exactly joints `_1` to `_6`, finite numbers;
+- the supplied `source_type` is exactly the string `"sim"`, with no trimming and no case
+  folding;
+- the caller reports that a state update arrived for this read;
+- the supplied `timestamp` is a numeric Unix time in seconds, no older than 2 s, not more
+  than 0.5 s in the future, and not from before the movement it is meant to verify.
+
+| Refused | Reason code |
+|---|---|
+| no `source_type` | `source_unverified` |
+| `source_type` that is not a string | `source_invalid` |
+| `sim_tele`, `edit` (commands from the frontend) | `commanded_not_measured` |
+| `edge`, `edge_leader`, `edge_follower`, `tele` (hardware) | `not_simulation_source` |
+| anything else, including `Sim`, `" sim"`, `simulation` | `source_unverified` |
+| no `timestamp` | `timestamp_missing` |
+| a boolean, a string, a datetime or any other non-number | `timestamp_invalid` |
+| NaN or infinity | `timestamp_not_finite` |
+| zero or negative | `timestamp_not_positive` |
+| a value that can only be milliseconds or finer (1e11 or more) | `timestamp_not_seconds` |
+| older than 2 s / in the future / before the dispatch | `stale` / `timestamp_in_future` / `stale_before_dispatch` |
+| all six joints 0.0 without `"sim"` and a received update | `placeholder_suspected` |
+
+The Unix timestamp is converted to an aware UTC datetime
+(`sim_telemetry.unix_seconds_to_utc`) and written in a payload as ISO 8601 UTC with a
+trailing `Z`, whole seconds (`unix_seconds_to_iso_z`, the same form as `readAt`). A wrong
+unit is refused, never rescaled. The original number stays in `RawTelemetry.timestamp`.
+
+**Passing this validator is necessary, not proof.** A pass means the supplied label is
+exactly `sim` and the supplied timestamp is fresh. It does not show that a message was
+received or who sent it. Even with a real adapter, `source_type: "sim"` and a fresh
+timestamp would only be what the sender declared: they would not show that the positions
+are measured simulator state rather than an echoed target, an interpolated command or a
+placeholder. The gates `telemetry_is_actual_state_confirmed`, `telemetry_source_confirmed`
+and `measured_vs_placeholder_confirmed` stay `False`, and the executor refuses before any
+read while they are.
 
 `read_joint_telemetry.py --confirm-connect` is the read-only check. It uses only the
 read-only `SimulatedRobot` wrapper, never moves anything and never starts a simulation.

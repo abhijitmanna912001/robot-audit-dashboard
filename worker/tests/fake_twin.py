@@ -6,6 +6,13 @@ test cannot start a simulation or route to hardware through it. Every call is
 recorded in ``calls`` (and passed to ``recorder``, if set) so tests can assert
 exactly what was "sent" and in which order.
 
+Its telemetry is SYNTHETIC. Each reading's ``source_type`` (``"sim"`` by
+default) and ``timestamp`` (the local clock) are test values written by this
+file. They are not taken from any Cyberwave message, and a test that passes
+with them shows only how the worker handles a reading of that form. It is not
+evidence of what the real simulator publishes, and no real Cyberwave telemetry
+is involved.
+
 Behaviour is driven by simple attributes that a test sets before the run.
 Reads are numbered from 1; on a fully successful run they are: 1 start,
 2 target wait, 3 target verify, 4 return wait, 5 restored verify. Movements
@@ -15,7 +22,7 @@ are numbered 1 (target) and 2 (return).
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+import time
 from typing import Any, Callable
 
 from sim_telemetry import RawTelemetry
@@ -60,13 +67,15 @@ class FakeTwin:
         self.recorder: Callable[[str], Any] | None = None
         self.reported_runtime_target: Any = "simulation"
         self.reported_twin_target: Any = "simulation"
-        # Telemetry provenance the fake reports with each reading.
-        self.source: Any = "simulation"
-        self.kind: Any = "measured"
-        self.update_received: Any = True
-        self.age_s = 0.0  # how old each reading claims to be
+        # SYNTHETIC test values, not telemetry. This fake writes the source label
+        # and the timestamp itself; nothing here comes from a Cyberwave message.
+        # A fake saying "sim" proves nothing about what the real simulator
+        # publishes.
+        self.source_type: Any = "sim"  # synthetic label, set by the test fixture
+        self.update_received: Any = True  # synthetic flag
+        self.age_s = 0.0  # how far in the past the synthetic timestamp is set
         self.omit_timestamp = False
-        self.naive_timestamp = False
+        self.bad_timestamp: Any = None  # if set, used verbatim as the synthetic timestamp
         # Movement behaviour.
         self.ignore_moves: set[int] = set()  # movement numbers accepted but not applied
         self.move_offset = 0.0  # added to the commanded value when applied
@@ -104,17 +113,21 @@ class FakeTwin:
         return [(call[1], call[2]) for call in self.calls if call[0] == "move_joint"]
 
     def reading(self, positions: dict[str, Any] | None = None, **overrides: Any) -> RawTelemetry:
-        """A fresh, fully proven reading (unless overridden)."""
-        observed: Any = datetime.now(timezone.utc) - timedelta(seconds=self.age_s)
-        if self.naive_timestamp:
-            observed = observed.replace(tzinfo=None)
+        """A SYNTHETIC reading in the accepted form (unless overridden).
+
+        ``source_type`` is the fixture's own label and ``timestamp`` is this
+        machine's clock in Unix seconds (the unit of the aggregated joint-state
+        message). Neither is read from a message.
+        """
+        stamp: Any = time.time() - self.age_s  # synthetic: the local clock
+        if self.bad_timestamp is not None:
+            stamp = self.bad_timestamp
         if self.omit_timestamp:
-            observed = None
+            stamp = None
         values: dict[str, Any] = {
             "positions": dict(self.positions if positions is None else positions),
-            "source": self.source,
-            "kind": self.kind,
-            "observed_at": observed,
+            "source_type": self.source_type,
+            "timestamp": stamp,
             "update_received": self.update_received,
         }
         values.update(overrides)

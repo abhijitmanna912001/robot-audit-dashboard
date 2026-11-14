@@ -301,15 +301,19 @@ class SimulationOnlyTests(ExecutorCase):
 class StartTelemetryTests(ExecutorCase):
     def test_no_movement_when_telemetry_provenance_is_unverified(self) -> None:
         cases: dict[str, Any] = {
-            "no source": lambda t: setattr(t, "source", None),
-            "live source": lambda t: setattr(t, "source", "live"),
-            "commanded": lambda t: setattr(t, "kind", "commanded"),
-            "placeholder": lambda t: setattr(t, "kind", "placeholder"),
-            "kind unknown": lambda t: setattr(t, "kind", None),
+            "no source": lambda t: setattr(t, "source_type", None),
+            "hardware source": lambda t: setattr(t, "source_type", "edge"),
+            "live teleop": lambda t: setattr(t, "source_type", "tele"),
+            "simulation teleop command": lambda t: setattr(t, "source_type", "sim_tele"),
+            "editor command": lambda t: setattr(t, "source_type", "edit"),
+            "unknown source": lambda t: setattr(t, "source_type", "simulation"),
+            "source of the wrong type": lambda t: setattr(t, "source_type", True),
             "no update": lambda t: setattr(t, "update_received", False),
             "stale": lambda t: setattr(t, "age_s", 30.0),
             "no timestamp": lambda t: setattr(t, "omit_timestamp", True),
-            "naive timestamp": lambda t: setattr(t, "naive_timestamp", True),
+            "string timestamp": lambda t: setattr(t, "bad_timestamp", "2026-11-14T08:30:01Z"),
+            "millisecond timestamp": lambda t: setattr(t, "bad_timestamp", time.time() * 1000),
+            "negative timestamp": lambda t: setattr(t, "bad_timestamp", -1.0),
             "five joints": lambda t: t.positions.pop("_6"),
             "nan": lambda t: t.positions.__setitem__("_2", float("nan")),
         }
@@ -410,29 +414,25 @@ class MovementFailureTests(ExecutorCase):
         self.assert_stopped_once(outcome, moves=1)
 
     def test_a_commanded_target_is_not_accepted_as_proof_of_the_target(self) -> None:
-        # The joint did not move; the twin echoes the commanded value instead.
+        # The joint did not move; a command message carrying the target arrives
+        # instead (source_type "sim_tele" is a command, not simulator state).
         self.twin.ignore_moves = {1}
         self.twin.read_overrides[2] = lambda positions: self.twin.reading(
-            {**positions, "_1": 0.25}, kind="commanded"
+            {**positions, "_1": 0.25}, source_type="sim_tele"
         )
         outcome = self.failure("telemetry_invalid")
         self.assertIn("commanded_not_measured", outcome.detail)
         self.assert_stopped_once(outcome, moves=1)
 
     def test_telemetry_losing_its_provenance_after_dispatch_is_a_failure(self) -> None:
-        self.twin.read_overrides[2] = lambda positions: self.twin.reading(source=None)
+        self.twin.read_overrides[2] = lambda positions: self.twin.reading(source_type=None)
         outcome = self.failure("telemetry_invalid")
         self.assert_stopped_once(outcome, moves=1)
 
     def test_a_reading_from_before_the_movement_is_not_evidence(self) -> None:
         # An old-but-valid reading already showing 0.25 must not end the wait.
-        from datetime import datetime, timedelta, timezone
-
         def before_dispatch(positions: dict[str, float]) -> Any:
-            return self.twin.reading(
-                {**positions, "_1": 0.25},
-                observed_at=datetime.now(timezone.utc) - timedelta(seconds=1.0),
-            )
+            return self.twin.reading({**positions, "_1": 0.25}, timestamp=time.time() - 1.0)
 
         self.twin.ignore_moves = {1}
         self.twin.read_overrides[2] = before_dispatch
@@ -540,7 +540,7 @@ class StopTests(ExecutorCase):
 
         self.twin = FakeTwin()
         self.twin.fail_move_number[1] = RuntimeError("x")
-        self.twin.read_overrides[2] = lambda positions: self.twin.reading(source=None)
+        self.twin.read_overrides[2] = lambda positions: self.twin.reading(source_type=None)
         bad = self.failure("dispatch_failed")
         self.assertIsNone(bad.last_telemetry)  # the earlier start reading is not reused
 

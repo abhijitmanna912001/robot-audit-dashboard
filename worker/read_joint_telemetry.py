@@ -22,12 +22,21 @@ Checked against the installed SDK source (cyberwave 0.7.5), not guessed:
   (starting one may be billable; that is a separate, approved step).
 
 So this script cannot establish where a reading came from, when it was
-measured, or whether it is a measurement at all. It reports the values as
-UNVERIFIED and passes an honest ``RawTelemetry`` (source, kind and time left
-unset) to ``sim_telemetry.validate_telemetry``, which refuses it. Once the
-Cyberwave engineers confirm how telemetry identifies its simulation source and
-how to tell measured state from placeholders, the mapping in ``_to_raw`` is the
-one place to change.
+measured, or whether it is a measurement at all. It does NOT provide real
+telemetry verification, and it is not an integration of the telemetry
+validator with Cyberwave.
+
+The ``get_joints()`` path gives the validator (``sim_telemetry.py``) no
+``source_type`` and no ``timestamp``: neither a verified one nor any at all.
+This script therefore passes a ``RawTelemetry`` with both left unset to
+``sim_telemetry.validate_telemetry``, which always refuses it, and reports the
+values as UNVERIFIED. It never fills those fields in itself: a value written
+here would be a label supplied by this script, not provenance.
+
+Nothing in the worker receives a joint-state message's own fields today. If
+the Cyberwave engineers confirm how telemetry identifies its simulation source
+and how to tell measured state from placeholders, a different read path would
+be needed; ``_to_raw`` is where its fields would be mapped.
 
 Exit codes: 0 verified, 2 not confirmed or configuration error, 1 read failed,
 3 read worked but the telemetry is not verified.
@@ -53,9 +62,12 @@ READ_TIMEOUT_S = 3.0
 def _to_raw(reading: JointReading) -> RawTelemetry:
     """What the SDK read honestly supports today: positions and "an update arrived".
 
-    ``source``, ``kind`` and ``observed_at`` stay unset. The SDK gives no field
-    for them, and inventing them would turn an unverified reading into a
-    "verified" one.
+    ``source_type`` and ``timestamp`` stay unset. ``get_joints()`` and its update
+    callback hand over positions only. They do not provide the incoming
+    message's ``source_type`` or ``timestamp``, verified or otherwise, so there
+    is nothing truthful to put in those fields, and the validator refuses the
+    reading. Filling them in here would be a label supplied by this script, not
+    provenance.
     """
     return RawTelemetry(
         positions=dict(reading.positions),
