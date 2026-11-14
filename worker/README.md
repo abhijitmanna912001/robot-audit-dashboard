@@ -115,8 +115,9 @@ values:
 |---|---|---|
 | `CYBERWAVE_API_KEY` | Cyberwave | required |
 | `CYBERWAVE_WORKSPACE_ID` | Cyberwave | optional. Only needed when the API token is scoped to more than one workspace. Without it, a multi-workspace token gets `400 workspace_required` |
-| `ROBOT_ASSET_IDENTIFIER` | Cyberwave | required, no default. The asset UUID. For the SO-101 it is `89696429-d5d7-4243-85be-ac0d3c148044`. Not needed by `discover_cyberwave_assets.py` |
-| `CYBERWAVE_ENVIRONMENT_ID` | Cyberwave | optional. The UUID of an existing environment. Unset: the SDK reuses or creates a "Quickstart Environment" |
+| `CYBERWAVE_ENVIRONMENT_ID` | Cyberwave | **required to load the twin**, no default. The UUID of the EXISTING environment that holds the twin. Never created |
+| `CYBERWAVE_TWIN_ID` | Cyberwave | **required to load the twin**, no default. The UUID of the EXISTING SO-101 twin in that environment. Never created |
+| `ROBOT_ASSET_IDENTIFIER` | Cyberwave | **required to load the twin**, no default. The asset **UUID** (a registry id is refused). For the SO-101 it is `89696429-d5d7-4243-85be-ac0d3c148044`. Optional and free-form only for `discover_cyberwave_assets.py` |
 | `SUPABASE_URL` | Supabase | required |
 | `SUPABASE_SECRET_KEY` | Supabase | required. Backend key (`sb_secret_...`). Server-side only |
 | `CRITIC_URL` | critic call | required by `command_processor.py` for a valid plan. `https` only (plain `http` only for a loopback host). Missing or unusable: the critic result is an error and nothing is approved |
@@ -129,11 +130,33 @@ The Next.js app has its own environment file and still uses its own variable nam
 fallback: if it is set and the new one is not, the worker stops with an error asking for
 the rename.
 
-**Use the asset UUID, not the registry id.** SDK 0.7.5 resolves a UUID with a direct
-fetch. It resolves a registry id such as `the-robot-studio/so101` through a list call that
-returns nothing once the client carries a workspace filter, and `cw.twin()` adds that
-filter itself, so the registry id fails with "Asset not found". Details are in
-`docs/robot-capabilities.md`, section 8.
+**The twin is looked up, never created.** Anything that loads the twin
+(`config.load_cyberwave_twin_settings`, `SimulatedRobot.load_existing_twin`) needs all
+three of `CYBERWAVE_ENVIRONMENT_ID`, `CYBERWAVE_TWIN_ID` and `ROBOT_ASSET_IDENTIFIER`, each
+a canonical UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). A missing, blank or malformed
+value stops with an error naming the variable. There is no default and no fallback: the
+worker never calls the SDK's get-or-create `Cyberwave.twin()`, so it cannot create a twin
+or a "Quickstart Environment" (a test checks that no worker module calls it).
+
+The lookup is two read-only calls, both GET in SDK 0.7.5:
+
+| Call | Request | Used for |
+|---|---|---|
+| `client.twins.get_raw(twin_id)` | `GET /api/v1/twins/{uuid}` | the twin record: its `uuid`, `environment_uuid`, `asset_uuid` |
+| `client.twins.list(environment_id=...)` | `GET /api/v1/environments/{uuid}/twins` | the environment's own list of twins |
+
+The twin is accepted only if the record is the configured twin, the record's
+`environment_uuid` is the configured environment, the record's `asset_uuid` is the
+configured asset UUID, **and**, independently of the record, the environment's own twin
+list contains the twin. Any failed call, unreadable field or mismatch is a refusal with no
+twin loaded.
+
+**Use the asset UUID, not the registry id.** For twin loading a registry id such as
+`the-robot-studio/so101` is refused, not resolved: the asset check compares a UUID with a
+UUID and never compares unlike identifiers. SDK 0.7.5 cannot be relied on to resolve a
+registry id anyway: it uses a list call that returns nothing once the client carries a
+workspace filter, and hides the error. Details are in `docs/robot-capabilities.md`,
+section 8.
 
 ## Commands
 
@@ -230,12 +253,11 @@ The behaviour is explained under "Supabase smoke test" below.
 
 - It never calls `affect()`, so it does not start a billable simulation, and it sends no
   joint, gripper or motion command.
-- `Cyberwave.twin()` is get-or-create. On first run it may create an SO-101 twin, and a
-  "Quickstart Environment" if `CYBERWAVE_ENVIRONMENT_ID` is not set.
-- With `CYBERWAVE_WORKSPACE_ID` unset, the SDK picks the workspace itself when it needs
-  one for the Quickstart Environment: a workspace named "Quickstart Workspace" if the token
-  sees one, otherwise the first workspace the token sees. If the token sees none, it
-  creates "Quickstart Workspace".
+- It creates nothing. It looks up the existing twin (`CYBERWAVE_TWIN_ID`) and stops unless
+  the twin belongs to `CYBERWAVE_ENVIRONMENT_ID` and is the asset `ROBOT_ASSET_IDENTIFIER`.
+  The SDK's get-or-create `Cyberwave.twin()` is no longer called by any worker module.
+- Reading joint positions opens the SDK's MQTT connection, which can publish session
+  messages for the twin. No joint, gripper or motion command is sent.
 - With no simulation running, no joint telemetry arrives and the SDK returns 0.0 for every
   joint. The script says so instead of presenting zeros as measurements.
 

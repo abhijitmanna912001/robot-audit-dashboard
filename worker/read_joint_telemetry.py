@@ -7,8 +7,8 @@ no simulation start. It prints one JSON object.
     .venv\\Scripts\\python.exe read_joint_telemetry.py --confirm-connect
 
 Without ``--confirm-connect`` it contacts nothing. With it, it makes the same
-read-only calls as ``test_cyberwave_connection.py`` (note that
-``Cyberwave.twin()`` is get-or-create, see that script).
+read-only calls as ``test_cyberwave_connection.py``: it looks up the EXISTING
+twin (CYBERWAVE_TWIN_ID in CYBERWAVE_ENVIRONMENT_ID) and creates nothing.
 
 WHAT TO EXPECT TODAY: ``"verified": false``. This is deliberate, not a bug.
 
@@ -41,7 +41,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from config import ConfigError, load_cyberwave_settings, redact
+from config import ConfigError, load_cyberwave_twin_settings, redact
 from cyberwave_client import JointReading, RobotConnectionError, SimulatedRobot
 from sim_telemetry import RawTelemetry, TelemetryRejected, validate_telemetry
 
@@ -76,7 +76,7 @@ def read_once(robot: Any, timeout_s: float = READ_TIMEOUT_S) -> dict[str, Any]:
     try:
         robot.connect()
         report["runtimeMode"] = str(robot.runtime_mode)
-        robot.load_twin()
+        robot.load_existing_twin()
         reading = robot.read_joint_positions(timeout_s=timeout_s)
     except RobotConnectionError as exc:
         report["error"] = redact(exc)[:200]
@@ -120,7 +120,7 @@ def main(
         return 2
 
     try:
-        settings = load_cyberwave_settings()
+        settings = load_cyberwave_twin_settings()
     except ConfigError as exc:
         print(f"CONFIG ERROR: {exc}")
         return 2

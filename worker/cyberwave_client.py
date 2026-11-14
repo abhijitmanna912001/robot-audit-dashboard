@@ -12,6 +12,11 @@ design, all taken from the SDK source:
 * Assigning to ``twin.joints.<name>`` or calling ``set_joints`` publishes a
   joint command. Nothing in this module does either. Movement is out of scope
   until the validator and critic gates exist.
+* ``Cyberwave.twin()`` is get-or-create: with no matching twin it CREATES one,
+  and with no environment it creates a "Quickstart Environment"
+  (``client.py:942-1036``). This wrapper never calls it. The twin is fetched by
+  its id with ``client.twins.get_raw()``, which for a UUID is one
+  ``GET /api/v1/twins/{uuid}`` and has no create path (``resources.py:2950-2970``).
 """
 
 from __future__ import annotations
@@ -20,10 +25,22 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from config import CyberwaveSettings
+from config import CyberwaveSettings, CyberwaveTwinSettings, canonical_uuid
 
 SIMULATION_MODE = "simulation"
 SIMULATION_SOURCE_TYPE = "sim"  # cyberwave.constants.SOURCE_TYPE_SIM
+
+
+def _record_field(record: Any, name: str) -> Any:
+    """A field of an API record, whether it is a model object or a dict."""
+    if isinstance(record, dict):
+        return record.get(name)
+    return getattr(record, name, None)
+
+
+def _record_uuid(record: Any, name: str) -> str | None:
+    """A UUID field of an API record in canonical form, or None if it is not one."""
+    return canonical_uuid(_record_field(record, name))
 
 
 class RobotConnectionError(Exception):
@@ -46,9 +63,12 @@ class JointReading:
 class SimulatedRobot:
     """Connects to one twin in simulation mode and reads its joints."""
 
-    def __init__(self, settings: CyberwaveSettings) -> None:
+    def __init__(self, settings: CyberwaveSettings | CyberwaveTwinSettings) -> None:
         self._settings = settings
         self._client: Any = None
+        # The verified API record of the existing twin (plain data).
+        self._twin_record: Any = None
+        # The SDK Twin object. Built only by the older MQTT-path readers below.
         self._twin: Any = None
         self._joint_subscription: Any = None
         self._telemetry_seen = threading.Event()
@@ -92,29 +112,96 @@ class SimulatedRobot:
         except Exception as exc:
             raise RobotConnectionError(f"Authentication check failed: {exc}") from exc
 
-    def load_twin(self) -> None:
-        """Fetch the twin for the configured asset, creating it if absent.
+    def load_existing_twin(self) -> None:
+        """Look up the EXISTING twin by id and verify it. Creates nothing.
 
-        ``Cyberwave.twin`` is get-or-create: with no twin of this asset in the
-        environment it creates one, and with no environment configured it
-        reuses or creates a "Quickstart Environment". Neither starts a
-        simulation.
+        Needs ``CyberwaveTwinSettings``: the environment id, the twin id and the
+        asset UUID, all canonical UUIDs. Two read-only calls, both GET:
 
-        The identifier should be the asset UUID. SDK 0.7.5 resolves a UUID with
-        a direct fetch, but resolves a registry id ("vendor/model") through a
-        list call that returns nothing once the client carries a workspace
-        filter, which then surfaces as "Asset not found".
+        1. ``client.twins.get_raw(twin_id)``: the twin record.
+        2. ``client.twins.list(environment_id=...)``: the environment's twins.
+
+        The twin is accepted only if ALL of these hold:
+
+        * the record's ``uuid`` is the configured twin id;
+        * the record's ``environment_uuid`` is the configured environment id;
+        * the record's ``asset_uuid`` is the configured asset UUID (UUID is
+          compared with UUID; a registry id is never compared);
+        * independently of the record, the environment's own twin list contains
+          the twin id.
+
+        Anything else (a missing setting, a failed lookup, an unreadable field,
+        any mismatch) raises ``RobotConnectionError`` and leaves no twin loaded.
+        There is no fallback: no asset-based lookup, no twin creation and no
+        environment creation.
         """
         client = self._require_client()
-        identifier = self._settings.robot_asset_identifier
-        if not identifier:
+        self._twin_record = None
+        self._twin = None
+
+        settings = self._settings
+        if not isinstance(settings, CyberwaveTwinSettings):
             raise RobotConnectionError(
-                "No robot asset configured. Set ROBOT_ASSET_IDENTIFIER to the asset UUID."
+                "Twin loading needs CYBERWAVE_ENVIRONMENT_ID, CYBERWAVE_TWIN_ID and "
+                "ROBOT_ASSET_IDENTIFIER (config.load_cyberwave_twin_settings). "
+                "Nothing was looked up or created."
             )
+        # Checked again here: settings can be built without the loader.
+        wanted = {
+            "CYBERWAVE_ENVIRONMENT_ID": canonical_uuid(settings.environment_id),
+            "CYBERWAVE_TWIN_ID": canonical_uuid(settings.twin_id),
+            "ROBOT_ASSET_IDENTIFIER": canonical_uuid(settings.asset_uuid),
+        }
+        malformed = [name for name, value in wanted.items() if value is None]
+        if malformed:
+            raise RobotConnectionError(
+                "Not a canonical UUID: " + ", ".join(malformed) + ". Nothing was looked up."
+            )
+        environment_id = wanted["CYBERWAVE_ENVIRONMENT_ID"]
+        twin_id = wanted["CYBERWAVE_TWIN_ID"]
+        asset_uuid = wanted["ROBOT_ASSET_IDENTIFIER"]
+
         try:
-            self._twin = client.twin(identifier)
+            record = client.twins.get_raw(twin_id)
         except Exception as exc:
-            raise RobotConnectionError(f"Could not load twin '{identifier}': {exc}") from exc
+            raise RobotConnectionError(
+                f"Could not look up the existing twin (nothing was created): {exc}"
+            ) from exc
+        if record is None:
+            raise RobotConnectionError("The twin lookup returned nothing. Nothing was created.")
+
+        if _record_uuid(record, "uuid") != twin_id:
+            raise RobotConnectionError(
+                "Refusing the twin: the record returned is not the configured CYBERWAVE_TWIN_ID."
+            )
+        if _record_uuid(record, "environment_uuid") != environment_id:
+            raise RobotConnectionError(
+                "Refusing the twin: it does not belong to the configured "
+                "CYBERWAVE_ENVIRONMENT_ID (or its environment could not be read)."
+            )
+        if _record_uuid(record, "asset_uuid") != asset_uuid:
+            raise RobotConnectionError(
+                "Refusing the twin: its asset is not the configured ROBOT_ASSET_IDENTIFIER "
+                "(or its asset UUID could not be read)."
+            )
+
+        # Independent of the record above: ask the environment for its twins.
+        try:
+            members = client.twins.list(environment_id=environment_id)
+        except Exception as exc:
+            raise RobotConnectionError(
+                f"Could not list the twins of the configured environment: {exc}"
+            ) from exc
+        if not isinstance(members, (list, tuple)):
+            raise RobotConnectionError(
+                "Refusing the twin: the environment's twin list could not be read."
+            )
+        if twin_id not in {_record_uuid(member, "uuid") for member in members}:
+            raise RobotConnectionError(
+                "Refusing the twin: the configured environment does not list it."
+            )
+
+        self._twin_record = record
 
     def disconnect(self) -> list[str]:
         """Release everything. Never raises; returns any cleanup errors."""
@@ -130,6 +217,7 @@ class SimulatedRobot:
             except Exception as exc:
                 errors.append(f"{label}: {exc}")
         self._twin = None
+        self._twin_record = None
         self._client = None
         return errors
 
@@ -152,16 +240,19 @@ class SimulatedRobot:
         return self._require_client()
 
     def twin_summary(self) -> dict[str, str]:
-        twin = self._require_twin()
+        """Identity of the verified twin record. No SDK twin object is needed."""
+        record = self._require_twin_record()
         return {
-            "class": type(twin).__name__,
-            "uuid": str(twin.uuid),
-            "name": str(twin.name),
-            "environment_id": str(twin.environment_id),
+            "uuid": str(_record_field(record, "uuid")),
+            "name": str(_record_field(record, "name")),
+            "environment_uuid": str(_record_field(record, "environment_uuid")),
+            "asset_uuid": str(_record_field(record, "asset_uuid")),
         }
 
     def capabilities(self) -> dict[str, Any]:
-        return dict(self._require_twin().capabilities)
+        """Capability fields as the API reported them on the twin record."""
+        reported = _record_field(self._require_twin_record(), "capabilities")
+        return dict(reported) if isinstance(reported, dict) else {}
 
     def joint_descriptors(self) -> list[dict[str, Any]]:
         """Raw joint entries from the twin's universal schema (REST only)."""
@@ -234,7 +325,25 @@ class SimulatedRobot:
             raise RobotConnectionError("Not connected. Call connect() first.")
         return self._client
 
+    def _require_twin_record(self) -> Any:
+        if self._twin_record is None:
+            raise RobotConnectionError("No twin loaded. Call load_existing_twin() first.")
+        return self._twin_record
+
     def _require_twin(self) -> Any:
+        """The SDK twin object, for the older MQTT-path readers in this class only.
+
+        Built locally from the record that ``load_existing_twin`` verified
+        (``cyberwave.twin.create_twin`` picks a class and instantiates it; it is
+        what ``client.twins.get()`` does after its own lookup). It is never
+        obtained through ``Cyberwave.twin()``, so nothing can be created.
+        """
+        record = self._require_twin_record()
         if self._twin is None:
-            raise RobotConnectionError("No twin loaded. Call load_twin() first.")
+            from cyberwave.twin import create_twin
+
+            try:
+                self._twin = create_twin(self._require_client(), record)
+            except Exception as exc:
+                raise RobotConnectionError(f"Could not open the existing twin: {exc}") from exc
         return self._twin

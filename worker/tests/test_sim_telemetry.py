@@ -252,8 +252,8 @@ class FakeReadOnlyRobot:
         if self.error is not None:
             raise self.error
 
-    def load_twin(self) -> None:
-        self.calls.append("load_twin")
+    def load_existing_twin(self) -> None:
+        self.calls.append("load_existing_twin")
 
     def read_joint_positions(self, timeout_s: float = 3.0) -> Any:
         self.calls.append("read_joint_positions")
@@ -272,7 +272,9 @@ class ReadOnlyScriptTests(unittest.TestCase):
         self.assertEqual(report["rejected"], "placeholder_suspected")
         self.assertIs(report["movementSent"], False)
         self.assertNotIn("telemetry", report)
-        self.assertEqual(robot.calls, ["connect", "load_twin", "read_joint_positions", "disconnect"])
+        self.assertEqual(
+            robot.calls, ["connect", "load_existing_twin", "read_joint_positions", "disconnect"]
+        )
 
     def test_a_received_update_is_still_unverified_without_provenance(self) -> None:
         robot = FakeReadOnlyRobot(JointReading(positions=dict(POSITIONS), telemetry_received=True))
@@ -291,7 +293,7 @@ class ReadOnlyScriptTests(unittest.TestCase):
 
     def test_nothing_is_contacted_without_the_flag(self) -> None:
         factory = mock.Mock()
-        with mock.patch.object(read_joint_telemetry, "load_cyberwave_settings") as settings:
+        with mock.patch.object(read_joint_telemetry, "load_cyberwave_twin_settings") as settings:
             out = io.StringIO()
             with redirect_stdout(out):
                 code = read_joint_telemetry.main([], robot_factory=factory)
@@ -302,7 +304,9 @@ class ReadOnlyScriptTests(unittest.TestCase):
 
     def test_main_exits_3_for_unverified_telemetry(self) -> None:
         robot = FakeReadOnlyRobot(JointReading(positions=dict(ZEROS), telemetry_received=False))
-        with mock.patch.object(read_joint_telemetry, "load_cyberwave_settings", return_value=object()):
+        with mock.patch.object(
+            read_joint_telemetry, "load_cyberwave_twin_settings", return_value=object()
+        ):
             out = io.StringIO()
             with redirect_stdout(out):
                 code = read_joint_telemetry.main(["--confirm-connect"], robot_factory=lambda _s: robot)
