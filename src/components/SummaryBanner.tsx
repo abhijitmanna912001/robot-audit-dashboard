@@ -36,7 +36,7 @@ export function SummaryBanner({ text, tone }: { text: string; tone: BannerTone }
   const t = tones[tone];
   const Icon = t.icon;
   return (
-    <div role="status" className={cn("flex items-start gap-3 rounded-xl border px-4 py-3", t.box)}>
+    <div role="status" aria-live="polite" className={cn("flex items-start gap-3 rounded-xl border px-4 py-3", t.box)}>
       <Icon
         aria-hidden="true"
         className={cn("mt-0.5 size-5 shrink-0", t.iconColor, tone === "running" && "animate-spin")}

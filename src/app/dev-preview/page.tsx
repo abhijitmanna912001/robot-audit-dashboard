@@ -16,7 +16,7 @@ export default function DevPreviewPage() {
       <h1 className="text-lg font-semibold">Audit timeline preview (fixtures)</h1>
       {scenarios.map((s) => (
         <section key={s.title} className="flex min-w-0 flex-col gap-3">
-          <h2 className="text-sm font-medium text-muted-foreground">{s.title}</h2>
+          <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{s.title}</h2>
           <SummaryBanner text={summarize(s.status, s.events)} tone={bannerTone(s.status, s.events)} />
           <PipelineStrip stages={derivePipeline(s.events)} />
           <AuditTimeline events={s.events} />

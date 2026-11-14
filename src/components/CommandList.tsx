@@ -1,7 +1,7 @@
 import { Inbox } from "lucide-react";
 import type { Command, CommandStatus } from "@/types/draft";
-import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { LocalTime } from "./LocalTime";
 import { StatusBadge } from "./StatusBadge";
 
 // Literal class names so Tailwind can see them. The left border carries the status colour.
@@ -48,7 +48,7 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block w-full min-w-0 rounded-xl border border-l-4 p-3 text-left text-sm text-card-foreground outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50",
+                "block w-full min-w-0 rounded-xl border border-l-4 p-3 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/50",
                 leftBorder[c.status],
                 selected
                   ? "border-y-primary border-r-primary bg-primary/10 ring-2 ring-primary/60"
@@ -63,7 +63,7 @@ export function CommandList({
               </div>
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
                 <span className="font-mono">{shortId(c.id)}</span>
-                <time dateTime={c.createdAt}>{formatDateTime(c.createdAt)}</time>
+                <LocalTime iso={c.createdAt} />
               </div>
             </button>
           </li>

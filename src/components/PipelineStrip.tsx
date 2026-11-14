@@ -1,5 +1,6 @@
 import {
   Check,
+  ChevronRight,
   CircleDashed,
   ClipboardList,
   FlaskConical,
@@ -93,18 +94,27 @@ function StateGlyph({ state }: { state: StageState }) {
 
 export function PipelineStrip({ stages }: { stages: PipelineStage[] }) {
   return (
-    <ol aria-label="Pipeline" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {stages.map(({ stage, state }) => {
+    <ol aria-label="Pipeline" className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+      {stages.map(({ stage, state }, i) => {
         const tone = toneOf(stage, state);
         const Icon = stageIcon[stage];
         return (
           <li
             key={stage}
             className={cn(
-              "flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs",
+              "relative flex min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs transition-colors duration-150",
               toneStyles[tone],
             )}
           >
+            {i < stages.length - 1 && (
+              <ChevronRight
+                aria-hidden="true"
+                className={cn(
+                  "absolute top-1/2 -right-3.5 size-3 -translate-y-1/2 text-muted-foreground",
+                  i % 2 === 1 && "max-sm:hidden",
+                )}
+              />
+            )}
             <Icon aria-hidden="true" className={cn("size-4 shrink-0", toneIcon[tone])} />
             <span className="min-w-0">
               <span className="block truncate text-sm font-medium text-foreground">

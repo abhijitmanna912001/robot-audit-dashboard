@@ -11,11 +11,12 @@ import {
 } from "lucide-react";
 import type { AuditEvent } from "@/types/draft";
 import { badgeVariants } from "@/components/ui/badge";
-import { formatTime } from "@/lib/format";
+import { actionTargets, summarizeEvent } from "@/lib/event-summary";
 import { getMarker, type Marker } from "@/lib/outcome";
 import { readPlanFailure, text } from "@/lib/payload";
 import { cn } from "@/lib/utils";
 import { EventDetails } from "./EventDetails";
+import { LocalTime } from "./LocalTime";
 
 // Red = blocked (fail), amber = broke (error). Pass is green. These are the same status
 // tokens as the badges: fail -> rejected (red), error -> failed (amber).
@@ -55,19 +56,34 @@ function nodeTone(e: AuditEvent, marker: Marker | undefined): Marker | "neutral"
 // Events arrive already ordered oldest first (see lib/merge.ts).
 // Server-safe on purpose: /dev-preview renders this from a server component, so it uses
 // badgeVariants on a plain span rather than the Badge component.
-export function AuditTimeline({ events }: { events: AuditEvent[] }) {
+export function AuditTimeline({
+  events,
+  highlightIds,
+}: {
+  events: AuditEvent[];
+  highlightIds?: ReadonlySet<string>;
+}) {
   if (events.length === 0) {
     return <p className="text-sm text-muted-foreground">No audit events to show.</p>;
   }
 
+  const targets = actionTargets(events);
   return (
     <ol className="relative">
       {events.map((e, i) => {
         const marker = getMarker(e);
         const Icon = icons[e.eventType as string] ?? CircleHelp;
         const last = i === events.length - 1;
+        const line = summarizeEvent(e, targets);
         return (
-          <li key={e.id} className={cn("relative min-w-0 pl-11", last ? "pb-0" : "pb-6")}>
+          <li
+            key={e.id}
+            className={cn(
+              "relative min-w-0 rounded-lg pl-11",
+              last ? "pb-0" : "pb-6",
+              highlightIds?.has(e.id) && "event-flash",
+            )}
+          >
             {!last && (
               <span aria-hidden="true" className="absolute top-8 bottom-0 left-4 w-px bg-border" />
             )}
@@ -81,9 +97,9 @@ export function AuditTimeline({ events }: { events: AuditEvent[] }) {
               <Icon className="size-4" />
             </span>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1">
-              <span className="wrap-anywhere font-mono text-xs font-medium">
-                {text(e.eventType) ?? "unknown"}
-              </span>
+              <p className="wrap-anywhere min-w-0 text-sm font-medium leading-snug">
+                {text(e.message) ?? text(e.eventType) ?? "unknown event"}
+              </p>
               {marker && (
                 <span
                   className={cn(
@@ -95,11 +111,14 @@ export function AuditTimeline({ events }: { events: AuditEvent[] }) {
                   {marker}
                 </span>
               )}
-              <time className="text-xs text-muted-foreground" dateTime={e.createdAt}>
-                {formatTime(e.createdAt)}
-              </time>
             </div>
-            <p className="wrap-anywhere mt-1 text-sm leading-relaxed">{text(e.message) ?? ""}</p>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
+              <span className="wrap-anywhere font-mono">{text(e.eventType) ?? "unknown"}</span>
+              <LocalTime iso={e.createdAt} />
+            </div>
+            {line && (
+              <p className="wrap-anywhere mt-1 font-mono text-xs text-foreground/80">{line}</p>
+            )}
             <EventDetails event={e} />
           </li>
         );

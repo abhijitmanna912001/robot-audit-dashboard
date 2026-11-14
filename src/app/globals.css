@@ -191,3 +191,30 @@
     @apply font-sans;
   }
 }
+
+/* New realtime events flash briefly (Dashboard clears the class after 1.5s). */
+@keyframes event-flash {
+  from {
+    background-color: color-mix(in oklab, var(--primary) 22%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+.event-flash {
+  animation: event-flash 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .event-flash {
+    animation: none;
+  }
+}

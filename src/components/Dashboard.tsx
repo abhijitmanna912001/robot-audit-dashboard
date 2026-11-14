@@ -17,6 +17,7 @@ import type { ConnectionStatus } from "./ConnectionIndicator";
 import { DashboardHeader } from "./Header";
 import { PipelineStrip } from "./PipelineStrip";
 import { SummaryBanner } from "./SummaryBanner";
+import { LocalTime } from "./LocalTime";
 import { isTestCommand } from "./test-commands";
 
 export function Dashboard({
@@ -47,6 +48,9 @@ export function Dashboard({
   const [loadError, setLoadError] = useState(initialError);
   const [showTest, setShowTest] = useState(false); // display filter only, off by default
   const refetchRef = useRef<() => Promise<void>>(async () => {});
+  // Ids of events that just arrived over Realtime, highlighted for 1.5s. Display only.
+  const [freshIds, setFreshIds] = useState<ReadonlySet<string>>(new Set());
+  const flashTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   // Selection only auto-fills while empty; it never moves on its own after that.
   const applyCommands = useCallback((incoming: Command[]) => {
@@ -58,6 +62,7 @@ export function Dashboard({
     let cancelled = false;
     if (!client) return;
     const supabase = client;
+    const timers = flashTimers.current;
 
     async function refetch() {
       const result = await fetchSnapshot(supabase);
@@ -80,7 +85,19 @@ export function Dashboard({
     const onEvent = (payload: { new: unknown }) => {
       if (cancelled) return;
       const e = toAuditEvent(payload.new);
-      if (e) setEvents((prev) => mergeEvents(prev, [e]));
+      if (!e) return;
+      setEvents((prev) => mergeEvents(prev, [e]));
+      const id = e.id;
+      setFreshIds((prev) => new Set(prev).add(id));
+      const timer = setTimeout(() => {
+        flashTimers.current.delete(timer);
+        setFreshIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, 1500);
+      flashTimers.current.add(timer);
     };
 
     // Unique topic per mount so React strict mode's mount/unmount/mount is safe.
@@ -102,6 +119,8 @@ export function Dashboard({
     return () => {
       cancelled = true;
       refetchRef.current = async () => {};
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
       void supabase.removeChannel(channel);
     };
   }, [client, applyCommands]);
@@ -132,13 +151,15 @@ export function Dashboard({
     ? commands
     : commands.filter((c) => !isTestCommand(c.text) || c.id === selectedId);
 
-  // Counts are over every command in state; the test-command toggle only filters the list.
+  // Counts follow the list: same commands as shown (test commands excluded while the toggle
+  // is off, the selected one always included), so the numbers match the rows.
   const counts = Object.fromEntries(COMMAND_STATUSES.map((st) => [st, 0])) as Record<
     CommandStatus,
     number
   >;
-  for (const c of commands) if (c.status in counts) counts[c.status] += 1;
+  for (const c of visibleCommands) if (c.status in counts) counts[c.status] += 1;
 
+  const heading = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
   return (
     <>
       <DashboardHeader status={status} counts={counts} />
@@ -151,19 +172,20 @@ export function Dashboard({
       <div className="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <section className="min-w-0">
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className="text-sm font-medium text-muted-foreground">Commands</h2>
+            <h2 className={heading}>Commands</h2>
             <Button
               type="button"
               variant="outline"
               size="xs"
               aria-pressed={showTest}
               onClick={() => setShowTest((v) => !v)}
+              className="transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               {showTest ? "Hide test commands" : "Show test commands"}
             </Button>
           </div>
           {hiddenTestCount > 0 && (
-            <p className="mb-2 text-xs text-muted-foreground" role="status">
+            <p className="mb-2 text-xs tabular-nums text-muted-foreground" role="status">
               {hiddenTestCount} test {hiddenTestCount === 1 ? "command" : "commands"} hidden
             </p>
           )}
@@ -174,14 +196,21 @@ export function Dashboard({
           />
         </section>
         <section className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-4 lg:-mx-1 lg:max-h-[calc(100dvh-2rem)] lg:self-start lg:overflow-y-auto lg:px-1">
-          <h2
-            className="line-clamp-2 wrap-anywhere text-sm font-medium text-muted-foreground"
-            title={selected?.text}
-          >
-            Audit timeline{selected ? `: ${selected.text}` : ""}
-          </h2>
+          <h2 className={heading}>Audit timeline</h2>
           {selected && (
             <>
+              <div className="min-w-0">
+                <p
+                  className="line-clamp-2 wrap-anywhere text-base font-semibold leading-snug"
+                  title={selected.text}
+                >
+                  {selected.text}
+                </p>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                  <span className="font-mono">{selected.id.slice(0, 8)}</span>
+                  <LocalTime iso={selected.createdAt} />
+                </div>
+              </div>
               <SummaryBanner
                 text={summarize(selected.status, selectedEvents)}
                 tone={bannerTone(selected.status, selectedEvents)}
@@ -191,7 +220,7 @@ export function Dashboard({
           )}
           <Card size="sm">
             <CardContent>
-              <AuditTimeline events={selectedEvents} />
+              <AuditTimeline events={selectedEvents} highlightIds={freshIds} />
             </CardContent>
           </Card>
         </section>

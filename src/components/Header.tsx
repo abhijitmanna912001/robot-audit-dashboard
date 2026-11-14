@@ -46,7 +46,7 @@ export function DashboardHeader({
         {COMMAND_STATUSES.map((s) => (
           <li
             key={s}
-            className={`inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs ${
+            className={`inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs transition-colors duration-150 ${
               counts[s] === 0 ? "text-muted-foreground" : "text-card-foreground"
             }`}
           >
