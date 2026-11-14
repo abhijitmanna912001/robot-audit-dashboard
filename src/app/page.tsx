@@ -45,18 +45,17 @@ function LoadingShell() {
           <Brand />
         </div>
       </div>
-      <div className="mx-auto grid w-full max-w-[1440px] flex-1 gap-8 px-4 py-8 sm:px-8 lg:grid-cols-[336px_minmax(0,1fr)]">
+      <div className="mx-auto grid w-full max-w-[1440px] flex-1 gap-5 px-4 py-5 sm:px-8 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-6">
         <div className="flex flex-col gap-3">
-          <Skeleton className="h-64" />
-          <Skeleton className="h-8" />
-          <Skeleton className="h-16" />
-          <Skeleton className="h-16" />
-          <Skeleton className="h-16" />
+          <Skeleton className="h-9" />
+          <Skeleton className="h-11" />
+          <Skeleton className="h-11" />
+          <Skeleton className="h-11" />
+          <Skeleton className="h-11" />
         </div>
         <div className="flex flex-col gap-4">
-          <Skeleton className="h-16" />
           <Skeleton className="h-10" />
-          <Skeleton className="h-20" />
+          <Skeleton className="h-8" />
           <Skeleton className="h-64" />
         </div>
       </div>

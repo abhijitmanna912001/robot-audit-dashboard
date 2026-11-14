@@ -35,7 +35,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [focused, setFocused] = useState(false); // display only: grows the textarea
+  const [focused, setFocused] = useState(false); // display only: shows the format help and counter
   const inFlight = useRef(false);
   const id = useId();
   const helpId = `${id}-help`;
@@ -90,98 +90,94 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
     }
   }
 
-  const expanded = focused || text.length > 0;
   const showCount = focused || text.length > 400;
   return (
     <form
       onSubmit={handleSubmit}
-      // Focus is "inside the composer" while it stays on the textarea or a chip.
+      // Focus is "inside the command bar" while it stays on the textarea or a chip.
       onFocus={() => setFocused(true)}
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
       }}
-      className="surface-card flex shrink-0 flex-col gap-3 rounded-ui-lg p-4"
+      className="flex min-w-0 shrink-0 flex-col gap-2"
     >
-      <label htmlFor={id} className="text-sm font-semibold tracking-tight">
+      <label htmlFor={id} className="sr-only">
         New command
       </label>
-      <div className="flex flex-col gap-3">
-        <div className="relative min-w-0">
-        <span
-          aria-hidden="true"
-          className="pointer-events-none absolute top-3 left-3 font-mono text-sm text-primary select-none"
-        >
-          &gt;
-        </span>
-        <Textarea
-          id={id}
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setNotice(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
-              void handleSubmit(e);
-            }
-          }}
-          rows={expanded ? 2 : 1}
-          maxLength={MAX_TEXT_LENGTH}
-          placeholder="set joint _1 to 0.25 rad"
-          aria-describedby={`${helpId} ${countId}`}
-          className="min-h-24 w-full min-w-0 resize-none rounded-ui-sm bg-background pt-3 pb-9 pr-3 pl-7 font-mono text-sm leading-6 caret-primary transition-colors duration-150 md:text-sm"
-        />
-        <kbd
-          aria-hidden="true"
-          title="Cmd or Ctrl + Enter submits"
-          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-2 py-1 font-mono text-xs leading-none text-muted-foreground"
-        >
-          ⌘ ↵
-        </kbd>
-        </div>
-        <Button type="submit" disabled={submitting} className="h-10 w-full rounded-ui-sm px-4 transition-colors duration-150">
-          {submitting ? "Submitting..." : "Submit command"}
-        </Button>
-      </div>
-      <div className="flex items-start gap-2 text-xs leading-4 text-muted-foreground">
-        <span className="shrink-0 pt-2">Try:</span>
-        {/* Examples wrap within the composer, including on narrow screens. */}
-        <div className="flex min-w-0 flex-1 flex-wrap items-start gap-2">
-        {EXAMPLES.map((ex, i) => (
-          <button
-            key={ex}
-            type="button"
-            title={ex}
-            aria-label={`Use example: ${ex}`}
-            // Keep focus in the textarea so the composer does not collapse when a chip is used.
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setText(ex);
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <div className="relative min-w-0 flex-1">
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute top-2.5 left-3 font-mono text-sm text-primary select-none"
+          >
+            &gt;
+          </span>
+          <Textarea
+            id={id}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
               setNotice(null);
             }}
-            className="keycap inline-flex min-h-8 min-w-0 max-w-full items-center rounded-ui-sm px-2 py-1 text-left font-mono text-xs leading-4 wrap-anywhere whitespace-normal text-muted-foreground outline-none transition-colors duration-150 hover:border-primary hover:text-foreground active:bg-accent focus-visible:ring-3 focus-visible:ring-ring/30"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+                void handleSubmit(e);
+              }
+            }}
+            rows={1}
+            maxLength={MAX_TEXT_LENGTH}
+            placeholder="set joint _1 to 0.25 rad"
+            aria-describedby={`${helpId} ${countId}`}
+            className="max-h-32 min-h-10 w-full min-w-0 resize-none rounded-ui-sm bg-surface py-2 pr-14 pl-7 font-mono text-sm leading-6 caret-primary transition-colors duration-150 md:text-sm"
+          />
+          <kbd
+            aria-hidden="true"
+            title="Cmd or Ctrl + Enter submits"
+            className="keycap pointer-events-none absolute top-2 right-2 rounded-ui-sm px-1.5 py-0.5 font-mono text-xs leading-4 text-muted-foreground"
           >
-            {["Joint 1", "Joint 6", "Unsupported"][i]}
-          </button>
-        ))}
+            ⌘ ↵
+          </kbd>
         </div>
+        <Button type="submit" disabled={submitting} className="h-10 w-full shrink-0 rounded-ui-sm px-4 transition-colors duration-150 sm:w-auto">
+          {submitting ? "Submitting..." : "Submit"}
+        </Button>
       </div>
-      <div
-        className={`flex items-start justify-between gap-3 text-xs text-muted-foreground ${
-          showCount ? "" : "sr-only"
-        }`}
-      >
-        <p
-          id={helpId}
-          title={FORMAT_HELP}
-          className={`flex min-w-0 items-center gap-2 leading-4 ${focused ? "" : "sr-only"}`}
-        >
-          <Info aria-hidden="true" className="size-3 shrink-0" />
-          <span className="wrap-anywhere">{FORMAT_HELP}</span>
-        </p>
-        <span id={countId} className="shrink-0 tabular-nums">
-          {text.length}/{MAX_TEXT_LENGTH}
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs leading-4 text-muted-foreground">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5">
+          <span className="shrink-0">Try:</span>
+          {EXAMPLES.map((ex, i) => (
+            <span key={ex} className="inline-flex items-center gap-1">
+              {i > 0 && <span aria-hidden="true">·</span>}
+              <button
+                type="button"
+                title={ex}
+                aria-label={`Use example: ${ex}`}
+                // Keep focus in the textarea so the bar does not lose its focus state when a chip is used.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setText(ex);
+                  setNotice(null);
+                }}
+                className="inline-flex min-h-8 items-center rounded-ui-sm px-1.5 font-mono text-xs leading-4 text-muted-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-primary hover:decoration-primary active:bg-accent focus-visible:ring-3 focus-visible:ring-ring/30"
+              >
+                {["Joint 1", "Joint 6", "Unsupported"][i]}
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className={`flex min-w-0 items-start justify-end gap-3 ${showCount ? "" : "sr-only"}`}>
+          <p
+            id={helpId}
+            title={FORMAT_HELP}
+            className={`flex min-w-0 items-center gap-2 leading-4 ${focused ? "" : "sr-only"}`}
+          >
+            <Info aria-hidden="true" className="size-3 shrink-0" />
+            <span className="wrap-anywhere">{FORMAT_HELP}</span>
+          </p>
+          <span id={countId} className="shrink-0 tabular-nums">
+            {text.length}/{MAX_TEXT_LENGTH}
+          </span>
+        </div>
       </div>
       {notice && (
         <p
