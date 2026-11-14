@@ -17,9 +17,9 @@ export function ViewportFrame({ title, children }: { title: string; children: Re
       aria-pressed={view === v}
       onClick={() => setView(v)}
       className={cn(
-        "h-8 rounded-ui-md px-3 text-xs leading-4 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/50",
+        "h-9 rounded-ui-sm px-3 text-xs leading-4 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
         view === v
-          ? "bg-primary/15 text-foreground hover:bg-primary/25"
+          ? "bg-accent text-primary hover:bg-primary/15"
           : "text-muted-foreground hover:bg-raised hover:text-foreground active:bg-muted",
       )}
     >
@@ -38,12 +38,12 @@ export function ViewportFrame({ title, children }: { title: string; children: Re
       <div
         id="scenario-panel"
         role="tabpanel"
-        className="scroll-subtle min-h-0 flex-1 scroll-pt-14 overflow-y-auto p-4 [scrollbar-gutter:stable]"
+        className="scroll-subtle min-h-0 min-w-0 flex-1 scroll-pt-6 overflow-y-auto p-3 [scrollbar-gutter:stable] sm:p-6"
       >
         <div
           className={cn(
             "mx-auto min-w-0",
-            view === "phone" ? "w-[390px] max-w-full rounded-[28px] border border-border p-4" : "w-full max-w-5xl",
+            view === "phone" ? "w-[390px] max-w-full" : "w-full max-w-5xl",
           )}
         >
           {children}

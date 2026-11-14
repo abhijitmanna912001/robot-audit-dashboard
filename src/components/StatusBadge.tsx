@@ -6,12 +6,12 @@ import { cn } from "@/lib/utils";
 // Executing gets a dot as well as a colour, so it never relies on hue alone to tell
 // it apart from Rejected.
 const styles: Record<CommandStatus, string> = {
-  received: "bg-status-received text-status-received-foreground",
-  approved: "bg-status-approved text-status-approved-foreground",
-  rejected: "bg-status-rejected text-status-rejected-foreground",
-  executing: "bg-status-executing text-status-executing-foreground",
-  completed: "bg-status-completed text-status-completed-foreground",
-  failed: "bg-status-failed text-status-failed-foreground",
+  received: "border-status-received-accent bg-status-received text-status-received-foreground",
+  approved: "border-status-approved-accent bg-status-approved text-status-approved-foreground",
+  rejected: "border-status-rejected-accent bg-status-rejected text-status-rejected-foreground",
+  executing: "border-status-executing-accent bg-status-executing text-status-executing-foreground",
+  completed: "border-status-completed-accent bg-status-completed text-status-completed-foreground",
+  failed: "border-status-failed-accent bg-status-failed text-status-failed-foreground",
 };
 
 export function StatusBadge({ status }: { status: CommandStatus }) {

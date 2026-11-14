@@ -44,14 +44,14 @@ export function CommandList({
 
   if (commands.length === 0) {
     return (
-      <div className="surface-card flex flex-col items-center gap-2 rounded-ui-lg px-4 py-8 text-center">
+      <div className="flex flex-col items-start gap-3 rounded-ui-md border border-dashed border-input px-4 py-7">
         <Inbox aria-hidden="true" className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">{emptyText}</p>
       </div>
     );
   }
   return (
-    <ul ref={list} onKeyDown={onKeyDown} className="flex flex-col gap-2">
+    <ul ref={list} onKeyDown={onKeyDown} className="scroll-subtle -m-1.5 flex max-h-64 flex-col gap-1 overflow-y-auto p-1.5 lg:max-h-none lg:overflow-visible">
       {commands.map((c) => {
         const selected = c.id === selectedId;
         return (
@@ -61,14 +61,14 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block min-h-16 w-full min-w-0 rounded-ui-md border px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
+                "relative block min-h-20 w-full min-w-0 rounded-ui-sm border px-3 py-3 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
                 selected
-                  ? "border-primary/30 border-l-2 border-l-primary bg-primary/12 hover:bg-primary/16 active:bg-primary/20"
-                  : "surface-card hover:bg-raised active:bg-muted",
+                  ? "border-primary border-l-3 border-l-primary bg-accent hover:bg-accent active:bg-primary/15"
+                  : "border-transparent border-b-border bg-transparent hover:border-border hover:bg-surface active:bg-muted",
               )}
             >
               <span className="flex min-w-0 items-center justify-between gap-3">
-                <span className="block min-w-0 truncate font-medium" title={c.text}>
+                <span className="block min-w-0 line-clamp-2 wrap-anywhere font-medium leading-5" title={c.text}>
                   {c.text}
                 </span>
                 {stagesById?.get(c.id) && <MiniPipeline stages={stagesById.get(c.id)!} />}

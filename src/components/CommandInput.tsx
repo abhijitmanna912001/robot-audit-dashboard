@@ -100,16 +100,16 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
       }}
-      className="surface-card flex flex-col gap-2 rounded-ui-lg p-3"
+      className="surface-card flex flex-col gap-3 rounded-ui-lg p-4"
     >
-      <label htmlFor={id} className="sr-only">
+      <label htmlFor={id} className="text-sm font-semibold tracking-tight">
         New command
       </label>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
-        <div className="relative min-w-0 sm:flex-1">
+      <div className="flex flex-col gap-3">
+        <div className="relative min-w-0">
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute top-2 left-3 font-mono text-sm text-primary select-none"
+          className="pointer-events-none absolute top-3 left-3 font-mono text-sm text-primary select-none"
         >
           &gt;
         </span>
@@ -127,39 +127,41 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           }}
           rows={expanded ? 2 : 1}
           maxLength={MAX_TEXT_LENGTH}
-          placeholder="Type a command..."
+          placeholder="set joint _1 to 0.25 rad"
           aria-describedby={`${helpId} ${countId}`}
-          className="min-h-9 w-full min-w-0 resize-none bg-raised pr-14 pl-7 font-mono text-sm caret-primary transition-[height] duration-150 md:text-sm"
+          className="min-h-24 w-full min-w-0 resize-none rounded-ui-sm bg-background pt-3 pb-9 pr-3 pl-7 font-mono text-sm leading-6 caret-primary transition-colors duration-150 md:text-sm"
         />
         <kbd
           aria-hidden="true"
           title="Cmd or Ctrl + Enter submits"
-          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-2 py-1 font-mono text-[11px] leading-none text-muted-foreground"
+          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-2 py-1 font-mono text-xs leading-none text-muted-foreground"
         >
           ⌘ ↵
         </kbd>
         </div>
-        <Button type="submit" disabled={submitting} className="w-full px-4 transition-colors duration-150 active:bg-primary/70 sm:w-auto">
-          {submitting ? "Submitting..." : "Submit"}
+        <Button type="submit" disabled={submitting} className="h-10 w-full rounded-ui-sm px-4 transition-colors duration-150">
+          {submitting ? "Submitting..." : "Submit command"}
         </Button>
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="shrink-0">Try:</span>
-        {/* One scrollable row: no wrapping, snap scrolling, faded edges, hidden scrollbar. */}
-        <div className="chip-row -my-1 flex min-w-0 flex-1 snap-x snap-proximity items-center gap-2 overflow-x-auto px-1 py-1">
-        {EXAMPLES.map((ex) => (
+        {/* Examples wrap within the composer, including on narrow screens. */}
+        <div className="-my-1 flex min-w-0 flex-1 flex-wrap items-center gap-2 px-1 py-1">
+        {EXAMPLES.map((ex, i) => (
           <button
             key={ex}
             type="button"
+            title={ex}
+            aria-label={`Use example: ${ex}`}
             // Keep focus in the textarea so the composer does not collapse when a chip is used.
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               setText(ex);
               setNotice(null);
             }}
-            className="keycap inline-flex h-7 shrink-0 snap-start items-center rounded-ui-sm px-3 font-mono text-xs whitespace-nowrap text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:text-foreground active:translate-y-px active:shadow-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="keycap inline-flex min-h-8 max-w-full items-center rounded-ui-sm px-2 py-1 text-left font-mono text-xs break-words text-muted-foreground outline-none transition-colors duration-150 hover:border-primary hover:text-foreground active:bg-accent focus-visible:ring-3 focus-visible:ring-ring/30"
           >
-            {ex}
+            {["Joint 1", "Joint 6", "Unsupported"][i]}
           </button>
         ))}
         </div>
@@ -175,7 +177,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           className={`flex min-w-0 items-center gap-2 leading-4 ${focused ? "" : "sr-only"}`}
         >
           <Info aria-hidden="true" className="size-3 shrink-0" />
-          <span className="truncate">{FORMAT_HELP}</span>
+          <span className="wrap-anywhere">{FORMAT_HELP}</span>
         </p>
         <span id={countId} className="shrink-0 tabular-nums">
           {text.length}/{MAX_TEXT_LENGTH}

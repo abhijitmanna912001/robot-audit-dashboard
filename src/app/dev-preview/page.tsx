@@ -41,7 +41,7 @@ async function PreviewBody({ searchParams }: { searchParams: SearchParams }) {
     <>
       <aside
         aria-label="Scenario list"
-        className="scroll-subtle flex min-h-0 w-[300px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-border p-3 [scrollbar-gutter:stable]"
+        className="scroll-subtle flex max-h-[32dvh] min-h-0 w-full shrink-0 flex-col gap-3 overflow-y-auto border-b border-border p-4 [scrollbar-gutter:stable] md:max-h-none md:w-[280px] md:border-r md:border-b-0"
       >
         <h1 className={sectionLabel}>Case file preview (fixtures)</h1>
         <ScenarioList rows={rows} current={current} />
@@ -81,7 +81,7 @@ export default function DevPreviewPage({ searchParams }: { searchParams: SearchP
   if (process.env.NODE_ENV === "production") notFound();
 
   return (
-    <main className="flex h-dvh w-full overflow-hidden">
+    <main className="preview-workspace flex h-dvh w-full flex-col overflow-hidden md:flex-row">
       <Suspense fallback={<PreviewFallback />}>
         <PreviewBody searchParams={searchParams} />
       </Suspense>

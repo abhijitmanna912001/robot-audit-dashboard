@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 const TITLE = "Robot Audit Dashboard";
-const DESCRIPTION = "Every robot action is checked twice and logged";
+const DESCRIPTION = "An append-only command audit trail with independent checks and dry runs.";
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -23,15 +23,15 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#06080c",
-  colorScheme: "dark",
+  themeColor: "#f3f2ed",
+  colorScheme: "light",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
         {children}

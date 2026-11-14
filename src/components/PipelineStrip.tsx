@@ -48,13 +48,13 @@ function toneOf(stage: StageName, state: StageState): Tone {
   }
 }
 
-// Circles are opaque (bg-raised) so a connector never shows through them.
+// Opaque stage tiles keep connectors clear of their icons.
 const circle: Record<Tone, string> = {
-  ok: "border-status-completed-accent text-status-completed-accent shadow-[0_0_16px_-2px_var(--status-completed-accent)]",
-  blocked: "border-status-rejected-accent text-status-rejected-accent shadow-[0_0_16px_-2px_var(--status-rejected-accent)]",
-  broke: "border-status-failed-accent text-status-failed-accent shadow-[0_0_16px_-2px_var(--status-failed-accent)]",
-  info: "border-status-info-accent text-status-info-accent shadow-[0_0_16px_-2px_var(--status-info-accent)]",
-  idle: "border-dashed border-muted-foreground/50 text-muted-foreground",
+  ok: "border-status-completed-accent text-status-completed-accent",
+  blocked: "border-status-rejected-accent text-status-rejected-accent",
+  broke: "border-status-failed-accent text-status-failed-accent",
+  info: "border-status-info-accent text-status-info-accent",
+  idle: "border-dashed border-input text-muted-foreground",
 };
 
 // Connector colour = the earlier step's colour. It is dashed and muted when the next step was
@@ -70,9 +70,9 @@ const connectorTo: Record<Tone, string> = {
   blocked: "to-status-rejected-accent",
   broke: "to-status-failed-accent",
   info: "to-status-info-accent",
-  idle: "to-muted-foreground/50",
+  idle: "to-input",
 };
-const DASHED = "border-t-2 border-dashed border-muted-foreground/50";
+const DASHED = "border-t border-dashed border-input";
 
 function StateGlyph({ state }: { state: StageState }) {
   const cls = "size-3 shrink-0";
@@ -86,14 +86,14 @@ function StateGlyph({ state }: { state: StageState }) {
     case "dry_run":
       return <FlaskConical aria-hidden="true" className={cls} />;
     case "running":
-      return <Loader aria-hidden="true" className={cn(cls, "animate-spin")} />;
+      return <Loader aria-hidden="true" className={cls} />;
     default:
       return <CircleDashed aria-hidden="true" className={cls} />;
   }
 }
 
-// One horizontal stepper: a continuous line behind four circles (sm and up). Below sm it is
-// a compact 2x2 grid with no line. The state word is always written out.
+// Wide case files show a connected chain; narrow ones use a compact 2x2 grid.
+// The state word is always written out.
 export function PipelineStrip({
   stages,
   details = {},
@@ -105,7 +105,7 @@ export function PipelineStrip({
   return (
     <ol
       aria-label="Pipeline"
-      className="surface-card grid grid-cols-2 gap-x-3 gap-y-4 rounded-ui-lg px-3 py-4 @case:grid-cols-4"
+      className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-5 @case:grid-cols-4"
     >
       {stages.map(({ stage, state }, i) => {
         const tone = toneOf(stage, state);
@@ -117,43 +117,43 @@ export function PipelineStrip({
           <li
             key={stage}
             aria-current={stage === active ? "step" : undefined}
-            className="relative flex min-w-0 items-center gap-2 @case:flex-col @case:gap-2 @case:text-center"
+            className="relative flex min-w-0 items-start gap-2 @case:flex-col @case:gap-3 @case:text-left"
           >
             {next && (
               <span
                 aria-hidden="true"
-                style={{ width: "calc(100% - 28px)" }}
+                style={{ width: "calc(100% - 32px)" }}
                 className={cn(
-                  "absolute top-[19px] left-[calc(50%+1.5rem)] hidden @case:block",
+                  "absolute top-4 left-10 hidden @case:block",
                   solid
-                    ? `anim-line h-0.5 rounded-full bg-linear-to-r ${connectorFrom[tone as Exclude<Tone, "idle">]} ${connectorTo[nextTone]}`
+                    ? `h-px rounded-full bg-linear-to-r ${connectorFrom[tone as Exclude<Tone, "idle">]} ${connectorTo[nextTone]}`
                     : DASHED,
                 )}
               />
             )}
             <span
               className={cn(
-                "relative flex size-10 shrink-0 items-center justify-center rounded-full border-2 bg-raised transition-colors duration-150",
+                "relative flex size-8 shrink-0 items-center justify-center rounded-ui-sm border bg-surface transition-colors duration-150",
                 circle[tone],
               )}
             >
-              <Icon aria-hidden="true" className="size-5" />
+              <Icon aria-hidden="true" className="size-4" />
             </span>
             <span className="min-w-0">
-              <span className="block truncate text-sm leading-5 font-medium text-foreground">
+              <span className="block text-[13px] leading-5 font-semibold text-foreground">
                 {stageLabel[stage]}
               </span>
               <span
                 className={cn(
-                  "flex items-center gap-1 text-xs leading-4 @case:justify-center",
-                  tone === "idle" ? "text-muted-foreground" : "text-foreground/80",
+                  "flex items-center gap-1 text-xs leading-5",
+                  tone === "idle" ? "text-muted-foreground" : "text-foreground",
                 )}
               >
                 <StateGlyph state={state} />
                 {STATE_WORD[state]}
               </span>
               {details[stage] && (
-                <span className="mt-1 block text-xs leading-4 wrap-anywhere text-muted-foreground">
+                <span className="mt-1 block text-xs leading-5 wrap-anywhere text-muted-foreground">
                   {details[stage]}
                 </span>
               )}

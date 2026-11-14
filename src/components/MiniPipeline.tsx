@@ -4,10 +4,10 @@ import { cn } from "@/lib/utils";
 // Four small dots, one per stage, for the command rows. Status colours only. Server-safe.
 const dot: Record<StageState, string> = {
   passed: "bg-status-completed-accent",
-  failed: "bg-status-rejected-accent",
-  error: "bg-status-failed-accent",
-  not_reached: "border border-muted-foreground/60",
-  dry_run: "bg-status-info-accent ring-2 ring-status-info-accent/30",
+  failed: "bg-status-rejected-accent rounded-none",
+  error: "bg-status-failed-accent rotate-45 rounded-none",
+  not_reached: "border border-muted-foreground",
+  dry_run: "bg-status-info-accent ring-2 ring-status-info-accent",
   running: "bg-status-info-accent",
 };
 

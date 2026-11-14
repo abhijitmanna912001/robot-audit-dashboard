@@ -174,14 +174,21 @@ export function Dashboard({
   return (
     <div className="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
       <TopBar status={status} counts={counts} />
-      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-4 sm:px-6 sm:py-6 lg:grid lg:grid-cols-[380px_minmax(0,1fr)] lg:gap-6 lg:py-6">
-        {loadError && (
-          <p role="alert" className="text-xs text-destructive lg:col-span-2">
+      {loadError && (
+        <div className="mx-auto w-full max-w-[1440px] shrink-0 px-4 pt-4 sm:px-8">
+          <p role="alert" className="rounded-ui-md border border-destructive bg-status-rejected px-4 py-3 text-sm text-destructive">
             Could not load or refresh data
           </p>
-        )}
-        <section aria-label="Commands" className="scroll-subtle flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:p-1 lg:pr-3 lg:[scrollbar-gutter:stable]">
+        </div>
+      )}
+      <div className="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 flex-col gap-6 px-4 py-6 sm:px-8 lg:grid lg:grid-cols-[336px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:gap-8 lg:py-8">
+        <section aria-label="Commands" className="scroll-subtle flex min-w-0 flex-col gap-5 lg:min-h-0 lg:overflow-y-auto lg:p-1.5 lg:pr-4 lg:[scrollbar-gutter:stable]">
           <CommandInput onSubmitted={handleSubmitted} />
+          {selected && (
+            <a href="#audit-record" className="self-start rounded-ui-sm py-1 text-sm font-medium text-primary underline underline-offset-4 lg:hidden">
+              View selected audit <span aria-hidden="true">↓</span>
+            </a>
+          )}
           <FilterTabs
             tab={tab}
             onTab={setTab}
@@ -189,7 +196,7 @@ export function Dashboard({
             onShowTest={() => setShowTest((v) => !v)}
             hiddenTestCount={hiddenTestCount}
           />
-          <h2 className={sectionLabel}>Commands</h2>
+          <h2 className={sectionLabel}>Command history</h2>
           <CommandList
             commands={visibleCommands}
             selectedId={selectedId ?? undefined}
@@ -203,20 +210,25 @@ export function Dashboard({
             at the top (no scroll code). The padding keeps focus rings and shadows from being
             clipped; the stable gutter keeps the scrollbar off the cards. */}
         <section
+          id="audit-record"
+          aria-label="Selected command audit"
+          tabIndex={-1}
           key={selectedId ?? "none"}
-          className="scroll-subtle min-w-0 scroll-pt-14 lg:min-h-0 lg:overflow-y-auto lg:p-1 lg:pr-3 lg:[scrollbar-gutter:stable]"
+          className="scroll-subtle min-w-0 scroll-pt-6 lg:min-h-0 lg:overflow-y-auto lg:p-1.5 lg:pr-3 lg:[scrollbar-gutter:stable]"
         >
           {selected ? (
             <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />
           ) : (
-            <div className="surface-card flex flex-col items-center gap-2 rounded-ui-lg px-4 py-12 text-center">
-              <FileSearch aria-hidden="true" className="size-6 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">Select a command to see its audit trail</p>
+            <div className="surface-card flex min-h-80 flex-col items-start justify-center gap-4 rounded-ui-lg px-6 py-12 sm:px-10">
+              <FileSearch aria-hidden="true" className="size-8 text-primary" />
+              <p className="text-2xl font-semibold tracking-tight">Every command has a record.</p>
+              <p className="max-w-sm text-sm leading-6 text-muted-foreground">Select a command to inspect its plan, independent checks, and audit events.</p>
+              <span className="font-mono text-xs text-muted-foreground">DRY RUN ONLY · NOTHING SENT TO A ROBOT</span>
             </div>
           )}
         </section>
       </div>
-      <footer className="shrink-0 px-4 pb-4 text-center text-xs text-muted-foreground sm:px-6 lg:pb-3">
+      <footer className="shrink-0 border-t border-border px-4 py-3 text-center text-xs text-muted-foreground sm:px-6">
         Append-only audit log. Every event is recorded and readable.
       </footer>
     </div>
