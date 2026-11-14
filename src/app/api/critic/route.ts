@@ -1,12 +1,11 @@
 // Deterministic critic (no OpenAI, no Supabase yet). Fails closed: anything
 // unexpected is a reject. Rules mirror worker/safety_validator.py; joint limits
-// come from shared/so101-limits.json.
+// and the action cap come from shared/so101-limits.json.
 import { timingSafeEqual } from "node:crypto";
 import { computePlanHash } from "../../../lib/plan-hash.ts";
-import { JOINT_LIMITS, JOINT_UNIT } from "../../../lib/so101-limits.ts";
+import { JOINT_LIMITS, JOINT_UNIT, MAX_ACTIONS } from "../../../lib/so101-limits.ts";
 import type { CriticResponse } from "@/types/draft";
 
-const MAX_ACTIONS = 10;
 const ACTION_TYPE = "set_joint"; // the only supported action type
 const ALLOWED_FIELDS = new Set(["actionId", "type", "target", "value", "unit", "reason"]);
 

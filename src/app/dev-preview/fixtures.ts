@@ -50,7 +50,7 @@ const validatorPass = (s: string) =>
   ev(s, "validator_result", "Validator passed", {
     outcome: "pass",
     planId: PLAN_ID,
-    validatorVersion: "0.1.0",
+    validatorVersion: "1.0",
     errors: [],
   });
 const criticApprove = (s: string) =>
@@ -143,7 +143,7 @@ export const scenarios: Scenario[] = [
       ev("val", "validator_result", "Validator failed", {
         outcome: "fail",
         planId: PLAN_ID,
-        validatorVersion: "0.1.0",
+        validatorVersion: "1.0",
         errors: [
           {
             ruleId: "JOINT_LIMIT_EXCEEDED",
@@ -226,7 +226,7 @@ export const scenarios: Scenario[] = [
       ev("vce", "validator_result", "Validator failed", {
         outcome: "fail",
         planId: PLAN_ID,
-        validatorVersion: "0.1.0",
+        validatorVersion: "1.0",
         errors: [
           { ruleId: "JOINT_LIMIT_EXCEEDED", actionId: "a1", field: "value", message: "value 3 is outside the limits for _1" },
         ],

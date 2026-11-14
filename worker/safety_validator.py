@@ -29,8 +29,9 @@ from typing import Any, Callable
 
 from robot_profile import SO101_PROFILE, RobotProfile
 
-# Format not agreed yet (docs/schema-draft.md section 8, question 8).
-VALIDATOR_VERSION = "0.1.0"
+# DECIDED (docs/schema-draft.md, "Validator result"): the plain string "1.0",
+# bumped by hand when the rules change. Not semver, a git sha or a date.
+VALIDATOR_VERSION = "1.0"
 
 # Rule ids agreed in docs/schema-draft.md.
 UNSUPPORTED_ACTION = "UNSUPPORTED_ACTION"
@@ -40,6 +41,9 @@ JOINT_LIMIT_EXCEEDED = "JOINT_LIMIT_EXCEEDED"
 NON_FINITE_VALUE = "NON_FINITE_VALUE"
 UNIT_MISMATCH = "UNIT_MISMATCH"
 MAX_ACTIONS_EXCEEDED = "MAX_ACTIONS_EXCEEDED"
+# A joint may be targeted by only one action per plan. Matches the critic's
+# duplicate_joint_target rule.
+DUPLICATE_JOINT_TARGET = "DUPLICATE_JOINT_TARGET"
 AGREED_RULE_IDS = frozenset(
     {
         UNSUPPORTED_ACTION,
@@ -49,11 +53,12 @@ AGREED_RULE_IDS = frozenset(
         NON_FINITE_VALUE,
         UNIT_MISMATCH,
         MAX_ACTIONS_EXCEEDED,
+        DUPLICATE_JOINT_TARGET,
     }
 )
 
-# PROPOSED rule ids, not yet in docs/schema-draft.md. They cover problems the
-# agreed list has no id for. To be confirmed with the dashboard side.
+# Rule ids the worker added. docs/schema-draft.md ("Validator result") now
+# lists them as agreed; the separate set is kept so existing imports still work.
 INVALID_PLAN = "INVALID_PLAN"  # not an array, empty, or an action is not an object
 INVALID_FIELD_TYPE = "INVALID_FIELD_TYPE"  # a field has the wrong JSON type
 DUPLICATE_ACTION_ID = "DUPLICATE_ACTION_ID"
@@ -153,13 +158,18 @@ def _collect_errors(plan_id: Any, actions: Any, profile: RobotProfile) -> list[V
         )
 
     seen_ids: set[str] = set()
+    seen_targets: set[str] = set()
     for index, action in enumerate(actions):
-        errors.extend(_validate_action(index, action, profile, seen_ids))
+        errors.extend(_validate_action(index, action, profile, seen_ids, seen_targets))
     return errors
 
 
 def _validate_action(
-    index: int, action: Any, profile: RobotProfile, seen_ids: set[str]
+    index: int,
+    action: Any,
+    profile: RobotProfile,
+    seen_ids: set[str],
+    seen_targets: set[str],
 ) -> list[ValidationIssue]:
     if not isinstance(action, dict):
         return [
@@ -195,6 +205,19 @@ def _validate_action(
         return issues
 
     handler(action, profile, add)
+
+    # One action per joint. Like the critic, only a known joint counts (an
+    # unknown one already fails with UNKNOWN_JOINT), and the later action is
+    # the one flagged, whatever else is wrong with it.
+    target = action.get("target")
+    if isinstance(target, str) and target in profile.joint_position_limits:
+        if target in seen_targets:
+            add(
+                DUPLICATE_JOINT_TARGET,
+                "target",
+                f"joint {target!r} is targeted by an earlier action.",
+            )
+        seen_targets.add(target)
     return issues
 
 

@@ -473,6 +473,57 @@ class ExecutionGateTests(unittest.TestCase):
             self.assertFalse(decide_execution(self.request, self.approval).allowed)
 
 
+class TriggeredRulesTests(unittest.TestCase):
+    """An approval must carry no triggered rules (Abhijit's review of a173b98)."""
+
+    def setUp(self) -> None:
+        self.request = build_critic_request(COMMAND_ID, PLAN_ID, valid_actions())
+
+    def test_approve_with_empty_rules_is_an_approval(self) -> None:
+        decision = evaluate_critic_response(self.request, 200, verdict(self.request, triggeredRules=[]))
+        self.assertTrue(decision.approved)
+
+    def test_approve_with_rules_is_invalid_body(self) -> None:
+        for rules in (["joint_limit_exceeded"], ["joint_limit_exceeded", "unit_mismatch"], [""]):
+            with self.subTest(rules=rules):
+                decision = evaluate_critic_response(
+                    self.request, 200, verdict(self.request, triggeredRules=rules)
+                )
+                self.assertFalse(decision.approved)
+                self.assertEqual(decision.outcome, "error")  # never a reject
+                self.assertEqual(decision.category, critic_gate.CATEGORY_MALFORMED_RESPONSE)
+                self.assertEqual(
+                    decision.to_payload(),
+                    {
+                        "outcome": "error",
+                        "error": {
+                            "kind": "invalid_body",
+                            "httpStatus": 200,
+                            "detail": "an approve verdict has triggered rules",
+                        },
+                    },
+                )
+
+    def test_reject_with_rules_is_still_a_reject(self) -> None:
+        for rules in (["joint_limit_exceeded"], ["joint_limit_exceeded", "duplicate_joint_target"]):
+            with self.subTest(rules=rules):
+                body = verdict(self.request, verdict="reject", triggeredRules=rules)
+                decision = evaluate_critic_response(self.request, 200, body)
+                self.assertEqual(decision.outcome, "reject")
+                self.assertEqual(decision.category, critic_gate.CATEGORY_REJECTED)
+                self.assertEqual(decision.to_payload()["response"]["triggeredRules"], rules)
+
+    def test_missing_or_malformed_rules_are_errors(self) -> None:
+        for verdict_value in ("approve", "reject"):
+            for rules in (DROP, None, "joint_limit_exceeded", {"a": 1}, [1], [None], ["ok", 2]):
+                with self.subTest(verdict=verdict_value, rules=rules):
+                    decision = evaluate_critic_response(
+                        self.request, 200, verdict(self.request, verdict=verdict_value, triggeredRules=rules)
+                    )
+                    self.assertEqual(decision.outcome, "error")
+                    self.assertEqual(decision.error["kind"], "invalid_body")
+
+
 class PurityTests(unittest.TestCase):
     def test_gates_do_no_io_and_cannot_reach_a_robot(self) -> None:
         allowed = {

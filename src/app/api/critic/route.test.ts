@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { POST } from "./route.ts";
 import { readFileSync } from "node:fs";
 import { computePlanHash } from "../../../lib/plan-hash.ts";
-import { JOINT_LIMITS, JOINT_UNIT } from "../../../lib/so101-limits.ts";
+import { JOINT_LIMITS, JOINT_UNIT, MAX_ACTIONS } from "../../../lib/so101-limits.ts";
 
 const SECRET = "test-secret-not-real";
 process.env.CRITIC_SHARED_SECRET = SECRET;
@@ -204,6 +204,17 @@ test("max actions: 11 is rejected with max_actions_exceeded, 10 is not", async (
   assert.ok(eleven.body.triggeredRules.includes("max_actions_exceeded"));
   const ten = await verdictFor(plan(10));
   assert.ok(!ten.body.triggeredRules.includes("max_actions_exceeded"));
+});
+
+test("action cap comes from shared/so101-limits.json and is the agreed 10", () => {
+  const shared = JSON.parse(
+    readFileSync(new URL("../../../../shared/so101-limits.json", import.meta.url), "utf8"),
+  ) as { maxActions: unknown };
+  assert.equal(shared.maxActions, 10);
+  assert.equal(MAX_ACTIONS, shared.maxActions);
+  // The route must not keep its own copy of the number.
+  const source = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /MAX_ACTIONS\s*=/);
 });
 
 test("two actions on the same joint give duplicate_joint_target", async () => {
