@@ -1,4 +1,4 @@
-import { CircleCheck, Hourglass, Loader, OctagonX, TriangleAlert, type LucideIcon } from "lucide-react";
+import { CircleAlert, CircleCheck, Hourglass, Loader, OctagonX, TriangleAlert, type LucideIcon } from "lucide-react";
 import type { BannerTone } from "@/lib/pipeline";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,14 @@ const tones: Record<BannerTone, { icon: LucideIcon; box: string; ring: string; s
   },
   broke: {
     icon: TriangleAlert,
+    box: "border-l-status-failed-accent bg-status-failed",
+    ring: "text-status-failed-accent",
+    stamp: "text-status-failed-foreground",
+  },
+  // Warning reuses the amber "failed" tokens (no new colour). The icon, stamp and headline tell it
+  // apart from a plain failure.
+  warning: {
+    icon: CircleAlert,
     box: "border-l-status-failed-accent bg-status-failed",
     ring: "text-status-failed-accent",
     stamp: "text-status-failed-foreground",

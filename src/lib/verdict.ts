@@ -5,6 +5,7 @@ import { elapsedMs, formatElapsed, workerWaitLabel } from "./elapsed.ts";
 import { eventContext } from "./event-summary.ts";
 import { kindLabel } from "./kind-label.ts";
 import { readCritic, readExecution, readPlanFailure, readValidator, asRecord } from "./payload.ts";
+import { executionMode, executionOutcome } from "./simulation.ts";
 import { bannerTone, derivePipeline, STATE_WORD, type StageName } from "./pipeline.ts";
 
 type EventLike = { eventType: unknown; payload: unknown };
@@ -44,6 +45,10 @@ export function verdictStamp(status: string | undefined, events: unknown): strin
     const stages = derivePipeline(list_ as never);
     const tone = bannerTone(status, list_ as never);
     const execution = stages.find((s) => s.stage === "execution")?.state;
+    if (tone !== "blocked") {
+      const outcome = executionOutcome(list_);
+      if (outcome) return outcome.stamp;
+    }
     switch (tone) {
       case "blocked":
         return "REJECTED";
@@ -69,6 +74,9 @@ export function verdictFacts(events: unknown): string[] {
     const list_ = list(events);
     const out: string[] = [];
     const stages = derivePipeline(list_ as never);
+    const blocked = bannerTone(undefined, list_ as never) === "blocked";
+    // Simulation and mode-not-recorded facts come first (for example "Manual check needed").
+    if (!blocked) out.push(...(executionOutcome(list_)?.facts ?? []));
     const checks = stages.filter(
       (s) => (s.stage === "validator" || s.stage === "critic") && s.state !== "not_reached",
     );
@@ -150,11 +158,12 @@ export function stageDetails(events: unknown): Partial<Record<StageName, string>
     if (state("execution") !== "not_reached") {
       const e =
         last(list_, "execution_completed") ?? last(list_, "execution_failed") ?? last(list_, "execution_started");
-      const dry = e ? readExecution(e.payload).dryRun : undefined;
-      if (dry !== undefined) {
-        // A finished dry run says what it means; a repeated "dry run" under "dry run" is dropped below.
-        out.execution = !dry ? "executed" : state("execution") === "dry_run" ? "nothing sent to a robot" : "dry run";
-      }
+      const mode = e ? executionMode(e.payload) : undefined;
+      // A finished dry run says what it means; a repeated "dry run" under "dry run" is dropped below.
+      // A mode that was not recorded gets no detail: the state word already says so, and nothing
+      // may suggest a real execution.
+      if (mode === "dry_run") out.execution = state("execution") === "dry_run" ? "nothing sent to a robot" : "dry run";
+      else if (mode === "simulation" && state("execution") !== "simulated") out.execution = "simulation";
     }
     // A detail must not repeat the line above it (the state word).
     const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();

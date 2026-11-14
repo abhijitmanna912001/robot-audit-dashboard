@@ -5,7 +5,6 @@
 import {
   asRecord,
   readCritic,
-  readExecution,
   readPlan,
   readPlanFailure,
   readSource,
@@ -13,6 +12,7 @@ import {
   text,
 } from "./payload.ts";
 import { isKnownKind, kindLabel } from "./kind-label.ts";
+import { executionMode, readSimulation, simulationKindLabel } from "./simulation.ts";
 
 export const MAX_LINE = 120;
 const MAX_PIECE = 40;
@@ -160,8 +160,10 @@ export function summarizeEvent(e: EventLike, ctx?: SummaryContext): EventSummary
     case "execution_started":
     case "execution_completed":
     case "execution_failed": {
-      const { dryRun } = readExecution(e.payload);
-      return dryRun === undefined ? undefined : { text: dryRun ? "dry run" : "executed" };
+      // Only the two modes the worker writes are named. Anything else says nothing: it must not
+      // read as a real execution.
+      const mode = executionMode(e.payload);
+      return mode === "dry_run" ? { text: "dry run" } : mode === "simulation" ? { text: "simulation" } : undefined;
     }
     case "command_received": {
       const source = piece(readSource(e.payload));
@@ -170,6 +172,27 @@ export function summarizeEvent(e: EventLike, ctx?: SummaryContext): EventSummary
     default:
       return undefined;
   }
+}
+
+// Timeline title override for execution events, so a worker message such as "Execution completed"
+// never presents a simulation, or a run of unknown mode, as a real execution. undefined for dry runs
+// and for every other event type: those keep the worker's own message.
+export function eventTitle(e: EventLike): string | undefined {
+  if (typeof e !== "object" || e === null) return undefined;
+  const type = e.eventType;
+  if (type !== "execution_started" && type !== "execution_completed" && type !== "execution_failed") return undefined;
+  const mode = executionMode(e.payload);
+  if (mode === "dry_run") return undefined;
+  if (mode === "simulation") {
+    if (type === "execution_started") return "Simulation started";
+    if (type === "execution_completed") return "Simulated move completed";
+    return simulationKindLabel(readSimulation(e.payload)?.error?.kind) ?? "Simulation failed";
+  }
+  return type === "execution_started"
+    ? "Execution started (mode not recorded)"
+    : type === "execution_completed"
+      ? "Execution finished (mode not recorded)"
+      : "Execution failed (mode not recorded)";
 }
 
 // True when the summary only repeats the title (ignoring case and punctuation), so the

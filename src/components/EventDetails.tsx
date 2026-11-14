@@ -13,6 +13,7 @@ import {
 import { text } from "@/lib/payload";
 import { ChevronRight } from "lucide-react";
 import { kindLabel } from "@/lib/kind-label";
+import { executionMode, formatTolerance, readSimulation, simulationKindLabel, type ExecMode } from "@/lib/simulation";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 
@@ -31,7 +32,7 @@ const orDash = (v: string | number | undefined) => (v === undefined ? "?" : Stri
 
 function build(e: Pick<AuditEvent, "eventType" | "payload">): {
   rows: Row[];
-  dryRun: boolean;
+  mode?: ExecMode; // execution events only; the chip is shown for "dry_run" and "simulation"
   raw?: string;
 } {
   const rows: Row[] = [];
@@ -39,14 +40,14 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
   switch (e.eventType as string) {
     case "command_received":
       add(rows, "source", readSource(e.payload));
-      return { rows, dryRun: false };
+      return { rows };
     case "plan_generated": {
       const failure = readPlanFailure(e.payload);
       if (failure) {
         add(rows, "error", kindLabel(failure.kind));
         add(rows, "raw kind", failure.kind);
         add(rows, "error detail", failure.detail);
-        return { rows, dryRun: false };
+        return { rows };
       }
       const p = readPlan(e.payload);
       add(rows, "planId", p.planId);
@@ -57,7 +58,7 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       });
       if (p.extraActions > 0) lines.push(`+${p.extraActions} more`);
       add(rows, "actions", lines);
-      return { rows, dryRun: false };
+      return { rows };
     }
     case "validator_result": {
       const v = readValidator(e.payload);
@@ -72,7 +73,7 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       });
       if (v.extraErrors > 0) lines.push(`+${v.extraErrors} more`);
       add(rows, "errors", lines);
-      return { rows, dryRun: false };
+      return { rows };
     }
     case "critic_result": {
       const c = readCritic(e.payload);
@@ -87,18 +88,29 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
       add(rows, "raw kind", c.error?.kind);
       add(rows, "HTTP status", c.error?.httpStatus === undefined ? undefined : String(c.error.httpStatus));
       add(rows, "error detail", c.error?.detail);
-      return { rows, dryRun: false };
+      return { rows };
     }
     case "execution_started":
     case "execution_completed":
     case "execution_failed": {
+      const mode = executionMode(e.payload);
+      const sim = readSimulation(e.payload);
+      if (sim) {
+        add(rows, "summary", sim.summary);
+        add(rows, "error", simulationKindLabel(sim.error?.kind));
+        add(rows, "raw kind", sim.error?.kind);
+        add(rows, "error detail", sim.error?.detail);
+        add(rows, "stop", sim.stop);
+        add(rows, "tolerance", sim.toleranceRad === undefined ? undefined : `${formatTolerance(sim.toleranceRad)} rad`);
+        return { rows, mode };
+      }
       const x = readExecution(e.payload);
       add(rows, "summary", x.summary);
       add(rows, "error", x.error);
-      return { rows, dryRun: x.dryRun === true };
+      return { rows, mode };
     }
     default:
-      return { rows, dryRun: false, raw: readRaw(e.payload) };
+      return { rows, raw: readRaw(e.payload) };
   }
 }
 
@@ -117,7 +129,7 @@ function Chevron() {
 }
 
 export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | "payload"> }) {
-  const { rows, dryRun, raw } = build(event);
+  const { rows, mode, raw } = build(event);
   const type = (
     <p className="wrap-anywhere font-mono text-xs text-muted-foreground">{text(event.eventType) ?? "unknown"}</p>
   );
@@ -141,9 +153,9 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
       <summary className={summaryClass}>
         <Chevron />
         Details
-        {dryRun && (
+        {(mode === "dry_run" || mode === "simulation") && (
           <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-1 font-medium uppercase tracking-wide text-status-info-foreground">
-            dry run
+            {mode === "dry_run" ? "dry run" : "simulated"}
           </span>
         )}
       </summary>

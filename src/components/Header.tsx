@@ -29,9 +29,6 @@ export function Brand() {
   );
 }
 
-// Static for now: the worker only dry-runs. One line to change when that is no longer true.
-const MODE = "Dry run";
-
 // Sticky top bar. Counts show nonzero statuses only, and nothing at all when there are none.
 export function TopBar({
   status,
@@ -49,9 +46,9 @@ export function TopBar({
           <div className="border-l-2 border-primary pl-3">
             <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
               <FlaskConical aria-hidden="true" className="size-3.5 text-primary" />
-              {MODE} environment
+              Dry run and simulation only.
             </span>
-            <p className="mt-0.5 text-xs text-muted-foreground">Nothing is sent to a robot.</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">No physical robot is connected.</p>
           </div>
           <ConnectionIndicator status={status} />
         </div>

@@ -20,7 +20,7 @@ const done = (dryRun: unknown) => ev("execution_completed", { dryRun });
 
 test("verdictStamp", () => {
   assert.equal(verdictStamp("completed", [plan(), vPass(), cApprove(), done(true)]), "APPROVED · DRY RUN");
-  assert.equal(verdictStamp("completed", [plan(), vPass(), cApprove(), done(false)]), "COMPLETED");
+  assert.equal(verdictStamp("completed", [plan(), vPass(), cApprove(), done(false)]), "MODE NOT RECORDED");
   assert.equal(verdictStamp("rejected", [plan(), vFail()]), "REJECTED");
   assert.equal(verdictStamp("failed", [ev("execution_failed", { dryRun: true })]), "FAILED");
   assert.equal(verdictStamp("executing", [ev("execution_started", { dryRun: true })]), "RUNNING · DRY RUN");
@@ -70,13 +70,14 @@ test("bindUnits: numbers stay with their units", () => {
 test("stageDetails: dry run wording and no repeated lines", () => {
   const dryDone = stageDetails([plan(), vPass(), cApprove(), done(true)]);
   assert.equal(dryDone.execution, "nothing sent to a robot");
-  assert.equal(stageDetails([plan(), vPass(), cApprove(), done(false)]).execution, "executed");
+  // Mode not recorded: no detail at all, and never "executed".
+  assert.equal(stageDetails([plan(), vPass(), cApprove(), done(false)]).execution, undefined);
   // Started (running) dry run: the state word is "running", so "dry run" is new information.
   assert.equal(stageDetails([plan(), vPass(), cApprove(), ev("execution_started", { dryRun: true })]).execution, "dry run");
   // A failed dry run: "failed" then "dry run".
   assert.equal(stageDetails([plan(), vPass(), cApprove(), ev("execution_failed", { dryRun: true })]).execution, "dry run");
   // No detail ever equals the state word shown above it.
-  const words = ["passed", "failed", "error", "not reached", "dry run", "running"];
+  const words = ["passed", "failed", "error", "not reached", "dry run", "running", "simulated", "mode not recorded"];
   for (const set of [[plan(), vPass(), cApprove(), done(true)], [plan(), vFail()], [plan(), vPass(), cErr("timeout")]]) {
     for (const d of Object.values(stageDetails(set))) assert.ok(!words.includes((d as string).toLowerCase()));
   }

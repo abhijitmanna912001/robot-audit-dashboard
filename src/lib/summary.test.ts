@@ -53,13 +53,13 @@ test("execution outcomes, dry run labelled", () => {
     summarize("completed", [vPass, cApprove, started, e("execution_completed", { dryRun: true })]),
     "Dry run completed",
   );
-  assert.equal(summarize("completed", [e("execution_completed", { dryRun: false })]), "Execution completed");
+  assert.equal(summarize("completed", [e("execution_completed", { dryRun: false })]), "Execution finished: mode not recorded");
   assert.equal(summarize("failed", [started, e("execution_failed", { dryRun: true, error: "x" })]), "Dry run failed");
   assert.equal(summarize("failed", [e("execution_failed", { dryRun: false, error: "x" })]), "Execution failed");
 });
 
 test("dryRun that is not a boolean is not treated as a dry run", () => {
-  assert.equal(summarize("completed", [e("execution_completed", { dryRun: "true" })]), "Execution completed");
+  assert.equal(summarize("completed", [e("execution_completed", { dryRun: "true" })]), "Execution finished: mode not recorded");
 });
 
 test("approved and waiting, and partial checks", () => {
@@ -96,7 +96,7 @@ test("malformed events and statuses never throw", () => {
   assert.equal(summarize("received", bad), "Waiting for the worker");
   assert.equal(summarize(42 as unknown as string, bad), "Waiting for the worker");
   // The event type alone says execution finished, even if its payload is garbage.
-  assert.equal(summarize("completed", [e("execution_completed", "x")]), "Execution completed");
+  assert.equal(summarize("completed", [e("execution_completed", "x")]), "Execution finished: mode not recorded");
 });
 
 const planFail = (kind: unknown, detail: unknown = "d") =>

@@ -86,13 +86,54 @@ test("execution running: started only", () => {
   assert.deepEqual(states([planOk, vPass, cApprove, xStart(true)]), ["passed", "passed", "passed", "running"]);
 });
 
-test("execution completed: dryRun true is dry_run, anything else is passed", () => {
+test("execution completed: dry run, simulation, or mode not recorded (never passed)", () => {
   const base = [planOk, vPass, cApprove];
   assert.equal(states([...base, xStart(true), xDone(true)])[3], "dry_run");
-  assert.equal(states([...base, xStart(false), xDone(false)])[3], "passed");
-  assert.equal(states([...base, xDone()])[3], "passed");
-  assert.equal(states([...base, xDone("true")])[3], "passed"); // a string is not boolean true
-  assert.equal(states([...base, xDone(1)])[3], "passed");
+  // dryRun false without mode "simulation" is not a real execution: the mode is simply not recorded.
+  assert.equal(states([...base, xStart(false), xDone(false)])[3], "unknown");
+  assert.equal(states([...base, xDone()])[3], "unknown");
+  assert.equal(states([...base, xDone("true")])[3], "unknown"); // a string is not boolean true
+  assert.equal(states([...base, xDone(1)])[3], "unknown");
+  assert.equal(states([...base, e("execution_completed", { dryRun: false, mode: "live" })])[3], "unknown");
+  assert.equal(states([...base, e("execution_completed", "garbage")])[3], "unknown");
+});
+
+const sim = (type: string, extra: object = {}) => e(type, { dryRun: false, mode: "simulation", ...extra });
+
+test("execution completed as a simulation is simulated, and only for the exact contract", () => {
+  const base = [planOk, vPass, cApprove];
+  assert.equal(states([...base, sim("execution_started"), sim("execution_completed")])[3], "simulated");
+  assert.equal(states([...base, sim("execution_started")])[3], "running");
+  assert.equal(states([...base, sim("execution_failed", { stop: "confirmed" })])[3], "failed");
+  // Malformed simulation payloads are not simulated.
+  assert.equal(states([...base, e("execution_completed", { mode: "simulation" })])[3], "unknown");
+  assert.equal(states([...base, e("execution_completed", { mode: "simulation", dryRun: "false" })])[3], "unknown");
+  assert.equal(states([...base, e("execution_completed", { mode: "Simulation", dryRun: false })])[3], "unknown");
+  // dryRun true wins over mode: it stays a dry run.
+  assert.equal(states([...base, e("execution_completed", { mode: "simulation", dryRun: true })])[3], "dry_run");
+  // Nothing runs after a rejection.
+  assert.equal(states([planOk, vFail, sim("execution_completed")])[3], "not_reached");
+});
+
+test("banner tone for simulations and unknown mode", () => {
+  const base = [planOk, vPass, cApprove];
+  const tel = (restored: number, tol?: number) => ({
+    telemetry: {
+      start: { readAt: "2026-11-14T10:00:01Z", joints: { _1: 0 } },
+      target: { readAt: "2026-11-14T10:00:02Z", joints: { _1: 0.5 } },
+      restored: { readAt: "2026-11-14T10:00:03Z", joints: { _1: restored } },
+    },
+    ...(tol === undefined ? {} : { toleranceRad: tol }),
+  });
+  assert.equal(bannerTone("completed", [...base, sim("execution_completed", tel(0.001, 0.01))]), "success");
+  assert.equal(bannerTone("completed", [...base, sim("execution_completed", tel(0.2, 0.01))]), "warning");
+  assert.equal(bannerTone("completed", [...base, sim("execution_completed", tel(0.001))]), "warning");
+  assert.equal(bannerTone("completed", [...base, xDone(false)]), "warning");
+  assert.equal(bannerTone("failed", [...base, sim("execution_failed", { stop: "confirmed" })]), "broke");
+  assert.equal(bannerTone("failed", [...base, sim("execution_failed", { stop: "unconfirmed" })]), "warning");
+  assert.equal(bannerTone("executing", [...base, sim("execution_started")]), "running");
+  assert.equal(bannerTone("completed", [...base, xDone(true)]), "success");
+  assert.equal(bannerTone("rejected", [planOk, vFail, sim("execution_completed")]), "blocked");
 });
 
 test("execution failed", () => {
@@ -178,7 +219,7 @@ const cases: {
   { name: "executing", status: "executing", events: [planOk, vPass, cApprove, xStart(false)], tone: "running", text: "Executing" },
   { name: "executing dry run", status: "executing", events: [planOk, vPass, cApprove, xStart(true)], tone: "running", text: "Executing (dry run)" },
   { name: "dry run completed", status: "completed", events: [planOk, vPass, cApprove, xStart(true), xDone(true)], tone: "success", text: "Dry run completed" },
-  { name: "execution completed", status: "completed", events: [planOk, vPass, cApprove, xStart(false), xDone(false)], tone: "success", text: "Execution completed" },
+  { name: "execution finished, mode not recorded", status: "completed", events: [planOk, vPass, cApprove, xStart(false), xDone(false)], tone: "warning", text: "Execution finished: mode not recorded" },
   { name: "execution failed", status: "failed", events: [planOk, vPass, cApprove, xFail(false)], tone: "broke", text: "Execution failed" },
   { name: "dry run failed", status: "failed", events: [planOk, vPass, cApprove, xFail(true)], tone: "broke", text: "Dry run failed" },
 ];
@@ -211,6 +252,8 @@ test("activeStage: running, then where it stopped, otherwise none", () => {
     ] as const;
   assert.equal(activeStage(st("passed", "passed", "passed", "running")), "execution");
   assert.equal(activeStage(st("passed", "passed", "passed", "dry_run")), "execution");
+  assert.equal(activeStage(st("passed", "passed", "passed", "simulated")), "execution");
+  assert.equal(activeStage(st("passed", "passed", "passed", "unknown")), undefined);
   assert.equal(activeStage(st("passed", "failed", "not_reached", "not_reached")), "validator");
   assert.equal(activeStage(st("passed", "passed", "error", "not_reached")), "critic");
   assert.equal(activeStage(st("passed", "passed", "passed", "passed")), undefined);

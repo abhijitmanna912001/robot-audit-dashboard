@@ -3,6 +3,7 @@
 // Events are expected oldest first (see lib/merge.ts).
 import { readCritic, readExecution, readPlanFailure, readValidator, text } from "./payload.ts";
 import type { PlanFailure } from "./payload.ts";
+import { executionOutcome } from "./simulation.ts";
 
 type EventLike = { eventType: string; payload: unknown };
 
@@ -59,6 +60,7 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
         started = readExecution(e.payload).dryRun === true;
         break;
       case "execution_completed": {
+        // Only a dry run is named here; every other mode is worded by executionOutcome() below.
         terminal = readExecution(e.payload).dryRun === true ? "Dry run completed" : "Execution completed";
         break;
       }
@@ -69,6 +71,9 @@ export function summarize(status: string | undefined, events: EventLike[]): stri
     }
   }
 
+  // Simulated runs, and runs whose mode was not recorded, never read as a plain "Execution completed".
+  const outcome = executionOutcome(events);
+  if (outcome) return outcome.headline;
   if (terminal) return terminal;
   if (started !== undefined) return started ? "Executing (dry run)" : "Executing";
   if (planFailure) {

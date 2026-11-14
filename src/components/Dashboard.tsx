@@ -223,7 +223,7 @@ export function Dashboard({
               <FileSearch aria-hidden="true" className="size-8 text-primary" />
               <p className="text-2xl font-semibold tracking-tight">Every command has a record.</p>
               <p className="max-w-sm text-sm leading-6 text-muted-foreground">Select a command to inspect its plan, independent checks, and audit events.</p>
-              <span className="font-mono text-xs text-muted-foreground">DRY RUN ONLY · NOTHING SENT TO A ROBOT</span>
+              <span className="font-mono text-xs text-muted-foreground">DRY RUN AND SIMULATION ONLY · NO PHYSICAL ROBOT CONNECTED</span>
             </div>
           )}
         </section>
