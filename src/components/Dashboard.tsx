@@ -1,12 +1,13 @@
 "use client";
 
 import { FileSearch } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import { fetchSnapshot } from "@/lib/queries";
 import { toAuditEvent, toCommand } from "@/lib/mappers";
 import { mergeCommands, mergeEvents } from "@/lib/merge";
 import { filterCommands, statusCounts, type Tab } from "@/lib/command-filter";
+import { derivePipeline } from "@/lib/pipeline";
 import type { AuditEvent, Command } from "@/types/draft";
 import { CaseFile, sectionLabel } from "./CaseFile";
 import { CommandInput } from "./CommandInput";
@@ -136,6 +137,17 @@ export function Dashboard({
     void refetchRef.current();
   }
 
+  // Display only: the four-dot mini pipeline in each row, derived from the events already held.
+  const stagesById = useMemo(() => {
+    const byCommand = new Map<string, AuditEvent[]>();
+    for (const e of events) {
+      const list = byCommand.get(e.commandId);
+      if (list) list.push(e);
+      else byCommand.set(e.commandId, [e]);
+    }
+    return new Map(commands.map((c) => [c.id, derivePipeline(byCommand.get(c.id) ?? [])]));
+  }, [commands, events]);
+
   const selected = commands.find((c) => c.id === selectedId);
   const selectedEvents = events.filter((e) => e.commandId === selectedId);
 
@@ -181,20 +193,24 @@ export function Dashboard({
             commands={visibleCommands}
             selectedId={selectedId ?? undefined}
             onSelect={select}
+            stagesById={stagesById}
             emptyText={emptyText}
           />
         </section>
         <section className="scroll-subtle min-w-0 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           {selected ? (
-            <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />
+            <CaseFile key={selected.id} command={selected} events={selectedEvents} highlightIds={freshIds} />
           ) : (
-            <div className="flex flex-col items-center gap-2 rounded-ui-lg bg-surface px-4 py-12 text-center">
+            <div className="surface-card flex flex-col items-center gap-2 rounded-ui-lg px-4 py-12 text-center">
               <FileSearch aria-hidden="true" className="size-6 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">Select a command to see its audit trail</p>
             </div>
           )}
         </section>
       </div>
+      <footer className="shrink-0 px-4 pb-4 text-center text-xs text-muted-foreground sm:px-6 lg:pb-3">
+        Append-only audit log. Every event is recorded and readable.
+      </footer>
     </div>
   );
 }

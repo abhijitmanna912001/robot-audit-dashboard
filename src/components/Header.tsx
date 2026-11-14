@@ -17,12 +17,12 @@ export function Brand() {
     <div className="flex min-w-0 items-center gap-3">
       <span
         aria-hidden="true"
-        className="flex size-8 shrink-0 items-center justify-center rounded-ui-md bg-primary/15 text-primary-foreground ring-1 ring-primary/40"
+        className="flex size-9 shrink-0 items-center justify-center rounded-ui-md bg-primary/12 text-primary ring-1 ring-primary/40 shadow-[0_0_20px_-2px_rgb(77_163_255/0.45)]"
       >
         <ShieldCheck className="size-4" />
       </span>
       <div className="min-w-0">
-        <h1 className="truncate text-base font-semibold leading-tight">Robot Audit Dashboard</h1>
+        <h1 className="truncate text-base leading-tight font-semibold tracking-tight">Robot Audit Dashboard</h1>
         <p className="hidden truncate text-xs text-muted-foreground sm:block">
           Every robot action is checked twice and logged
         </p>
@@ -44,16 +44,19 @@ export function TopBar({
 }) {
   const shown = COMMAND_STATUSES.filter((s) => counts[s] > 0);
   return (
-    <header className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+    <header className="sticky top-0 z-20 border-b border-border bg-background/90 backdrop-blur supports-[backdrop-filter]:bg-background/70">
       <div className="mx-auto flex min-h-14 w-full max-w-7xl flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 sm:px-6">
         <Brand />
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-1">
           {shown.length > 0 && (
-            <ul aria-label="Commands by status" className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+            <ul
+              aria-label="Commands by status"
+              className="flex flex-wrap items-center divide-x divide-border overflow-hidden rounded-ui-md border border-border bg-surface font-mono text-xs text-muted-foreground"
+            >
               {shown.map((s) => (
-                <li key={s} className="inline-flex items-center gap-1.5">
-                  <span aria-hidden="true" className={`size-2 rounded-full ${dot[s]}`} />
-                  <span className="tabular-nums font-medium text-foreground">{counts[s]}</span>
+                <li key={s} className="inline-flex items-center gap-1.5 px-2.5 py-1">
+                  <span aria-hidden="true" className={`size-1.5 rounded-full ${dot[s]}`} />
+                  <span className="font-medium text-foreground tabular-nums">{counts[s]}</span>
                   <span>{s}</span>
                 </li>
               ))}
@@ -61,7 +64,7 @@ export function TopBar({
           )}
           <span
             title="Nothing is sent to a robot"
-            className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-xs text-muted-foreground"
+            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 font-mono text-xs text-muted-foreground"
           >
             <FlaskConical aria-hidden="true" className="size-3 text-status-info-accent" />
             <span>Mode</span>

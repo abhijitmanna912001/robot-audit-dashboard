@@ -5,16 +5,17 @@ import { Inbox } from "lucide-react";
 import type { Command, CommandStatus } from "@/types/draft";
 import { cn } from "@/lib/utils";
 import { LocalTime } from "./LocalTime";
-import { StatusBadge } from "./StatusBadge";
+import { MiniPipeline } from "./MiniPipeline";
+import type { PipelineStage } from "@/lib/pipeline";
 
-// Literal class names so Tailwind can see them. The left border carries the status colour.
-const leftBorder: Record<CommandStatus, string> = {
-  received: "border-l-status-received-accent",
-  approved: "border-l-status-approved-accent",
-  rejected: "border-l-status-rejected-accent",
-  executing: "border-l-status-executing-accent",
-  completed: "border-l-status-completed-accent",
-  failed: "border-l-status-failed-accent",
+// Literal class names so Tailwind can see them. A small dot plus the status word.
+const dot: Record<CommandStatus, string> = {
+  received: "bg-status-received-accent",
+  approved: "bg-status-approved-accent",
+  rejected: "bg-status-rejected-accent",
+  executing: "bg-status-executing-accent",
+  completed: "bg-status-completed-accent",
+  failed: "bg-status-failed-accent",
 };
 
 // First 8 characters of the id, as plain text (ids are uuids; the row also has a title).
@@ -24,11 +25,13 @@ export function CommandList({
   commands,
   selectedId,
   onSelect,
+  stagesById,
   emptyText = "No commands yet. Type one above and it will appear here.",
 }: {
   commands: Command[];
   selectedId?: string;
   onSelect: (id: string) => void;
+  stagesById?: ReadonlyMap<string, readonly PipelineStage[]>;
   emptyText?: string;
 }) {
   const list = useRef<HTMLUListElement>(null);
@@ -50,7 +53,7 @@ export function CommandList({
 
   if (commands.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-ui-lg bg-surface px-4 py-8 text-center">
+      <div className="surface-card flex flex-col items-center gap-2 rounded-ui-lg px-4 py-8 text-center">
         <Inbox aria-hidden="true" className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">{emptyText}</p>
       </div>
@@ -67,20 +70,25 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block min-h-16 w-full min-w-0 rounded-ui-md border-l-[3px] px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
-                leftBorder[c.status],
+                "block min-h-16 w-full min-w-0 rounded-ui-md border px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
                 selected
-                  ? "bg-primary/20 hover:bg-primary/25 active:bg-primary/30"
-                  : "bg-surface hover:bg-raised active:bg-muted",
+                  ? "border-primary/30 border-l-2 border-l-primary bg-primary/12 hover:bg-primary/16 active:bg-primary/20"
+                  : "surface-card hover:bg-raised active:bg-muted",
               )}
             >
-              <span className="block truncate font-medium" title={c.text}>
-                {c.text}
+              <span className="flex min-w-0 items-center justify-between gap-3">
+                <span className="block min-w-0 truncate font-medium" title={c.text}>
+                  {c.text}
+                </span>
+                {stagesById?.get(c.id) && <MiniPipeline stages={stagesById.get(c.id)!} />}
               </span>
               <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                <StatusBadge status={c.status} />
+                <span className="inline-flex items-center gap-1.5">
+                  <span aria-hidden="true" className={cn("size-1.5 rounded-full", dot[c.status])} />
+                  <span className="capitalize">{c.status}</span>
+                </span>
                 <span className="font-mono">{shortId(c.id)}</span>
-                <LocalTime iso={c.createdAt} showDate />
+                <LocalTime iso={c.createdAt} showDate className="font-mono" />
               </span>
             </button>
           </li>

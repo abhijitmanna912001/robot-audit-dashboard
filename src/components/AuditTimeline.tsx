@@ -14,6 +14,7 @@ import { badgeVariants } from "@/components/ui/badge";
 import { eventContext, isRedundant, summarizeEvent } from "@/lib/event-summary";
 import { getMarker, type Marker } from "@/lib/outcome";
 import { readPlanFailure, text } from "@/lib/payload";
+import { formatGap } from "@/lib/time-gap";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 import { EventDetails } from "./EventDetails";
@@ -27,10 +28,18 @@ const markerStyles: Record<Marker, string> = {
   error: "bg-status-failed text-status-failed-foreground",
 };
 
+// Rail segment below a node, coloured by that event's outcome.
+const railStyles: Record<Marker | "neutral", string> = {
+  pass: "bg-status-completed-accent/60",
+  fail: "bg-status-rejected-accent/60",
+  error: "bg-status-failed-accent/60",
+  neutral: "bg-border",
+};
+
 const nodeStyles: Record<Marker | "neutral", string> = {
-  pass: "border-status-completed-accent text-status-completed-accent",
-  fail: "border-status-rejected-accent text-status-rejected-accent",
-  error: "border-status-failed-accent text-status-failed-accent",
+  pass: "border-status-completed-accent text-status-completed-accent shadow-[0_0_12px_-2px_var(--status-completed-accent)]",
+  fail: "border-status-rejected-accent text-status-rejected-accent shadow-[0_0_12px_-2px_var(--status-rejected-accent)]",
+  error: "border-status-failed-accent text-status-failed-accent shadow-[0_0_12px_-2px_var(--status-failed-accent)]",
   neutral: "border-border text-muted-foreground",
 };
 
@@ -79,62 +88,73 @@ export function AuditTimeline({
         const summary = summarizeEvent(e, ctx);
         // Hide text that only repeats the title; a hash is always new information.
         const lineText = summary && !isRedundant(title, summary.text) ? summary.text : "";
+        const tone = nodeTone(e, marker);
+        const gap = i > 0 ? formatGap(events[i - 1].createdAt, e.createdAt) : undefined;
         const hasLine = lineText !== "" || summary?.shortHash !== undefined;
         return (
           <li
             key={e.id}
+            style={{ "--i": i } as React.CSSProperties}
             className={cn(
-              "relative min-w-0 rounded-ui-md pl-11",
+              "anim-row relative grid min-w-0 grid-cols-[4.25rem_1.75rem_minmax(0,1fr)] gap-x-2 rounded-ui-md sm:grid-cols-[5rem_1.75rem_minmax(0,1fr)] sm:gap-x-3",
               last ? "pb-0" : "pb-6",
               highlightIds?.has(e.id) && "event-flash",
             )}
           >
-            {!last && (
-              <span aria-hidden="true" className="absolute top-8 bottom-0 left-4 w-px bg-border" />
-            )}
-            <span
-              aria-hidden="true"
-              className={cn(
-                "absolute top-0 left-0 flex size-8 items-center justify-center rounded-full border-2 bg-raised",
-                nodeStyles[nodeTone(e, marker)],
+            <div className="pt-1 text-right font-mono text-xs leading-tight text-muted-foreground">
+              <LocalTime iso={e.createdAt} className="block" />
+              {gap && <span className="mt-0.5 block tabular-nums">{gap}</span>}
+            </div>
+            <div className="relative flex justify-center">
+              {!last && (
+                <span
+                  aria-hidden="true"
+                  className={cn("absolute top-8 -bottom-6 w-px", railStyles[tone])}
+                />
               )}
-            >
-              <Icon className="size-4" />
-            </span>
-            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-1">
-              <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm font-medium leading-snug text-balance">
-                {title}
-              </p>
-              <div className="flex shrink-0 items-center gap-2">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "relative flex size-7 items-center justify-center rounded-full border-2 bg-raised",
+                  nodeStyles[tone],
+                )}
+              >
+                <Icon className="size-3.5" />
+              </span>
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
+                <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm leading-snug font-medium text-balance">
+                  {title}
+                </p>
                 {marker && (
                   <span
                     className={cn(
                       badgeVariants(),
-                      "h-auto rounded-ui-sm! px-2 py-px text-xs uppercase tracking-wide",
+                      "h-auto rounded-full! px-2 py-px font-mono text-[11px] uppercase tracking-wide",
                       markerStyles[marker],
                     )}
                   >
                     {marker}
                   </span>
                 )}
-                <LocalTime iso={e.createdAt} className="text-xs text-muted-foreground" />
               </div>
-            </div>
-            {summary && hasLine && (
-              <p className="wrap-anywhere mt-0.5 flex flex-wrap items-center gap-x-1 text-sm text-muted-foreground">
-                {lineText && <span>{lineText}</span>}
-                {summary.shortHash && summary.hash && (
-                  <span className="inline-flex items-center gap-0.5">
-                    {lineText && <span aria-hidden="true">·</span>}
-                    <span className="font-mono text-xs" title={summary.hash}>
-                      #{summary.shortHash}
+              {summary && hasLine && (
+                <p className="wrap-anywhere mt-0.5 flex flex-wrap items-center gap-x-1 text-sm text-muted-foreground">
+                  {lineText && <span>{lineText}</span>}
+                  {summary.shortHash && summary.hash && (
+                    <span className="inline-flex items-center gap-0.5">
+                      {lineText && <span aria-hidden="true">·</span>}
+                      <span className="font-mono text-xs" title={summary.hash}>
+                        #{summary.shortHash}
+                      </span>
+                      <CopyButton value={summary.hash} label="plan hash" />
                     </span>
-                    <CopyButton value={summary.hash} label="plan hash" />
-                  </span>
-                )}
-              </p>
-            )}
-            <EventDetails event={e} />
+                  )}
+                </p>
+              )}
+              <EventDetails event={e} />
+            </div>
           </li>
         );
       })}

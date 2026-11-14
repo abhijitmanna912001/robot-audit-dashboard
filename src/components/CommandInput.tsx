@@ -100,12 +100,19 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
       }}
-      className="flex flex-col gap-2 rounded-ui-lg bg-surface p-3"
+      className="surface-card flex flex-col gap-2 rounded-ui-lg p-3"
     >
       <label htmlFor={id} className="sr-only">
         New command
       </label>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <div className="relative min-w-0 sm:flex-1">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-[7px] left-2.5 font-mono text-sm text-primary select-none"
+        >
+          &gt;
+        </span>
         <Textarea
           id={id}
           value={text}
@@ -122,8 +129,16 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           maxLength={MAX_TEXT_LENGTH}
           placeholder="Type a command for the robot..."
           aria-describedby={`${helpId} ${countId}`}
-          className="min-h-9 w-full min-w-0 resize-none bg-raised transition-[height] duration-150 sm:flex-1"
+          className="min-h-9 w-full min-w-0 resize-none bg-raised pr-14 pl-7 font-mono text-sm caret-primary transition-[height] duration-150 md:text-sm"
         />
+        <kbd
+          aria-hidden="true"
+          title="Cmd or Ctrl + Enter submits"
+          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-1.5 py-px font-mono text-[11px] leading-none text-muted-foreground"
+        >
+          ⌘ ↵
+        </kbd>
+        </div>
         <Button type="submit" disabled={submitting} className="w-full px-4 transition-colors duration-150 active:bg-primary/70 sm:w-auto">
           {submitting ? "Submitting..." : "Submit"}
         </Button>
@@ -140,7 +155,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               setText(ex);
               setNotice(null);
             }}
-            className="inline-flex h-7 max-w-full items-center rounded-full border border-border px-3 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="keycap inline-flex h-7 max-w-full items-center rounded-ui-sm px-2.5 font-mono text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:text-foreground active:translate-y-px active:shadow-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <span className="truncate">{ex}</span>
           </button>

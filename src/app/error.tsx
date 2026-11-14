@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
     <main className="flex min-h-dvh items-center justify-center px-4 py-12">
-      <div role="alert" className="flex w-full max-w-md flex-col items-center gap-4 rounded-ui-lg bg-surface px-6 py-10 text-center">
+      <div role="alert" className="flex w-full max-w-md flex-col items-center gap-4 surface-card rounded-ui-lg px-6 py-10 text-center">
         <span aria-hidden="true" className="flex size-10 items-center justify-center rounded-full bg-status-failed-accent/15 text-status-failed-accent">
           <TriangleAlert className="size-5" />
         </span>

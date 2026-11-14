@@ -7,8 +7,8 @@
 @theme inline {
   --color-background: var(--background);
   --radius-ui-sm: 6px;
-  --radius-ui-md: 10px;
-  --radius-ui-lg: 16px;
+  --radius-ui-md: 8px;
+  --radius-ui-lg: 10px;
   --color-surface: var(--surface);
   --color-raised: var(--raised);
   --color-foreground: var(--foreground);
@@ -75,26 +75,26 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --surface: oklch(0.985 0 0);
-  --raised: oklch(0.97 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #06080c;
+  --foreground: #e6edf6;
+  --card: #0b0f16;
+  --card-foreground: #e6edf6;
+  --popover: #101620;
+  --popover-foreground: #e6edf6;
+  --surface: #0b0f16;
+  --raised: #101620;
+  --primary: #4da3ff;
+  --primary-foreground: #06080c;
+  --secondary: #101620;
+  --secondary-foreground: #e6edf6;
+  --muted: #101620;
+  --muted-foreground: #8b97a8;
+  --accent: #10233a;
+  --accent-foreground: #e6edf6;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: rgb(255 255 255 / 7%);
+  --input: rgb(255 255 255 / 10%);
+  --ring: #4da3ff;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -133,26 +133,26 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0); /* #0a0a0a */
-  --surface: oklch(0.18 0 0); /* ~#111 */
-  --raised: oklch(0.21 0 0); /* ~#171717 */
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.18 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.55 0.2 270);
-  --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.25 0.03 270);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #06080c; /* #0a0a0a */
+  --surface: #0b0f16; /* ~#111 */
+  --raised: #101620; /* ~#171717 */
+  --foreground: #e6edf6;
+  --card: #0b0f16;
+  --card-foreground: #e6edf6;
+  --popover: #101620;
+  --popover-foreground: #e6edf6;
+  --primary: #4da3ff;
+  --primary-foreground: #06080c;
+  --secondary: #101620;
+  --secondary-foreground: #e6edf6;
+  --muted: #101620;
+  --muted-foreground: #8b97a8;
+  --accent: #10233a;
+  --accent-foreground: #e6edf6;
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 8%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.65 0.17 270);
+  --border: rgb(255 255 255 / 7%);
+  --input: rgb(255 255 255 / 10%);
+  --ring: #4da3ff;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -195,6 +195,13 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-size: 14px;
+    /* Flight-recorder atmosphere: a faint azure glow at the top over a 24px dot grid. */
+    background-image:
+      radial-gradient(ellipse 80% 40% at 50% -10%, rgb(77 163 255 / 8%), transparent),
+      radial-gradient(rgb(255 255 255 / 4%) 1px, transparent 1px);
+    background-size: 100% 100%, 24px 24px;
+    background-attachment: fixed;
   }
   html {
     @apply font-sans;
@@ -272,4 +279,48 @@
 }
 .scroll-subtle::-webkit-scrollbar-thumb:hover {
   background: oklch(1 0 0 / 32%);
+}
+
+/* Card surface: border, subtle top-to-bottom gradient, inset top highlight, soft shadow. */
+.surface-card {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #0d121a, #0b0f16);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 5%),
+    0 8px 24px -12px rgb(0 0 0 / 60%);
+}
+
+/* Keycap look for the example chips and key hints. */
+.keycap {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #131a25, #0e141d);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 8%), 0 2px 0 rgb(0 0 0 / 55%);
+}
+
+/* Entry motion. Only when the viewer has not asked for reduced motion. The case file is keyed
+   by command id, so these replay on every selection change. */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes line-draw {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .anim-row {
+    animation: fade-up 200ms ease-out both;
+    animation-delay: calc(min(var(--i, 0), 10) * 30ms);
+  }
+  .anim-verdict {
+    animation: scale-in 180ms ease-out both;
+  }
+  .anim-line {
+    transform-origin: left center;
+    animation: line-draw 200ms ease-out both;
+  }
 }

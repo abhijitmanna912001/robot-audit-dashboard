@@ -40,7 +40,7 @@ function Skeleton({ className }: { className: string }) {
 function LoadingShell() {
   return (
     <div role="status" aria-label="Loading" className="flex min-h-dvh flex-col">
-      <div className="sticky top-0 z-20 border-b border-border bg-background">
+      <div className="sticky top-0 z-20 border-b border-border bg-background/90">
         <div className="mx-auto flex min-h-14 w-full max-w-7xl items-center px-4 py-2 sm:px-6">
           <Brand />
         </div>
