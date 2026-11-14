@@ -2,9 +2,10 @@
 
 Every target here is local or can never resolve: the reserved ``.invalid``
 domain (RFC 6761) and loopback on the discard port 9. No test sends anything
-to an external host. Where a test names the production critic URL, two further
-independent blocks sit underneath the layer under test, so nothing can leave
-the process even if that layer were broken.
+to an external host, and the real production critic URL appears in no test:
+the "external critic" tests use ``robot-audit-dashboard.invalid``, which can
+never resolve even if the guard regressed. Two further independent blocks sit
+underneath the layer under test in those tests.
 """
 
 from __future__ import annotations
@@ -39,8 +40,13 @@ WORKER_DIR = Path(__file__).resolve().parents[1]
 INVALID_HOST = "guard-test.invalid"
 LOOPBACK_URL = "http://127.0.0.1:9/"
 INVALID_URL = f"https://{INVALID_HOST}/api/critic"
-PRODUCTION_CRITIC_URL = "https://robot-audit-dashboard.vercel.app/api/critic"
+# Stands in for the deployed critic. Reserved TLD (RFC 6761): never resolves.
+EXTERNAL_CRITIC_URL = "https://robot-audit-dashboard.invalid/api/critic"
 TEST_SECRET = "test-secret-not-real"
+# The real production hostname, assembled so that this file does not contain
+# it as a literal (the hygiene test below scans every test file for it).
+_PRODUCTION_HOST = ".".join(("robot-audit-dashboard", "vercel", "app"))
+_PRODUCTION_DOMAIN = ".".join(("vercel", "app"))
 
 
 class GuardTestCase(unittest.TestCase):
@@ -228,6 +234,34 @@ class StandardLibraryHttpTests(GuardTestCase):
         self.assert_blocked(lambda: requests.get(LOOPBACK_URL, timeout=1), "requests")
 
 
+class FixtureHygieneTests(unittest.TestCase):
+    """No automated test or test configuration may name the production critic."""
+
+    def test_no_test_file_contains_the_production_critic_host(self) -> None:
+        files = [
+            *sorted((WORKER_DIR / "tests").rglob("*.py")),
+            *sorted((WORKER_DIR / "tests").rglob("*.json")),
+            WORKER_DIR / "conftest.py",
+            WORKER_DIR / "pytest.ini",
+        ]
+        self.assertIn(Path(__file__).resolve(), [f.resolve() for f in files])
+        offenders = [
+            str(path.relative_to(WORKER_DIR))
+            for path in files
+            if path.is_file()
+            and (
+                _PRODUCTION_HOST in path.read_text(encoding="utf-8").lower()
+                or _PRODUCTION_DOMAIN in path.read_text(encoding="utf-8").lower()
+            )
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_external_critic_stand_in_is_a_reserved_name(self) -> None:
+        host = httpx.URL(EXTERNAL_CRITIC_URL).host
+        self.assertTrue(host.endswith(".invalid"))
+        self.assertNotIn(_PRODUCTION_DOMAIN, EXTERNAL_CRITIC_URL)
+
+
 class WorkerIsolationTests(GuardTestCase):
     def setUp(self) -> None:
         guard = mock.patch.object(
@@ -236,25 +270,28 @@ class WorkerIsolationTests(GuardTestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
-    def test_production_critic_cannot_be_contacted(self) -> None:
+    def test_external_critic_host_cannot_be_contacted(self) -> None:
         request = build_critic_request(
             COMMAND_ID,
             "9d2e4a10-0000-4000-8000-000000000002",
             [{"actionId": "a1", "type": "set_joint", "target": "_1", "value": 0.1, "unit": "rad", "reason": "r"}],
         )
-        settings = CriticSettings(url=PRODUCTION_CRITIC_URL, shared_secret=TEST_SECRET)
-        # Two independent safety nets UNDER the layer being tested.
+        settings = CriticSettings(url=EXTERNAL_CRITIC_URL, shared_secret=TEST_SECRET)
+        # Two independent safety nets UNDER the layer being tested. (Not
+        # socket.connect: creating any asyncio event loop uses socketpair.)
         with mock.patch.object(
-            httpcore.ConnectionPool, "handle_request", side_effect=AssertionError("reached httpcore")
+            httpcore.AsyncConnectionPool,
+            "handle_async_request",
+            side_effect=AssertionError("reached httpcore"),
         ) as pool, mock.patch.object(
-            socket.socket, "connect", side_effect=AssertionError("reached a socket")
-        ) as connect:
+            socket, "getaddrinfo", side_effect=AssertionError("reached DNS")
+        ) as dns:
             self.assert_blocked(
                 lambda: critic_client.review_plan(request, settings=settings),
-                "httpx.HTTPTransport request to https://robot-audit-dashboard.vercel.app",
+                "httpx.AsyncHTTPTransport request to https://robot-audit-dashboard.invalid",
             )
         pool.assert_not_called()
-        connect.assert_not_called()
+        dns.assert_not_called()
         self.assertNotIn(TEST_SECRET, " ".join(BLOCKED_ATTEMPTS))
 
     def test_real_critic_settings_cannot_be_loaded(self) -> None:
@@ -288,11 +325,11 @@ class WorkerIsolationTests(GuardTestCase):
         client = FakeClient(
             commands=[command_row("set joint _1 to 0.1 rad", claimed_by=None, claimed_at=None)]
         )
-        settings = CriticSettings(url=PRODUCTION_CRITIC_URL, shared_secret=TEST_SECRET)
+        settings = CriticSettings(url=EXTERNAL_CRITIC_URL, shared_secret=TEST_SECRET)
         with mock.patch.object(critic_client, "load_critic_settings", return_value=settings):
             self.assert_blocked(
                 lambda: command_processor.process_one_command(WORKER_ID, client=client),
-                "httpx.HTTPTransport",
+                "httpx.AsyncHTTPTransport",
             )
         self.assertEqual(client.tables["commands"][0]["status"], "received")
 

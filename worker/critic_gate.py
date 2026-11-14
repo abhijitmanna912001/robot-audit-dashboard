@@ -15,6 +15,7 @@ approved by the critic only if ALL of these hold:
 * the body is a valid critic verdict
 * ``commandId``, ``planId`` and ``planHash`` in the response equal the request
 * ``verdict`` is ``"approve"``
+* ``triggeredRules`` is an empty list (an approval with rules is ``invalid_body``)
 
 Anything else is not an approval. In particular a response whose ``planHash``
 differs from the request is a protocol-integrity failure and is recorded as
@@ -295,4 +296,9 @@ def _verdict_shape_problem(body: Any) -> str | None:
         return "planHash is not a string"
     if body["verdict"] == APPROVE and "planHash" not in body:
         return "an approve verdict has no planHash"
+    if body["verdict"] == APPROVE and rules:
+        # The critic approves only when no rule fired (src/app/api/critic/route.ts
+        # returns triggeredRules: [] with every approval). A contradictory body is
+        # invalid, never an approval and never an ordinary reject.
+        return "an approve verdict has triggered rules"
     return None

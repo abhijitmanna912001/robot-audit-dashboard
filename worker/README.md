@@ -344,8 +344,10 @@ rule (docs/schema-draft.md section 6) as pure functions. They send no request an
 nothing.
 
 A critic response counts as an approval only if the status is 200, the body is a valid
-verdict, `commandId`, `planId` and `planHash` all equal the request, and `verdict` is
-exactly `approve`. Everything else is one of two things:
+verdict, `commandId`, `planId` and `planHash` all equal the request, `verdict` is
+exactly `approve`, and `triggeredRules` is an empty list. An `approve` that lists triggered
+rules contradicts itself: it is an `invalid_body` error, never an approval and never a
+reject. Everything else is one of two things:
 
 - **reject**: the critic reviewed this plan and said no.
 - **error**: anything else. Each case has its own internal category so they are not
@@ -389,20 +391,22 @@ an `error` decision, never an approval and never a skip.
 | Configuration | `config.load_critic_settings()` (`CRITIC_URL`, `CRITIC_SHARED_SECRET`). No fallback names. Missing, blank, non-`https` (except loopback `http`), or a URL with credentials, query or fragment: error, no request |
 | Redirects | `follow_redirects=False`. Any 3xx is an `http_status` error ("redirect not followed"); the secret never reaches another host |
 | Environment | `trust_env=False`: no proxy variables, `.netrc` credentials or other environment settings are applied to the request |
-| Timeouts | `httpx.Timeout` with connect, read, write and pool all set, default 10 s. `build_timeout` refuses 0, negative, NaN, infinite, `None`, booleans and anything over 60 s |
+| Timeouts | `httpx.Timeout` with connect, read, write and pool all set, default 10 s, each capped at the total deadline. `build_timeout` refuses 0, negative, NaN, infinite, `None`, booleans and anything over 60 s |
+| Total deadline | 10 s (`TOTAL_DEADLINE_SECONDS`), enforced by cancellation. The request runs on `httpx.AsyncClient` inside `asyncio.timeout(deadline)`, on a private event loop that each call creates and closes, so `review_plan` and the processor stay synchronous. The scope covers client setup, DNS/TCP/TLS, sending, response headers (however slowly they trickle), the body (`aiter_raw`) and closing the response and client. At the deadline, the read or connect in progress is cancelled, the response and client are closed, and the result is a `timeout` error. Extra checkpoints run after headers, after each chunk and after JSON decoding. Validated like the timeouts (over 0, at most 60 s). No background thread. Calling `review_plan` from inside a running event loop is refused (critic error). Not `asyncio.run`, whose shutdown can wait minutes for a blocked DNS thread |
 | Retries | None, for anything. One worker run makes at most one critic request |
-| Response | Non-200: error (body not read). 200: body read up to 64 KB, parsed as strict JSON (no NaN), secret values scrubbed from its strings, then judged by `critic_gate.evaluate_critic_response` |
+| Encoding | Sends `accept-encoding: identity`. Any `Content-Encoding` other than absent or `identity` (gzip, br, deflate, lists, ...) is an `invalid_body` error, and nothing is decompressed |
+| Response | Non-200: error (body not read). 200: a declared `Content-Length` over 64 KB is refused before reading; otherwise the RAW bytes are read (`aiter_raw`) and reading stops as soon as they exceed 64 KB (exactly 65,536 bytes is accepted). Then strict JSON (no NaN), secret values scrubbed from its strings, and `critic_gate.evaluate_critic_response` |
 | Error detail | Fixed text plus an exception class name only. Never exception text, headers or a raw body |
 
 | Situation | Decision | `payload.error.kind` |
 |---|---|---|
-| 200, valid body, ids and hash match, `verdict: "approve"` | approve | |
-| 200, valid body, ids match, `verdict: "reject"` | reject | |
+| 200, valid body, ids and hash match, `verdict: "approve"`, `triggeredRules: []` | approve | |
+| 200, valid body, ids match, `verdict: "reject"` (any `triggeredRules`) | reject | |
 | 401 | error | `http_status` (401) |
 | other non-200, including 3xx | error | `http_status` |
-| timeout (any phase) | error | `timeout` |
+| timeout (any phase) or total deadline passed | error | `timeout` |
 | connection or protocol failure | error | `timeout` (provisional, detail names the error class) |
-| malformed JSON, not an object, missing field, unknown verdict, too large | error | `invalid_body` |
+| malformed JSON, not an object, missing field, unknown verdict, too large, compressed or unknown encoding, `approve` with triggered rules | error | `invalid_body` |
 | `commandId`, `planId` or `planHash` mismatch | error | `invalid_body` |
 | configuration missing or unusable | error | `timeout` (provisional, see above) |
 

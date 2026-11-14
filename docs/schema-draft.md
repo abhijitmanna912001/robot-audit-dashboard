@@ -305,6 +305,9 @@ Example (the reason text is illustrative):
 **recomputed** from the received `actions`, never the value the caller supplied. It is omitted
 only when the hash could not be computed (`plan_hash_error`).
 `triggeredRules` lists every rule that fired (all violations are reported, not just the first).
+An `approve` verdict always has `triggeredRules: []` (the critic approves only when no rule
+fired). The worker treats an `approve` with any triggered rule as an invalid body (critic
+`error`, kind `invalid_body`), never as an approval or a reject.
 The critic ids are lowercase snake_case and are **separate from the validator's rule ids**
 (`UNKNOWN_JOINT` and so on). The three marked agreed are fixed; the rest are the deterministic
 critic's rules.

@@ -7,14 +7,20 @@ call order is asserted. The network guard is active in every test.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
+import time
 import unittest
 from typing import Any
 from unittest import mock
 
+import httpx
+
 import command_processor
+import critic_client
 from audit_store import InvalidPayloadError, StateConflictError, WriteError
+from config import CriticSettings
 from command_processor import (
     STAGE_CRITIC_EVENT_WRITE,
     STAGE_EVENT_WRITE,
@@ -42,6 +48,12 @@ from tests.test_command_processor import (
     command_row,
     critic_returning,
 )
+
+from tests.test_critic_client import FakeClock, TrackingStream, split
+
+# The real HTTP critic client, captured before any test patches it. Only ever
+# called here with an httpx.MockTransport.
+REAL_REVIEW_PLAN = critic_client.review_plan
 
 PLAN_ID = "9d2e4a10-0000-4000-8000-000000000002"
 VALID_TEXT = "set joint _1 to 0.25 rad"
@@ -495,6 +507,102 @@ class PersistenceFailureTests(OrchestrationTestCase):
             STAGE_CRITIC_EVENT_WRITE, STAGE_STATUS_UPDATE,
         }
         self.assertEqual(len(stages), 5)
+
+
+class CriticDeadlineThroughProcessorTests(OrchestrationTestCase):
+    """A critic call that runs past its total deadline never approves anything."""
+
+    def use_slow_real_critic(self, verdict: str = "approve") -> None:
+        clock = FakeClock()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            data = json.dumps(
+                {
+                    "commandId": body["commandId"],
+                    "planId": body["planId"],
+                    "planHash": hash_actions(body["actions"]),
+                    "verdict": verdict,
+                    "reason": "ok" if verdict == "approve" else "Action a1: outside the limits.",
+                    "triggeredRules": [] if verdict == "approve" else ["joint_limit_exceeded"],
+                }
+            ).encode()
+            # The body trickles in: 0.5 s per 8-byte chunk, well past 10 s.
+            return httpx.Response(200, stream=TrackingStream(split(data, 8), clock, step=0.5))
+
+        settings = CriticSettings(url="https://critic.test/api/critic", shared_secret="test-secret-not-real")
+        self.calls.review_plan.side_effect = lambda request, **_: REAL_REVIEW_PLAN(
+            request, settings=settings, transport=httpx.MockTransport(handler), clock=clock
+        )
+
+    def test_late_approval_is_an_error_and_the_command_fails(self) -> None:
+        self.use_slow_real_critic("approve")
+        result = process_one_command(WORKER_ID)
+        self.assertEqual(result.critic_outcome, "error")
+        self.assertEqual(result.final_status, "failed")
+        self.assertEqual(self.status(), "failed")
+        payload = self.event("critic_result")
+        self.assertEqual(payload["outcome"], "error")
+        self.assertEqual(payload["error"]["kind"], "timeout")
+        self.assertNotIn("test-secret-not-real", json.dumps(self.events()))
+
+    def test_validator_rejection_still_wins_over_a_critic_timeout(self) -> None:
+        self.use_text(OUT_OF_RANGE_TEXT)
+        self.use_slow_real_critic("reject")
+        result = process_one_command(WORKER_ID)
+        self.assertEqual(
+            (result.validator_outcome, result.critic_outcome, result.final_status),
+            ("fail", "error", "rejected"),
+        )
+
+    def use_hanging_real_critic(self, deadline: float = 0.3) -> dict[str, int]:
+        """The real client with a critic whose headers never arrive in time."""
+        calls = {"requests": 0}
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            calls["requests"] += 1
+            await asyncio.sleep(30)
+            return httpx.Response(500)
+
+        settings = CriticSettings(url="https://critic.test/api/critic", shared_secret="test-secret-not-real")
+        self.calls.review_plan.side_effect = lambda request, **_: REAL_REVIEW_PLAN(
+            request, settings=settings, transport=httpx.MockTransport(handler), deadline_seconds=deadline
+        )
+        return calls
+
+    def test_validator_pass_and_critic_deadline_cancelled_is_failed(self) -> None:
+        calls = self.use_hanging_real_critic()
+        start = time.monotonic()
+        result = process_one_command(WORKER_ID)
+        self.assertLess(time.monotonic() - start, 3.0)  # cancelled, not 30 s
+        self.assertEqual(
+            (result.validator_outcome, result.critic_outcome, result.final_status),
+            ("pass", "error", "failed"),
+        )
+        self.assertEqual(self.status(), "failed")
+        self.assertEqual(self.event("critic_result")["error"]["kind"], "timeout")
+        self.assertEqual(calls["requests"], 1)  # no retry
+        self.assertEqual(self.call_names(), SUCCESS_ORDER)
+
+    def test_validator_fail_and_critic_deadline_cancelled_is_rejected(self) -> None:
+        self.use_text(OUT_OF_RANGE_TEXT)
+        calls = self.use_hanging_real_critic()
+        result = process_one_command(WORKER_ID)
+        self.assertEqual(
+            (result.validator_outcome, result.critic_outcome, result.final_status),
+            ("fail", "error", "rejected"),
+        )
+        self.assertEqual(self.status(), "rejected")
+        self.assertEqual(calls["requests"], 1)
+
+    def test_approve_with_triggered_rules_through_the_processor_fails(self) -> None:
+        self.use_critic("approve", triggeredRules=["joint_limit_exceeded"])
+        result = process_one_command(WORKER_ID)
+        self.assertEqual(result.critic_outcome, "error")
+        self.assertEqual(self.status(), "failed")
+        self.assertEqual(
+            self.event("critic_result")["error"]["detail"], "an approve verdict has triggered rules"
+        )
 
 
 class RehearsalTests(OrchestrationTestCase):
