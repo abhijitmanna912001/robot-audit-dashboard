@@ -97,6 +97,7 @@ from simulation_gates import (
     live_simulation_blockers,
     require_first_rehearsal_plan,
     revalidate_against_shared_limits,
+    twin_gate_blockers,
 )
 from simulation_payloads import (
     MAX_TEXT_LENGTH,
@@ -211,14 +212,15 @@ def process_one_simulation_command(
 
     ``twin`` implements ``simulation_executor.SimulationTwin`` and is required:
     there is no default and no Cyberwave implementation (tests pass a fake). If
-    its gates are not all confirmed, ``SimulationBlockedError`` is raised BEFORE
-    anything is claimed. ``timeouts`` may only be tightened.
+    its ``confirmations`` are not the canonical ``CYBERWAVE_GATES`` object (exact
+    type and identity) with every gate confirmed, ``SimulationBlockedError`` is
+    raised BEFORE anything is claimed. ``timeouts`` may only be tightened.
 
     Raises whatever the claim raises, ``CommandProcessingError`` for a failed
     write in the decision part, and ``SimulationProcessingError`` for one in the
     simulation lifecycle.
     """
-    blockers = live_simulation_blockers(getattr(twin, "confirmations", None))
+    blockers = twin_gate_blockers(twin)
     if blockers:
         raise SimulationBlockedError("; ".join(blockers))
     if not isinstance(timeouts, Timeouts):
@@ -277,7 +279,7 @@ def _verify_approval(approved: Any) -> PlanSnapshot:
 def _preflight(approved: ApprovedPlan, twin: Any) -> None:
     snapshot = _verify_approval(approved)
     action = require_first_rehearsal_plan(snapshot)
-    blockers = live_simulation_blockers(getattr(twin, "confirmations", None))
+    blockers = twin_gate_blockers(twin)
     if blockers:
         raise GateError("gate_unconfirmed", f"movement is blocked: {blockers[0]}")
     revalidate_against_shared_limits(snapshot.plan_id, [action])

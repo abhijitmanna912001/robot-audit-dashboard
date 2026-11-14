@@ -22,7 +22,9 @@ The sequence (``run_rehearsal``), for the one permitted plan (joint ``_1`` to
 
 1. re-hash the approved ``PlanSnapshot`` and re-check the first-rehearsal
    restriction (the command text is never read);
-2. require every live-simulation gate of the twin to be confirmed;
+2. require the twin to carry the canonical ``CYBERWAVE_GATES`` object itself
+   (exact type and identity, ``simulation_gates.twin_gate_blockers``) and every
+   gate in it to be confirmed;
 3. connect, then verify the SDK runtime target and the twin target;
 4. read and validate the START positions of all six joints;
 5. re-check the plan and the return target against ``shared/so101-limits.json``;
@@ -40,11 +42,16 @@ including failure recovery, has one total deadline (``Timeouts``).
 On a failure:
 
 * before any movement was sent: no stop is attempted, ``stop = "not_needed"``;
+  a gate refusal always happens here, before anything is connected or sent;
 * after a movement call was started (even if that call raised or hung, since it
-  may still have been sent): the twin's stop method is called ONCE, and the
-  result is ``"confirmed"`` only if it returned ``StopResult(confirmed=True)``;
-  an exception, a timeout or anything else is ``"unconfirmed"``. No further
-  movement is sent: not a retry, and not a return to the start;
+  may still have been sent): the twin's stop method is called at most ONCE, as
+  a best effort, even if the twin's confirmations no longer pass the canonical
+  gate check. It is not called if the stop deadline has already passed. The
+  result is ``"confirmed"`` only if the canonical gates were valid before and
+  after the call AND it returned exactly ``StopResult(confirmed=True)``; an
+  exception, a timeout, invalid gates or anything else is ``"unconfirmed"``.
+  The stop is never retried. No further movement is sent: not a retry, and not
+  a return to the start;
 * ``last_telemetry`` is set only from a reading that validated: one fresh read
   after a movement failure, or the start reading when nothing had moved.
 
@@ -74,11 +81,11 @@ from simulation_gates import (
     FIRST_REHEARSAL_TARGET_RAD,
     GateError,
     LiveSimulationGates,
-    live_simulation_blockers,
     load_shared_limits,
     require_first_rehearsal_plan,
     require_within_shared_limits,
     revalidate_against_shared_limits,
+    twin_gate_blockers,
 )
 from simulation_payloads import (
     JOINT_NAMES,
@@ -176,8 +183,9 @@ class SimulationTwin(Protocol):
     honour its time limit; the sequence also enforces it from outside.
     """
 
-    # The confirmations this implementation relies on. A Cyberwave adapter must
-    # use ``simulation_gates.CYBERWAVE_GATES`` itself, never a copy.
+    # The confirmations this implementation relies on. It must BE
+    # ``simulation_gates.CYBERWAVE_GATES`` (identity is checked); a copy or the
+    # twin's own instance is refused, whatever its fields say.
     confirmations: LiveSimulationGates
 
     def connect(self, timeout_s: float) -> None:
@@ -278,6 +286,7 @@ class _Rehearsal:
         self.return_dispatched = False
         self.start: JointSnapshot | None = None
         self.connect_attempted = False
+        self.stop_attempted = False  # the stop method is called at most once
 
     # -- time-limited calls --------------------------------------------------
 
@@ -346,8 +355,7 @@ class _Rehearsal:
     # -- steps ---------------------------------------------------------------
 
     def _require_gates(self) -> None:
-        gates = getattr(self.twin, "confirmations", None)
-        blockers = live_simulation_blockers(gates)
+        blockers = twin_gate_blockers(self.twin)
         if blockers:
             raise _Abort("gate_unconfirmed", f"movement is blocked: {blockers[0]}")
 
@@ -451,15 +459,36 @@ class _Rehearsal:
     # -- failure recovery ----------------------------------------------------
 
     def _attempt_stop(self) -> str:
-        """Call the twin's stop ONCE. ``confirmed`` only on the documented success."""
+        """Best-effort stop after a dispatch: at most ONE call, never retried.
+
+        Only reached once a movement call was started (``_failure`` and the
+        interruption path check ``target_dispatched``). The call is made even
+        when the twin's confirmations no longer pass ``twin_gate_blockers``: a
+        movement may be under way, and trying to stop it costs nothing. Those
+        gates only decide whether the answer may be believed.
+
+        ``confirmed`` requires ALL of: the canonical gates valid both before and
+        after the call, and a result of exactly type ``StopResult`` with
+        ``confirmed is True``. Returning without raising is never enough. An
+        expired deadline means no call. Anything else is ``unconfirmed``.
+        """
+        if self.stop_attempted:
+            return STOP_UNCONFIRMED  # never a second call
         budget = min(self.timeouts.stop_s, self.deadline - time.monotonic())
-        if budget <= 0 or live_simulation_blockers(getattr(self.twin, "confirmations", None)):
+        if budget <= 0:
             return STOP_UNCONFIRMED
+        self.stop_attempted = True
+        gates_valid_before = not twin_gate_blockers(self.twin)
         try:
             result = _bounded(lambda: self.twin.stop(budget), budget)
         except (_CallTimeout, Exception):
             return STOP_UNCONFIRMED
-        if isinstance(result, StopResult) and result.confirmed is True:
+        if (
+            gates_valid_before
+            and not twin_gate_blockers(self.twin)
+            and type(result) is StopResult
+            and result.confirmed is True
+        ):
             return STOP_CONFIRMED
         return STOP_UNCONFIRMED
 

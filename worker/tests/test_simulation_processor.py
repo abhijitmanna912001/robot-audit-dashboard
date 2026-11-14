@@ -36,7 +36,7 @@ from command_processor import (
     ProcessResult,
 )
 from plan_snapshot import PlanSnapshot
-from simulation_gates import CYBERWAVE_GATES, load_shared_limits
+from simulation_gates import CYBERWAVE_GATES, LiveSimulationGates, load_shared_limits
 from simulation_payloads import (
     validate_execution_completed,
     validate_execution_failed,
@@ -55,6 +55,7 @@ from tests import net_guard
 from tests.fake_twin import ALL_CONFIRMED, FAST, START, FakeTwin
 from tests.test_audit_store import FakeClient
 from tests.test_command_processor import WORKER_ID, command_row, critic_returning
+from tests.test_simulation_gates import ALL_TRUE, REAL_CYBERWAVE_GATES, use_canonical_gates
 from tests.test_plan_orchestration import (
     OUT_OF_RANGE_TEXT,
     PLAN_ID,
@@ -95,6 +96,17 @@ def imports_of(module: str) -> set[str]:
 
 class SimulationTestCase(OrchestrationTestCase):
     """OrchestrationTestCase plus a fake twin whose calls join the same call order."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # TEST ONLY: the fake twin's ALL_CONFIRMED becomes the canonical object,
+        # so the identity check can pass. Undone after each test.
+        use_canonical_gates(self, ALL_CONFIRMED)
+
+    def use_gates(self, gates: Any) -> None:
+        """Make ``gates`` canonical AND give it to the twin, so its fields are what is tested."""
+        use_canonical_gates(self, gates)
+        self.twin.confirmations = gates
 
     def reset_calls(self) -> None:
         super().reset_calls()
@@ -271,14 +283,14 @@ class GateBlockTests(SimulationTestCase):
         for missing in names:
             with self.subTest(missing=missing):
                 self.reset_calls()
-                self.twin.confirmations = dataclasses.replace(ALL_CONFIRMED, **{missing: False})
+                self.use_gates(dataclasses.replace(ALL_CONFIRMED, **{missing: False}))
                 with self.assertRaises(SimulationBlockedError):
                     self.run_sim()
                 self.assertEqual(self.call_names(), [])
                 self.assert_twin_untouched()
 
     def test_a_twin_using_the_real_cyberwave_gates_is_blocked(self) -> None:
-        self.twin.confirmations = CYBERWAVE_GATES
+        self.use_gates(CYBERWAVE_GATES)  # the real, unpatched object (imported above)
         with self.assertRaises(SimulationBlockedError) as ctx:
             self.run_sim()
         self.assertIn("stop/cancel", str(ctx.exception))
@@ -293,6 +305,54 @@ class GateBlockTests(SimulationTestCase):
         with self.assertRaises(TypeError):
             process_one_simulation_command(WORKER_ID, twin=self.twin, timeouts=None)  # type: ignore[arg-type]
         self.assertEqual(self.call_names(), [])
+
+
+class CanonicalGateTests(SimulationTestCase):
+    """The twin cannot supply replacement confirmations (processor path)."""
+
+    def assert_blocked_before_the_claim(self, fragment: str) -> None:
+        with self.assertRaises(SimulationBlockedError) as ctx:
+            self.run_sim()
+        self.assertIn(fragment, str(ctx.exception))
+        self.assertEqual(self.call_names(), [])  # no claim, no event, no status
+        self.assert_twin_untouched()
+
+    def test_a_twin_with_its_own_all_true_gates_is_blocked_with_the_real_gates(self) -> None:
+        use_canonical_gates(self, REAL_CYBERWAVE_GATES)  # production state: all False
+        self.twin.confirmations = LiveSimulationGates(**ALL_TRUE)
+        self.assert_blocked_before_the_claim("not the canonical")
+
+    def test_an_equal_all_true_copy_is_blocked_even_when_canonical_is_all_true(self) -> None:
+        copy = LiveSimulationGates(**ALL_TRUE)
+        self.assertEqual(copy, ALL_CONFIRMED)
+        self.twin.confirmations = copy
+        self.assert_blocked_before_the_claim("not the canonical")
+
+    def test_a_different_all_false_instance_is_blocked(self) -> None:
+        use_canonical_gates(self, REAL_CYBERWAVE_GATES)
+        self.twin.confirmations = LiveSimulationGates()
+        self.assert_blocked_before_the_claim("not the canonical")
+
+    def test_missing_confirmations_are_blocked(self) -> None:
+        del self.twin.confirmations
+        self.assert_blocked_before_the_claim("carries no live-simulation gates")
+
+    def test_an_incorrect_confirmations_type_is_blocked(self) -> None:
+        class Subclass(LiveSimulationGates):
+            pass
+
+        for value in (dict(ALL_TRUE), types.SimpleNamespace(**ALL_TRUE), Subclass(**ALL_TRUE)):
+            with self.subTest(value=type(value).__name__):
+                self.reset_calls()
+                self.twin.confirmations = value
+                self.assert_blocked_before_the_claim("not a LiveSimulationGates object")
+
+    def test_the_canonical_object_itself_is_accepted(self) -> None:
+        import simulation_gates
+
+        self.assertIs(self.twin.confirmations, simulation_gates.CYBERWAVE_GATES)
+        self.assertEqual(self.run_sim().execution, "completed")
+        self.assertEqual(self.twin.names(), TWIN_SUCCESS)
 
 
 # --------------------------------------------------------------------------
@@ -539,8 +599,16 @@ class ApprovalReverificationTests(SimulationTestCase):
 
     def test_gates_are_rechecked_inside_the_lifecycle(self) -> None:
         approved = self.approved()
-        self.twin.confirmations = dataclasses.replace(ALL_CONFIRMED, stop_method_confirmed=False)
+        self.use_gates(dataclasses.replace(ALL_CONFIRMED, stop_method_confirmed=False))
         self.assert_refused(approved, kind="gate_unconfirmed")
+
+    def test_own_gates_swapped_in_after_the_claim_are_refused_inside_the_lifecycle(self) -> None:
+        approved = self.approved()  # passed the pre-claim check with the canonical object
+        for value in (LiveSimulationGates(**ALL_TRUE), LiveSimulationGates(), None):
+            with self.subTest(value=type(value).__name__):
+                self.twin.calls.clear()
+                self.twin.confirmations = value
+                self.assert_refused(approved, kind="gate_unconfirmed")
 
 
 # --------------------------------------------------------------------------

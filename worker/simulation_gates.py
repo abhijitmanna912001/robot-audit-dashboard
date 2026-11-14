@@ -46,6 +46,7 @@ __all__ = [
     "require_first_rehearsal_plan",
     "require_within_shared_limits",
     "revalidate_against_shared_limits",
+    "twin_gate_blockers",
 ]
 
 # The one and only execution target. Not configurable.
@@ -126,6 +127,42 @@ def live_simulation_blockers(gates: Any = CYBERWAVE_GATES) -> tuple[str, ...]:
     if not isinstance(gates, LiveSimulationGates):
         return ("the live-simulation gates are missing or not recognised",)
     return tuple(_GATE_TEXT[name] for name in gates.unconfirmed())
+
+
+_TWIN_GATES_MISSING = "the twin carries no live-simulation gates"
+_TWIN_GATES_WRONG_TYPE = "the twin's live-simulation gates are not a LiveSimulationGates object"
+_TWIN_GATES_NOT_CANONICAL = (
+    "the twin's live-simulation gates are not the canonical simulation_gates.CYBERWAVE_GATES"
+)
+
+
+def twin_gate_blockers(twin: Any) -> tuple[str, ...]:
+    """Why movement through ``twin`` is blocked. Empty only when nothing blocks it.
+
+    A twin cannot supply its own confirmations. All three must hold, otherwise
+    the twin is refused without looking at what its object claims:
+
+    1. ``twin.confirmations`` exists (reading it may not raise);
+    2. ``type(twin.confirmations) is LiveSimulationGates`` (no subclass);
+    3. ``twin.confirmations is CYBERWAVE_GATES``: the very object in this
+       module. Identity, not equality: an equal copy, or a twin's own all-True
+       instance, is refused.
+
+    Only then are the entries of the canonical object itself checked. The
+    executor and the processor both call this, so they enforce one rule.
+    ``CYBERWAVE_GATES`` is looked up when this runs; production code has no way
+    to replace it (that is a reviewed edit of this file).
+    """
+    try:
+        gates = twin.confirmations
+    except Exception:
+        return (_TWIN_GATES_MISSING,)
+    canonical = CYBERWAVE_GATES
+    if type(gates) is not LiveSimulationGates or type(canonical) is not LiveSimulationGates:
+        return (_TWIN_GATES_WRONG_TYPE,)
+    if gates is not canonical:
+        return (_TWIN_GATES_NOT_CANONICAL,)
+    return live_simulation_blockers(canonical)
 
 
 # --------------------------------------------------------------------------

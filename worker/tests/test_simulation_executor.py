@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import time
+import types
 import unittest
 from typing import Any
 from unittest import mock
@@ -25,7 +26,13 @@ from simulation_executor import (
 )
 from simulation_gates import LiveSimulationGates, load_shared_limits
 from tests.fake_twin import ALL_CONFIRMED, FAST, HANG, START, FakeTwin
-from tests.test_simulation_gates import action, snapshot
+from tests.test_simulation_gates import (
+    ALL_TRUE,
+    REAL_CYBERWAVE_GATES,
+    action,
+    snapshot,
+    use_canonical_gates,
+)
 
 SUCCESS_CALLS = [
     "connect",
@@ -45,8 +52,16 @@ DEFAULT_PLAN: Any = object()  # sentinel: "use the permitted first-rehearsal pla
 
 class ExecutorCase(unittest.TestCase):
     def setUp(self) -> None:
+        # TEST ONLY: the fake twin's ALL_CONFIRMED becomes the canonical object,
+        # so the identity check can pass. Undone after each test.
+        use_canonical_gates(self, ALL_CONFIRMED)
         self.twin = FakeTwin()
         self.addCleanup(self.twin.release.set)  # let any hung fake call finish
+
+    def use_gates(self, gates: LiveSimulationGates) -> None:
+        """Make ``gates`` canonical AND give it to the twin, so its fields are what is tested."""
+        use_canonical_gates(self, gates)
+        self.twin.confirmations = gates
 
     def run_it(self, snap: Any = DEFAULT_PLAN, timeouts: Timeouts = FAST) -> Any:
         started = time.monotonic()
@@ -144,21 +159,21 @@ class GateTests(ExecutorCase):
         for missing in names:
             with self.subTest(missing=missing):
                 self.twin = FakeTwin()
-                self.twin.confirmations = LiveSimulationGates(**{n: n != missing for n in names})
+                self.use_gates(LiveSimulationGates(**{n: n != missing for n in names}))
                 outcome = self.failure("gate_unconfirmed")
                 self.assertEqual(self.twin.calls, [])
                 self.assert_nothing_sent(outcome)
 
     def test_no_movement_when_the_cancellation_method_is_unconfirmed(self) -> None:
-        self.twin.confirmations = dataclasses.replace(ALL_CONFIRMED, stop_method_confirmed=False)
+        self.use_gates(dataclasses.replace(ALL_CONFIRMED, stop_method_confirmed=False))
         outcome = self.failure("gate_unconfirmed")
         self.assertIn("stop/cancel", outcome.detail)
         self.assertEqual(self.twin.calls, [])
 
     def test_no_movement_with_the_real_cyberwave_gates(self) -> None:
-        from simulation_gates import CYBERWAVE_GATES
+        CYBERWAVE_GATES = REAL_CYBERWAVE_GATES  # the unpatched, all-False object
 
-        self.twin.confirmations = CYBERWAVE_GATES
+        self.use_gates(CYBERWAVE_GATES)
         self.failure("gate_unconfirmed")
         self.assertEqual(self.twin.calls, [])
 
@@ -169,6 +184,70 @@ class GateTests(ExecutorCase):
                 self.twin.confirmations = value
                 self.failure("gate_unconfirmed")
                 self.assertEqual(self.twin.calls, [])
+
+
+class CanonicalGateTests(ExecutorCase):
+    """The twin cannot supply replacement confirmations (executor path)."""
+
+    def assert_refused_before_anything(self, fragment: str) -> None:
+        outcome = self.failure("gate_unconfirmed")
+        self.assertIn(fragment, outcome.detail)
+        self.assertEqual(self.twin.calls, [])  # not even a connection
+        self.assert_nothing_sent(outcome)
+
+    def test_a_twin_with_its_own_all_true_gates_is_refused_with_the_real_gates(self) -> None:
+        use_canonical_gates(self, REAL_CYBERWAVE_GATES)  # production state: all False
+        self.twin.confirmations = LiveSimulationGates(**ALL_TRUE)
+        self.assert_refused_before_anything("not the canonical")
+
+    def test_an_equal_all_true_copy_is_refused_even_when_canonical_is_all_true(self) -> None:
+        copy = LiveSimulationGates(**ALL_TRUE)
+        self.assertEqual(copy, ALL_CONFIRMED)  # equal to the (patched) canonical object
+        self.twin.confirmations = copy
+        self.assert_refused_before_anything("not the canonical")
+
+    def test_a_different_all_false_instance_is_refused(self) -> None:
+        use_canonical_gates(self, REAL_CYBERWAVE_GATES)
+        self.twin.confirmations = LiveSimulationGates()
+        self.assert_refused_before_anything("not the canonical")
+
+    def test_missing_confirmations_are_refused(self) -> None:
+        del self.twin.confirmations
+        self.assertFalse(hasattr(self.twin, "confirmations"))
+        self.assert_refused_before_anything("carries no live-simulation gates")
+
+    def test_an_incorrect_confirmations_type_is_refused(self) -> None:
+        class Subclass(LiveSimulationGates):
+            pass
+
+        for value in (dict(ALL_TRUE), types.SimpleNamespace(**ALL_TRUE), Subclass(**ALL_TRUE)):
+            with self.subTest(value=type(value).__name__):
+                self.twin = FakeTwin()
+                self.twin.confirmations = value
+                self.assert_refused_before_anything("not a LiveSimulationGates object")
+
+    def test_the_canonical_object_itself_is_accepted(self) -> None:
+        import simulation_gates
+
+        self.assertIs(self.twin.confirmations, simulation_gates.CYBERWAVE_GATES)
+        self.assertIsInstance(self.run_it(), RehearsalSuccess)
+        self.assertEqual(self.twin.names(), SUCCESS_CALLS)
+
+    def test_swapping_in_own_gates_after_the_movement_cannot_confirm_the_stop(self) -> None:
+        # After a dispatch the stop is still tried once (best effort), but a twin
+        # that replaced its confirmations can never get a "confirmed" stop, even
+        # though its stop method returns StopResult(confirmed=True).
+        def swap(name: str) -> None:
+            if name == "move_joint":
+                self.twin.confirmations = LiveSimulationGates(**ALL_TRUE)
+
+        self.twin.recorder = swap
+        self.twin.ignore_moves = {1}
+        self.assertEqual(self.twin.stop_result, StopResult(confirmed=True))
+        outcome = self.failure("target_timeout")
+        self.assertEqual(outcome.stop, "unconfirmed")
+        self.assertEqual(self.twin.names().count("stop"), 1)  # tried exactly once
+        self.assertEqual(self.twin.moves(), [("_1", 0.25)])  # no return movement either
 
 
 class SimulationOnlyTests(ExecutorCase):
@@ -469,6 +548,101 @@ class StopTests(ExecutorCase):
         self.twin.fail_move_number[1] = RuntimeError("x")
         self.twin.fail_read_number[2] = RuntimeError("read failed")
         self.assertIsNone(self.failure("dispatch_failed").last_telemetry)
+
+    def test_a_gate_failure_before_dispatch_does_not_call_stop(self) -> None:
+        for name, value in {
+            "own all-true gates": LiveSimulationGates(**ALL_TRUE),
+            "an unconfirmed gate": dataclasses.replace(ALL_CONFIRMED, stop_method_confirmed=False),
+            "no gates": None,
+        }.items():
+            with self.subTest(case=name):
+                self.twin = FakeTwin()
+                if name == "an unconfirmed gate":
+                    self.use_gates(value)
+                else:
+                    self.twin.confirmations = value
+                outcome = self.failure("gate_unconfirmed")
+                self.assertEqual(outcome.stop, "not_needed")
+                self.assertEqual(self.twin.calls, [])  # no connect, no move, no stop
+
+    def test_a_post_dispatch_gate_failure_attempts_stop_exactly_once(self) -> None:
+        for name, value in {
+            "own all-true gates": LiveSimulationGates(**ALL_TRUE),
+            "an equal copy": dataclasses.replace(ALL_CONFIRMED),
+            "no gates": None,
+        }.items():
+            with self.subTest(case=name):
+                self.twin = FakeTwin()
+                self.addCleanup(self.twin.release.set)
+
+                def swap(call: str, twin: FakeTwin = self.twin, value: Any = value) -> None:
+                    if call == "move_joint":
+                        twin.confirmations = value
+
+                self.twin.recorder = swap
+                self.twin.ignore_moves = {1}
+                outcome = self.failure("target_timeout")
+                self.assertEqual(self.twin.names().count("stop"), 1)
+                self.assertEqual(outcome.stop, "unconfirmed")
+                self.assertEqual(len(self.twin.moves()), 1)
+
+    def test_gates_invalidated_during_the_stop_call_are_unconfirmed(self) -> None:
+        def swap(call: str) -> None:
+            if call == "stop":
+                self.twin.confirmations = LiveSimulationGates(**ALL_TRUE)
+
+        self.twin.recorder = swap
+        self.twin.ignore_moves = {1}
+        outcome = self.failure("target_timeout")
+        self.assertEqual(outcome.stop, "unconfirmed")
+        self.assertEqual(self.twin.names().count("stop"), 1)
+
+    def test_an_expired_stop_budget_does_not_call_stop(self) -> None:
+        original = simulation_executor._Rehearsal._attempt_stop
+
+        def with_expired_deadline(rehearsal: Any) -> str:
+            rehearsal.deadline = time.monotonic() - 1.0  # the total deadline has passed
+            return original(rehearsal)
+
+        self.twin.ignore_moves = {1}
+        with mock.patch.object(simulation_executor._Rehearsal, "_attempt_stop", with_expired_deadline):
+            outcome = self.failure("target_timeout")
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(outcome.stop, "unconfirmed")
+        self.assertNotIn("stop", self.twin.names())
+
+    def test_a_returned_value_is_not_a_confirmation(self) -> None:
+        class LookalikeResult(StopResult):
+            pass
+
+        for name, result in {
+            "subclass claiming confirmed": LookalikeResult(confirmed=True),
+            "returned without raising": None,
+            "confirmed int": StopResult(confirmed=1),  # type: ignore[arg-type]
+        }.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.stop_after_failed_target(result).stop, "unconfirmed")
+                self.assertEqual(self.twin.names().count("stop"), 1)
+
+    def test_the_stop_is_never_retried(self) -> None:
+        for name, behaviour in {
+            "confirmed": StopResult(confirmed=True),
+            "unconfirmed": StopResult(confirmed=False),
+            "raises": RuntimeError("connection lost"),
+        }.items():
+            with self.subTest(case=name):
+                twin = FakeTwin()
+                if isinstance(behaviour, BaseException):
+                    twin.fail["stop"] = behaviour
+                else:
+                    twin.stop_result = behaviour
+                rehearsal = simulation_executor._Rehearsal(snapshot(), twin, FAST)
+                rehearsal.target_dispatched = True
+                first = rehearsal._attempt_stop()
+                second = rehearsal._attempt_stop()  # a second request makes no call
+                self.assertEqual(twin.names().count("stop"), 1)
+                self.assertEqual(second, "unconfirmed")
+                self.assertEqual(first, "confirmed" if name == "confirmed" else "unconfirmed")
 
     def test_an_interruption_after_dispatch_tries_the_stop_once_and_propagates(self) -> None:
         self.twin.fail_move_number[1] = KeyboardInterrupt()
