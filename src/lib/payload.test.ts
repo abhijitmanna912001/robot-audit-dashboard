@@ -75,14 +75,14 @@ test("readPlan caps the action list", () => {
 test("readValidator reads outcome, version, errors with null plan-level fields", () => {
   const v = readValidator({
     outcome: "fail",
-    validatorVersion: "0.1.0",
+    validatorVersion: "1.0",
     errors: [
       { ruleId: "UNKNOWN_JOINT", actionId: "a1", field: "target", message: "m" },
       { ruleId: "MAX_ACTIONS_EXCEEDED", actionId: null, field: null, message: "too many" },
     ],
   });
   assert.equal(v.outcome, "fail");
-  assert.equal(v.validatorVersion, "0.1.0");
+  assert.equal(v.validatorVersion, "1.0");
   assert.equal(v.errors.length, 2);
   assert.equal(v.errors[1].actionId, null);
 });

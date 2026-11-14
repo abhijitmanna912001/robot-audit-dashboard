@@ -2,7 +2,10 @@
 
 Pure functions. Nothing here sends an HTTP request: the caller makes the call
 and hands the status code and parsed body to ``evaluate_critic_response``.
-The HTTP client itself is not implemented yet.
+The HTTP client is ``critic_client.py``; it judges every response here.
+
+Only the agreed verdict fields of a response, length-capped, are kept in
+a decision (``sanitize_response``): the ``critic_result`` payload is public.
 
 Contract: docs/schema-draft.md on main, "Critic contract", "Plan hash
 contract" and section 6 "Fail-closed rule". The worker may treat a plan as
@@ -12,6 +15,7 @@ approved by the critic only if ALL of these hold:
 * the body is a valid critic verdict
 * ``commandId``, ``planId`` and ``planHash`` in the response equal the request
 * ``verdict`` is ``"approve"``
+* ``triggeredRules`` is an empty list (an approval with rules is ``invalid_body``)
 
 Anything else is not an approval. In particular a response whose ``planHash``
 differs from the request is a protocol-integrity failure and is recorded as
@@ -39,6 +43,50 @@ ERROR = "error"
 ERROR_KINDS = frozenset({"http_status", "timeout", "invalid_body"})
 MAX_DETAIL_LENGTH = 200
 
+# What of a critic response body is copied into the critic_result payload,
+# which anyone with the anon key can read. Only the agreed verdict fields
+# (docs/schema-draft.md, "Critic verdict"), each length-capped. Secret
+# redaction is added by critic_client: this module stays pure and imports no
+# configuration.
+# Any other field the critic returns is dropped.
+MAX_REASON_LENGTH = 200
+MAX_TRIGGERED_RULES = 20
+MAX_RULE_LENGTH = 64
+MAX_ID_LENGTH = 100
+_RESPONSE_STRING_FIELDS = (
+    ("commandId", MAX_ID_LENGTH),
+    ("planId", MAX_ID_LENGTH),
+    ("planHash", MAX_ID_LENGTH),
+    ("verdict", MAX_ID_LENGTH),
+    ("reason", MAX_REASON_LENGTH),
+)
+
+
+def _safe_text(value: str, limit: int) -> str:
+    return value[:limit]
+
+
+def sanitize_response(body: dict[str, Any]) -> dict[str, Any]:
+    """The part of a critic response body that may be stored in an audit event.
+
+    Keeps only the agreed verdict fields that have the agreed type. Strings are
+    capped (``reason`` at ``MAX_REASON_LENGTH``), and
+    ``triggeredRules`` keeps at most ``MAX_TRIGGERED_RULES`` strings.
+    """
+    safe: dict[str, Any] = {}
+    for field, limit in _RESPONSE_STRING_FIELDS:
+        value = body.get(field)
+        if isinstance(value, str):
+            safe[field] = _safe_text(value, limit)
+    rules = body.get("triggeredRules")
+    if isinstance(rules, list):
+        safe["triggeredRules"] = [
+            _safe_text(rule, MAX_RULE_LENGTH)
+            for rule in rules[:MAX_TRIGGERED_RULES]
+            if isinstance(rule, str)
+        ]
+    return safe
+
 # Internal classification of a decision, so that worker code and tests can tell
 # the cases apart. These strings are NOT part of the audit payload and are not
 # an external contract.
@@ -52,6 +100,7 @@ CATEGORY_MALFORMED_RESPONSE = "malformed_response"
 CATEGORY_COMMAND_ID_MISMATCH = "command_id_mismatch"
 CATEGORY_PLAN_ID_MISMATCH = "plan_id_mismatch"
 CATEGORY_PLAN_HASH_MISMATCH = "plan_hash_mismatch"
+CATEGORY_NOT_SENT = "not_sent"  # no request was made (configuration missing or unusable)
 
 
 @dataclass(frozen=True)
@@ -157,6 +206,21 @@ def critic_network_failure(detail: str | None = None) -> CriticDecision:
     return _error(CATEGORY_NETWORK_ERROR, "timeout", text)
 
 
+def critic_not_sent(detail: str) -> CriticDecision:
+    """An ``error`` decision for a critic request that was never sent.
+
+    For example ``CRITIC_URL`` or ``CRITIC_SHARED_SECRET`` is missing, or the
+    URL is unusable. The critic gave no verdict, so this is an error, never a
+    skip and never an approval.
+
+    PROVISIONAL payload, for the same reason as ``critic_network_failure``: the
+    contract has no error kind for "no request was sent". It writes kind
+    ``timeout`` (no response arrived) and states the real cause in ``detail``.
+    The internal category is ``not_sent``.
+    """
+    return _error(CATEGORY_NOT_SENT, "timeout", f"critic request not sent: {detail}")
+
+
 def evaluate_critic_response(request: CriticRequest, http_status: Any, body: Any) -> CriticDecision:
     """Decide what a critic response means for ``request``. Never raises."""
     try:
@@ -201,7 +265,7 @@ def _evaluate(request: CriticRequest, http_status: Any, body: Any) -> CriticDeci
             "planHash in the response does not match the request",
             http_status=200,
             plan_hash=request.plan_hash,
-            response=dict(body),
+            response=sanitize_response(body),
         )
 
     # From here the ids match and the hash, if present, is ours.
@@ -212,7 +276,7 @@ def _evaluate(request: CriticRequest, http_status: Any, body: Any) -> CriticDeci
         command_id=request.command_id,
         plan_id=request.plan_id,
         plan_hash=body.get("planHash"),
-        response=dict(body),
+        response=sanitize_response(body),
     )
 
 
@@ -232,4 +296,9 @@ def _verdict_shape_problem(body: Any) -> str | None:
         return "planHash is not a string"
     if body["verdict"] == APPROVE and "planHash" not in body:
         return "an approve verdict has no planHash"
+    if body["verdict"] == APPROVE and rules:
+        # The critic approves only when no rule fired (src/app/api/critic/route.ts
+        # returns triggeredRules: [] with every approval). A contradictory body is
+        # invalid, never an approval and never an ordinary reject.
+        return "an approve verdict has triggered rules"
     return None

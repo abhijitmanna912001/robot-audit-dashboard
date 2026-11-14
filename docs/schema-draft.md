@@ -14,7 +14,11 @@ marked **DECIDED**.
 
 - the AI critic's remaining rule ids for a future AI critic (section 8, question 6). The
   deterministic critic's rule ids are defined, see "Critic verdict" in section 4
-- the `validatorVersion` format (section 8)
+- a `validator_result` shape for a validator error, and a critic error kind for "no request
+  sent" (section 8, questions 9 and 10)
+
+The `validatorVersion` format is decided: the plain string `"1.0"` (section 4, "Validator
+result").
 
 **Resolved:** the action vocabulary (`set_joint` only), the SO-101 joint names and limits, and the
 unit (`rad`). See "Action vocabulary" in section 4.
@@ -149,9 +153,14 @@ Event type to status, for reference:
 | `plan_generated` with `outcome: "error"` | `failed` (`received -> failed`). No plan was generated. |
 | `validator_result` / `critic_result` | unchanged until both are in. Then `approved`, or `rejected` if either returned a `fail` or `reject` verdict, even if the other check errored. |
 | `critic_result` with `outcome: "error"` | `failed` (`received -> failed`), only if no check returned a `fail` or `reject` verdict. The critic gave no verdict. |
-| `execution_started` | `executing` |
-| `execution_completed` | `completed` |
-| `execution_failed` | `failed` |
+| `execution_started` | `executing` (`approved -> executing`), only after the event is written. The dry run runs only after this update succeeded. |
+| `execution_completed` | `completed` (`executing -> completed`), only after the event is written. |
+| `execution_failed` | `failed`, only after the event is written, from the status the worker knows the command has: `approved -> failed` when the dry run never started (`execution_started` not written, or `approved -> executing` not applied), `executing -> failed` when the dry run itself failed. If that status is not known (the command changed meanwhile), the status is left alone for manual recovery. |
+
+Each status change above is conditional on the expected current status (section 1), and the
+event is always written first: if the event insert fails, the status is not changed. Nothing is
+retried, no event is written twice, and the dry run never runs twice
+(`worker/command_processor.py`, `worker/README.md` "Manual recovery").
 
 ### Design choices
 
@@ -232,8 +241,12 @@ verdict, the validator result and every execution event for that plan.
 - The limits live in one shared file, **`shared/so101-limits.json`**, which the TypeScript critic
   reads. They are copied from `docs/robot-capabilities.md` section 6 and
   `worker/robot_profile.py` holds the same numbers (checked equal). Change all three together.
-- A plan has at most **10 actions** (`MAX_ACTIONS` in `src/app/api/critic/route.ts`). A joint may
-  be targeted by only one action per plan, and there are six joints, so a valid plan has at most
+- A plan has at most **10 actions**. The number is `"maxActions"` in `shared/so101-limits.json`,
+  which the critic reads (`MAX_ACTIONS` in `src/lib/so101-limits.ts`). `worker/robot_profile.py`
+  holds the same value as `SO101_PROFILE.max_actions`, which both the Python planner and validator
+  read; Python and TypeScript tests fail if the values differ or are not 10. A joint may be
+  targeted by only one action per plan (`DUPLICATE_JOINT_TARGET` in the validator,
+  `duplicate_joint_target` in the critic), and there are six joints, so a valid plan has at most
   six actions. The cap is a guard.
 - These are schema limits, not a verified safe envelope (see `docs/robot-capabilities.md`).
 
@@ -297,6 +310,9 @@ Example (the reason text is illustrative):
 **recomputed** from the received `actions`, never the value the caller supplied. It is omitted
 only when the hash could not be computed (`plan_hash_error`).
 `triggeredRules` lists every rule that fired (all violations are reported, not just the first).
+An `approve` verdict always has `triggeredRules: []` (the critic approves only when no rule
+fired). The worker treats an `approve` with any triggered rule as an invalid body (critic
+`error`, kind `invalid_body`), never as an approval or a reject.
 The critic ids are lowercase snake_case and are **separate from the validator's rule ids**
 (`UNKNOWN_JOINT` and so on). The three marked agreed are fixed; the rest are the deterministic
 critic's rules.
@@ -429,8 +445,8 @@ not need to change, as long as both sides keep producing this hash. It is **not 
 ```
 
 `validatorVersion` is the plain string `"1.0"`, bumped by hand when the rules change. It is not
-semver, a git sha or a date. `worker/safety_validator.py` still has `VALIDATOR_VERSION = "0.1.0"`
-until the worker owner bumps it (**pending in the worker**).
+semver, a git sha or a date. **DECIDED** and implemented: `worker/safety_validator.py` has
+`VALIDATOR_VERSION = "1.0"`.
 
 On `fail`, `outcome` is `"fail"` and `errors` holds one entry per problem:
 
@@ -452,12 +468,12 @@ Validator rule ids, exactly as they appear in `worker/safety_validator.py`:
 | `JOINT_LIMIT_EXCEEDED` | agreed, implemented |
 | `NON_FINITE_VALUE` | agreed, implemented |
 | `UNIT_MISMATCH` | agreed, implemented |
-| `MAX_ACTIONS_EXCEEDED` | agreed; implemented in the code but inactive until the profile sets `max_actions=10` (pending in the worker) |
+| `MAX_ACTIONS_EXCEEDED` | agreed, implemented: `SO101_PROFILE.max_actions = 10`, the same cap as the critic |
 | `INVALID_PLAN` | agreed (documented here): the plan is not an array, is empty, or an action is not an object |
 | `INVALID_FIELD_TYPE` | agreed (documented here): a field has the wrong JSON type |
 | `DUPLICATE_ACTION_ID` | agreed (documented here): an `actionId` is used by an earlier action |
 | `UNEXPECTED_FIELD` | agreed (documented here): a field outside the agreed action shape |
-| `DUPLICATE_JOINT_TARGET` | agreed, pending in the worker (not in the code yet) |
+| `DUPLICATE_JOINT_TARGET` | agreed, implemented: a known joint targeted by an earlier action. Reported on each later action, field `target`. Separate from `DUPLICATE_ACTION_ID` |
 
 Validator rule ids are UPPERCASE. They are separate from the critic's snake_case rule ids
 (section 4, "Critic verdict"), and the AI critic's ids are separate again.
@@ -476,13 +492,24 @@ Validator rule ids are UPPERCASE. They are separate from the critic's snake_case
 | `execution_failed` | `{ "dryRun": boolean, "error": string }` |
 
 `planHash` in `critic_result` is omitted when there is no usable hash to record (for example a
-timeout).
+timeout). The worker stores only the agreed verdict fields in `response` (`commandId`, `planId`,
+`planHash`, `verdict`, `reason` capped at 200 characters, `triggeredRules`); any other field the
+critic returns is dropped.
 
-**Planner error kinds (PROPOSED, to confirm with the worker owner):** `unsupported_command` (the
+**Planner error kinds (DECIDED, implemented in `worker/planner.py`):** `unsupported_command` (the
 command text is not one of the accepted commands, so nothing was evaluated) and `planner_error`
-(any other planner failure). `payload.error.detail` is capped at 200 characters, the same cap the
-worker uses for critic error detail, and contains no secrets and no raw responses. The planner
-error shape above is proposed too (section 6).
+(any other planner failure, for example command text that is not a string or an internal
+planner error). `payload.error.detail` is capped at 200 characters, the same cap the worker uses
+for critic error detail, and contains no secrets and no raw responses. The planner error shape
+above is decided too (section 6). The worker writes the event `message` as `"Command not
+understood: nothing executed"` for `unsupported_command` and `"Planning failed: nothing
+executed"` otherwise. The dashboard summary is derived from `payload.error.kind`, not from the
+message.
+
+The deterministic planner accepts only plain-ASCII commands of the form
+`set joint <_1.._6> to <decimal> rad`, up to 10 clauses separated by `;`. Everything else is
+`unsupported_command`. Joint limits and duplicate joints are not checked by the planner: the
+validator and the critic reject them.
 
 ## 5. Event naming
 
@@ -542,12 +569,13 @@ rejecting verdict.
 
 `rejected` and `failed` are terminal (section 1).
 
-**Proposed, to confirm with the worker owner:** a failure before the critic runs (for example a
-planner error) is recorded as a `plan_generated` event with `outcome: "error"` and
+**DECIDED, implemented in `worker/command_processor.py`:** a failure before the critic runs (for
+example a planner error) is recorded as a `plan_generated` event with `outcome: "error"` and
 `payload.error { kind, detail }`, the same shape used for critic errors, followed by
-`received -> failed`. No new event type is introduced, because event types are part of the applied
-schema. A command the planner does not recognise ends in `failed`, never `rejected`, because no
-plan was evaluated.
+`received -> failed`. The status changes **only after** the event insert has succeeded; if the
+insert fails, the status is not touched. No new event type is introduced, because event types are
+part of the applied schema. A command the planner does not recognise ends in `failed`, never
+`rejected`, because no plan was evaluated.
 
 The order of checks is the worker's call, and it may stop at the first failure. Either way,
 each check that ran gets its own event.
@@ -558,6 +586,16 @@ each check that ran gets its own event.
 are both integrated**. A dry run does not drive the robot simulation. It is logged as normal
 execution events (`execution_started`, then `execution_completed` or `execution_failed`) with
 `dryRun: true` in the payload. Real execution writes `dryRun: false`.
+
+**Implemented (dry run only):** `worker/command_processor.py` runs the dry run for a command whose
+validator passed and whose critic approved, after `received -> approved` was written. Order:
+`execution_started` `{ "dryRun": true }`, `approved -> executing`, the dry run
+(`worker/dry_run.py`: it re-hashes the approved plan snapshot and returns a summary; it sends
+nothing anywhere and never re-reads the command text), `execution_completed`
+`{ "dryRun": true, "summary" }`, `executing -> completed`. Failures write `execution_failed`
+`{ "dryRun": true, "error" }` (see the table in section 2). The worker only ever writes
+`dryRun: true`: there is no real execution path, and no flag, setting or environment variable
+that could create one. Real execution (`dryRun: false`) remains a future, separately agreed step.
 
 ## 7. Row Level Security and Realtime
 
@@ -614,9 +652,20 @@ Notes:
 7. ~~**Hash reference value.**~~ **Closed.** Verified by both sides (section 4, "Hash reference
    test").
 8. ~~**`validatorVersion` format and extra validator ids.**~~ **Closed.** `validatorVersion` is
-   the plain string `"1.0"`, bumped by hand when the rules change (the worker still has `"0.1.0"`,
-   pending). The four extra ids in the code are agreed, and `DUPLICATE_JOINT_TARGET` is agreed and
-   pending in the worker (section 4, "Validator result").
+   the plain string `"1.0"`, bumped by hand when the rules change, and the worker uses it. The
+   four extra ids in the code are agreed, and `DUPLICATE_JOINT_TARGET` is agreed and implemented
+   (section 4, "Validator result").
+9. **Validator error outcome (OPEN, new).** The precedence rule in section 6 has a validator
+   "error" case, but the `validator_result` payload only allows `pass` and `fail`. The validator
+   itself never raises (its internal errors are a `fail`), so this only covers the worker failing
+   to run it. For now the worker writes **no** `validator_result` in that case, still runs the
+   critic, and sets the status by the precedence rule (`rejected` if the critic rejected,
+   otherwise `failed`). Not agreed: whether `validator_result` should get `outcome: "error"` with
+   an `error { kind, detail }`, which the dashboard summary would then also need to read.
+10. **Critic error kind when no request was sent (OPEN, new).** Missing or unusable
+    `CRITIC_URL` / `CRITIC_SHARED_SECRET` is a critic `error` (never a skip, never an approval).
+    No error kind fits; the worker writes `timeout` with `detail` starting `critic request not
+    sent:`, the same provisional choice as for a network error. Not agreed.
 
 ## 9. Known limitations
 
@@ -639,6 +688,24 @@ Accepted for the simulation-only meetup demo.
   Postgres function called through `rpc` would make it atomic later.
 - **Crash recovery is manual.** A claimed-but-abandoned command is restarted by hand, and a
   command is never retried automatically once execution has started (section 3).
+- **A claimed command can be stranded.** The claim has no lease and nothing releases it, so a
+  claimed command stays `received` and is skipped by every later claim if the worker's
+  `plan_generated` insert fails, if a `validator_result` or `critic_result` insert fails, or if
+  the events are written but the final status update fails. The worker changes the status only
+  after every event it needs is written. While a planner-failure event exists but the status is
+  still `received`, the dashboard summary already shows the planner failure. The manual recovery
+  steps are in `worker/README.md`, "Manual recovery". The worker never retries an event insert,
+  because `audit_events` rows cannot be deleted.
+- **Approved commands are only dry-run.** `worker/command_processor.py` takes an approved
+  command through the dry-run lifecycle (section 6) to `completed` or `failed`. Nothing is sent
+  to a robot or a simulation. A dry-run event or status write that fails ambiguously leaves the
+  command `approved` or `executing` for manual recovery (`worker/README.md`).
+- **The worker claims the oldest eligible command.** In a rehearsal, an old unclaimed `received`
+  command is processed before the one just submitted. Check the queue first.
+- **The route insert and a worker claim can interleave.** The worker can claim a command between
+  the route's `commands` insert and its `command_received` insert, so `plan_generated` can sort
+  before `command_received`, and a command whose `command_received` insert failed is still
+  processed.
 - **Test rows in `audit_events` cannot be deleted.** The table is append-only through the
   trigger `audit_events_no_update_delete` (`before update or delete`, row-level, function
   `public.audit_events_block_mutation()`, defined in `db/001_init.sql`). Removing test rows
@@ -647,9 +714,8 @@ Accepted for the simulation-only meetup demo.
   deleted before its events are.
 - **Types.** `src/types/draft.ts` mirrors the action shape above. It has not been updated for
   the new `validator_result` shape or `dryRun`.
-- **The Python validator is looser than the critic.** `worker/robot_profile.py` has
-  `max_actions=None` (no cap) and `worker/safety_validator.py` has no duplicate-joint rule. Both
-  gates must pass, so nothing unsafe gets through, but the two should be aligned (set
-  `max_actions=10`, add a duplicate-target rule).
+- **The Python validator and the critic are aligned on the cap and duplicates.** Both enforce
+  at most 10 actions and one action per joint (`MAX_ACTIONS_EXCEEDED` / `max_actions_exceeded`,
+  `DUPLICATE_JOINT_TARGET` / `duplicate_joint_target`). Their rule ids stay separate.
 - **Whitespace definitions differ slightly.** The validator uses Python `str.strip()`, the critic
   uses JavaScript `trim()`. They differ only for a few control and format characters.

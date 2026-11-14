@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 import math
 import re
 import unittest
@@ -20,6 +21,7 @@ from safety_validator import validate_plan
 PLAN_ID = "9d2e4a10-0000-4000-8000-000000000002"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CAPABILITIES_DOC = REPO_ROOT / "docs" / "robot-capabilities.md"
+SHARED_LIMITS = REPO_ROOT / "shared" / "so101-limits.json"
 
 EXPECTED_LIMITS = {
     "_1": (-1.91986, 1.91986),
@@ -356,7 +358,10 @@ class PlanLevelTests(unittest.TestCase):
                 self.assertIsInstance(result.to_payload()["planId"], str)
 
     def test_duplicate_action_ids_are_rejected(self) -> None:
-        result = validate_plan(PLAN_ID, [action(), action(target="_2"), action(actionId="a2")])
+        # Distinct targets, so only the duplicate id fires (not DUPLICATE_JOINT_TARGET).
+        result = validate_plan(
+            PLAN_ID, [action(), action(target="_2"), action(actionId="a2", target="_3")]
+        )
         issue = only_issue(self, result)
         self.assertEqual(issue.rule_id, "DUPLICATE_ACTION_ID")
         self.assertEqual(issue.action_id, "a1")
@@ -369,10 +374,53 @@ class PlanLevelTests(unittest.TestCase):
                 self.assertEqual(issue.rule_id, "UNEXPECTED_FIELD")
                 self.assertEqual(issue.field, extra)
 
-    def test_max_actions_is_not_enforced_until_a_number_is_agreed(self) -> None:
-        self.assertIsNone(SO101_PROFILE.max_actions)
-        many = [action(actionId=f"a{i}") for i in range(200)]
-        self.assertTrue(validate_plan(PLAN_ID, many).passed)
+    def test_so101_profile_caps_plans_at_ten_actions(self) -> None:
+        self.assertEqual(SO101_PROFILE.max_actions, 10)
+
+    def test_ten_actions_are_within_the_cap_and_eleven_are_not(self) -> None:
+        # SO-101 has six joints, so 10 actions on it always repeat a joint. The
+        # cap itself is checked by the rule ids present, not by a pass.
+        def plan(n: int) -> list[dict[str, Any]]:
+            return [action(actionId=f"a{i}", target=f"_{i % 6 + 1}") for i in range(n)]
+
+        ten = rules(validate_plan(PLAN_ID, plan(10)))
+        self.assertNotIn("MAX_ACTIONS_EXCEEDED", ten)
+        self.assertEqual(set(ten), {"DUPLICATE_JOINT_TARGET"})
+        eleven = validate_plan(PLAN_ID, plan(11))
+        self.assertEqual(rules(eleven).count("MAX_ACTIONS_EXCEEDED"), 1)
+        self.assertEqual(eleven.outcome, "fail")
+
+    def test_ten_distinct_joints_pass_and_eleven_fail_on_the_cap_alone(self) -> None:
+        # A profile with enough joints isolates the cap from the duplicate rule.
+        joints = {f"j{i}": JointLimit(-1.0, 1.0) for i in range(12)}
+        profile = RobotProfile(
+            name="test",
+            joint_position_limits=joints,
+            joint_position_unit="rad",
+            supported_action_types=frozenset({"set_joint"}),
+            max_actions=10,
+        )
+
+        def plan(n: int) -> list[dict[str, Any]]:
+            return [action(actionId=f"a{i}", target=f"j{i}") for i in range(n)]
+
+        self.assertTrue(validate_plan(PLAN_ID, plan(10), profile).passed)
+        issue = only_issue(self, validate_plan(PLAN_ID, plan(11), profile))
+        self.assertEqual(issue.rule_id, "MAX_ACTIONS_EXCEEDED")
+        self.assertIsNone(issue.action_id)
+        self.assertEqual(issue.field, "actions")
+
+    def test_no_cap_when_a_profile_sets_none(self) -> None:
+        joints = {f"j{i}": JointLimit(-1.0, 1.0) for i in range(50)}
+        profile = RobotProfile(
+            name="test",
+            joint_position_limits=joints,
+            joint_position_unit="rad",
+            supported_action_types=frozenset({"set_joint"}),
+            max_actions=None,
+        )
+        many = [action(actionId=f"a{i}", target=f"j{i}") for i in range(50)]
+        self.assertTrue(validate_plan(PLAN_ID, many, profile).passed)
 
     def test_max_actions_is_enforced_when_a_profile_sets_it(self) -> None:
         profile = RobotProfile(
@@ -382,9 +430,11 @@ class PlanLevelTests(unittest.TestCase):
             supported_action_types=frozenset({"set_joint"}),
             max_actions=2,
         )
-        two = [action(actionId="a1"), action(actionId="a2")]
+        two = [action(actionId="a1"), action(actionId="a2", target="_2")]
         self.assertTrue(validate_plan(PLAN_ID, two, profile).passed)
-        issue = only_issue(self, validate_plan(PLAN_ID, two + [action(actionId="a3")], profile))
+        issue = only_issue(
+            self, validate_plan(PLAN_ID, two + [action(actionId="a3", target="_3")], profile)
+        )
         self.assertEqual(issue.rule_id, "MAX_ACTIONS_EXCEEDED")
         self.assertIsNone(issue.action_id)
 
@@ -394,8 +444,9 @@ class BehaviourTests(unittest.TestCase):
         plan = [
             action(actionId="a1", target="nope"),
             action(actionId="a2", value=float("nan")),
-            action(actionId="a3", unit="deg"),
-            action(actionId="a4", value=99),
+            # Distinct joints, so DUPLICATE_JOINT_TARGET does not join the list.
+            action(actionId="a3", target="_2", unit="deg"),
+            action(actionId="a4", target="_3", value=99),
             action(actionId="a5", type="stop"),
         ]
         result = validate_plan(PLAN_ID, plan)
@@ -455,9 +506,66 @@ class BehaviourTests(unittest.TestCase):
             {
                 "UNSUPPORTED_ACTION", "MISSING_REQUIRED_FIELD", "UNKNOWN_JOINT",
                 "JOINT_LIMIT_EXCEEDED", "NON_FINITE_VALUE", "UNIT_MISMATCH", "MAX_ACTIONS_EXCEEDED",
+                "DUPLICATE_JOINT_TARGET",
             },
         )
         self.assertEqual(sv.AGREED_RULE_IDS & sv.PROPOSED_RULE_IDS, frozenset())
+        self.assertEqual(
+            sv.PROPOSED_RULE_IDS,
+            {"INVALID_PLAN", "INVALID_FIELD_TYPE", "DUPLICATE_ACTION_ID", "UNEXPECTED_FIELD"},
+        )
+
+    def test_validator_version_is_the_decided_string(self) -> None:
+        self.assertEqual(sv.VALIDATOR_VERSION, "1.0")
+        self.assertEqual(validate_plan(PLAN_ID, [action()]).to_payload()["validatorVersion"], "1.0")
+
+
+class DuplicateJointTargetTests(unittest.TestCase):
+    def test_same_joint_twice_is_rejected_on_the_later_action(self) -> None:
+        result = validate_plan(
+            PLAN_ID, [action(actionId="a1", value=0.1), action(actionId="a2", value=0.2)]
+        )
+        issue = only_issue(self, result)
+        self.assertEqual(issue.rule_id, "DUPLICATE_JOINT_TARGET")
+        self.assertEqual(issue.action_id, "a2")
+        self.assertEqual(issue.field, "target")
+        self.assertIn("'_1'", issue.message)
+
+    def test_every_repeat_is_reported(self) -> None:
+        plan = [action(actionId=f"a{i}", target="_4", value=0.0) for i in range(3)]
+        result = validate_plan(PLAN_ID, plan)
+        self.assertEqual(
+            [(i.action_id, i.rule_id) for i in result.errors],
+            [("a1", "DUPLICATE_JOINT_TARGET"), ("a2", "DUPLICATE_JOINT_TARGET")],
+        )
+
+    def test_each_joint_once_passes(self) -> None:
+        plan = [action(actionId=f"a{i}", target=f"_{i}", value=0.0) for i in range(1, 7)]
+        self.assertTrue(validate_plan(PLAN_ID, plan).passed)
+
+    def test_duplicate_action_id_and_duplicate_joint_are_separate_rules(self) -> None:
+        result = validate_plan(PLAN_ID, [action(), action()])
+        self.assertEqual(rules(result), ["DUPLICATE_ACTION_ID", "DUPLICATE_JOINT_TARGET"])
+
+    def test_still_reported_when_the_later_action_has_other_errors(self) -> None:
+        result = validate_plan(PLAN_ID, [action(), action(actionId="a2", value=99)])
+        self.assertEqual(rules(result), ["JOINT_LIMIT_EXCEEDED", "DUPLICATE_JOINT_TARGET"])
+
+    def test_unknown_or_non_string_targets_do_not_count(self) -> None:
+        for target in ("nope", 5, None):
+            with self.subTest(target=target):
+                plan = [action(target=target), action(actionId="a2", target=target)]
+                self.assertNotIn("DUPLICATE_JOINT_TARGET", rules(validate_plan(PLAN_ID, plan)))
+
+    def test_unsupported_action_type_does_not_claim_a_joint(self) -> None:
+        plan = [action(type="stop"), action(actionId="a2")]
+        self.assertEqual(rules(validate_plan(PLAN_ID, plan)), ["UNSUPPORTED_ACTION"])
+
+    def test_planner_duplicate_output_is_caught(self) -> None:
+        from planner import plan_command
+
+        actions = list(plan_command("set joint _1 to 0.1 rad; set joint _1 to 0.2 rad").actions or ())
+        self.assertEqual(rules(validate_plan(PLAN_ID, actions)), ["DUPLICATE_JOINT_TARGET"])
 
     def test_profile_is_read_only(self) -> None:
         with self.assertRaises(TypeError):
@@ -479,6 +587,51 @@ class BehaviourTests(unittest.TestCase):
                 set(),
                 module,
             )
+
+
+class SharedLimitsParityTests(unittest.TestCase):
+    """SO101_PROFILE must match shared/so101-limits.json, which the critic reads.
+
+    robot_profile.py keeps its own literals (no file I/O in the validator), so
+    these tests are what stop the Python and TypeScript gates from drifting.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.shared = json.loads(SHARED_LIMITS.read_text(encoding="utf-8"))
+
+    def test_action_cap_matches_and_is_the_agreed_ten(self) -> None:
+        self.assertEqual(self.shared["maxActions"], 10)
+        self.assertEqual(SO101_PROFILE.max_actions, self.shared["maxActions"])
+
+    def test_joint_names_and_limits_match(self) -> None:
+        shared_limits = {
+            name: (limit["min"], limit["max"]) for name, limit in self.shared["joints"].items()
+        }
+        profile_limits = {
+            name: (limit.lower, limit.upper)
+            for name, limit in SO101_PROFILE.joint_position_limits.items()
+        }
+        self.assertEqual(profile_limits, shared_limits)
+        self.assertEqual(sorted(shared_limits), ["_1", "_2", "_3", "_4", "_5", "_6"])
+
+    def test_unit_matches(self) -> None:
+        self.assertEqual(SO101_PROFILE.joint_position_unit, self.shared["unit"])
+
+    def test_validator_enforces_the_shared_cap_on_a_large_synthetic_profile(self) -> None:
+        # More joints than the cap, so the cap is tested apart from duplicates.
+        cap = self.shared["maxActions"]
+        joints = {f"j{i}": JointLimit(-1.0, 1.0) for i in range(cap + 5)}
+        profile = RobotProfile(
+            name="synthetic",
+            joint_position_limits=joints,
+            joint_position_unit="rad",
+            supported_action_types=frozenset({"set_joint"}),
+            max_actions=SO101_PROFILE.max_actions,
+        )
+        plan = [action(actionId=f"a{i}", target=f"j{i}") for i in range(cap + 1)]
+        self.assertTrue(validate_plan(PLAN_ID, plan[:cap], profile).passed)
+        self.assertEqual(rules(validate_plan(PLAN_ID, plan, profile)), ["MAX_ACTIONS_EXCEEDED"])
 
 
 if __name__ == "__main__":
