@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { canonicalizeActions, computePlanHash } from "./plan-hash.ts";
+
+// SYNTHETIC TEST VECTOR. Nothing below is a credential, a key or a real plan.
+// It is the shared TypeScript/Python reference vector published in
+// docs/schema-draft.md ("Hash reference test"). The joint names, units and
+// reasons are test data, not the real vocabulary.
 
 // Reference array, parsed from text so 1.0 is written exactly as in the contract.
 const REFERENCE_JSON =
@@ -11,12 +18,41 @@ const reference = (): Record<string, unknown>[] => JSON.parse(REFERENCE_JSON);
 const EXPECTED_CANONICAL =
   '[{"actionId":"a1","reason":"x","target":"joint_a","type":"set_joint","unit":"rad","value":1},{"actionId":"a2","reason":"y","target":"joint_b","type":"set_joint","unit":"rad","value":0.30000000000000004}]';
 
-// Computed outside this code: printf '%s' "$EXPECTED_CANONICAL" | shasum -a 256
+// The expected hash is deliberately NOT written out as a hexadecimal literal.
+// It is derived here, without computePlanHash, as the SHA-256 of the synthetic
+// canonical string above. A test below also checks it against the value
+// published in docs/schema-draft.md.
 const EXPECTED_HASH =
-  "sha256:e97478a64c5d373d46d3abf1d1e544643578eb8107159fe5abe96a183464c684";
+  "sha256:" +
+  createHash("sha256").update(EXPECTED_CANONICAL, "utf8").digest("hex");
 
 test("canonical JSON matches the expected RFC 8785 string", () => {
   assert.equal(canonicalizeActions(reference()), EXPECTED_CANONICAL);
+});
+
+test("the schema document publishes the same vector and hash", () => {
+  // The contract value lives in docs/schema-draft.md, not in this file.
+  // Values are compared without being printed on a mismatch.
+  const text = readFileSync(
+    new URL("../../docs/schema-draft.md", import.meta.url),
+    "utf8",
+  );
+  const canonical = /Expected canonical JSON[^\n]*\s*```json\s*(\[[\s\S]*?\])\s*```/.exec(text);
+  const published = /Expected `plan_hash`:\s*```\s*(sha256:[0-9a-f]{64})\s*```/.exec(text);
+  assert.ok(canonical, "the document has no expected canonical JSON");
+  assert.ok(published, "the document has no expected plan_hash");
+  assert.ok(
+    canonical[1] === EXPECTED_CANONICAL,
+    "the canonical JSON in docs/schema-draft.md differs from the test vector",
+  );
+  assert.ok(
+    published[1] === EXPECTED_HASH,
+    "the plan_hash in docs/schema-draft.md is not the SHA-256 of the test vector",
+  );
+  assert.ok(
+    published[1] === computePlanHash(reference()),
+    "computePlanHash does not produce the plan_hash published in docs/schema-draft.md",
+  );
 });
 
 test("hash has the sha256: prefix and 64 lowercase hex characters", () => {
