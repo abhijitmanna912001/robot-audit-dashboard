@@ -10,6 +10,11 @@ An approved command then goes through the **dry-run** lifecycle and ends `comple
 `failed`. **Nothing is sent to a robot**: no Cyberwave call, no simulation, no movement,
 and no flag, setting or environment variable can change that.
 
+**Dry run is the default and the only thing that runs today.** A separate, simulation-only
+entry point (`simulation_processor.py`) exists for the first SO-101 digital-twin rehearsal,
+but it is **blocked**: it exits before claiming anything, no Cyberwave movement code exists,
+and no simulation has ever been started. See "Simulation rehearsal (blocked)".
+
 ## Status
 
 | Part | Status | What exists |
@@ -25,6 +30,7 @@ and no flag, setting or environment variable can change that.
 | Command processing | Implemented. Planner-failure path verified live; successful-plan path offline tests only | `command_processor.py` processes ONE command per run (no loop). Planner failures, validator and critic results and the final status are recorded. The planner-failure path ran once against the live database (14 Nov 2026: `command_received`, `plan_generated` error, status `failed`). **The successful-plan path (validator, critic, `approved`/`rejected`/`failed`) has only run against mocks** |
 | Planner | Implemented and tested, deterministic | `planner.py` parses ASCII-only `set joint _1 to 0.25 rad` clauses separated by `;`. No language model |
 | Cyberwave connection | Implemented, read-only | `cyberwave_client.py` connects in simulation mode and reads the joint schema. It cannot move anything |
+| Simulation rehearsal | **Blocked.** Offline components only, fake-twin tests only | `simulation_payloads.py`, `sim_telemetry.py`, `simulation_gates.py`, `simulation_executor.py`, `simulation_processor.py`. No Cyberwave adapter exists, every gate is unconfirmed, and nothing has been run against Cyberwave. See "Simulation rehearsal (blocked)" |
 
 Facts that must not be lost:
 
@@ -56,6 +62,12 @@ Facts that must not be lost:
 | `planner.py` | Deterministic parser from command text to `set_joint` actions, or a structured planner error |
 | `command_processor.py` | Claim one command, plan, validate, ask the critic, record everything, set the status, dry-run an approved plan. Manual run needs `--confirm-write` |
 | `dry_run.py` | The offline dry run: checks the approved snapshot against its hash and describes it. Sends nothing |
+| `simulation_payloads.py` | Pure builders and validators for the three simulation event payloads (`dryRun: false`, `mode: "simulation"`) |
+| `sim_telemetry.py` | Pure telemetry validation: six joints, verified simulation source, measured state, fresh timestamp. Rejects placeholders and commanded targets |
+| `simulation_gates.py` | The live-simulation gates (all unconfirmed), the first-rehearsal restriction, and the re-check against `shared/so101-limits.json` |
+| `simulation_executor.py` | The bounded move, verify, return, verify sequence against a twin interface. No Cyberwave implementation of that interface exists |
+| `simulation_processor.py` | Simulation-only entry point: decision pipeline, then the audited simulation lifecycle. Needs `--simulation` and `--confirm-write`. **Blocked** |
+| `read_joint_telemetry.py` | Manual script: read-only joint read that reports whether the telemetry is verified (today: it is not). Needs `--confirm-connect` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
 | `discover_cyberwave_assets.py` | Manual script: read-only asset lookup, creates nothing |
@@ -103,8 +115,9 @@ values:
 |---|---|---|
 | `CYBERWAVE_API_KEY` | Cyberwave | required |
 | `CYBERWAVE_WORKSPACE_ID` | Cyberwave | optional. Only needed when the API token is scoped to more than one workspace. Without it, a multi-workspace token gets `400 workspace_required` |
-| `ROBOT_ASSET_IDENTIFIER` | Cyberwave | required, no default. The asset UUID. For the SO-101 it is `89696429-d5d7-4243-85be-ac0d3c148044`. Not needed by `discover_cyberwave_assets.py` |
-| `CYBERWAVE_ENVIRONMENT_ID` | Cyberwave | optional. The UUID of an existing environment. Unset: the SDK reuses or creates a "Quickstart Environment" |
+| `CYBERWAVE_ENVIRONMENT_ID` | Cyberwave | **required to load the twin**, no default. The UUID of the EXISTING environment that holds the twin. Never created |
+| `CYBERWAVE_TWIN_ID` | Cyberwave | **required to load the twin**, no default. The UUID of the EXISTING SO-101 twin in that environment. Never created |
+| `ROBOT_ASSET_IDENTIFIER` | Cyberwave | **required to load the twin**, no default. The asset **UUID** (a registry id is refused). For the SO-101 it is `89696429-d5d7-4243-85be-ac0d3c148044`. Optional and free-form only for `discover_cyberwave_assets.py` |
 | `SUPABASE_URL` | Supabase | required |
 | `SUPABASE_SECRET_KEY` | Supabase | required. Backend key (`sb_secret_...`). Server-side only |
 | `CRITIC_URL` | critic call | required by `command_processor.py` for a valid plan. `https` only (plain `http` only for a loopback host). Missing or unusable: the critic result is an error and nothing is approved |
@@ -117,11 +130,33 @@ The Next.js app has its own environment file and still uses its own variable nam
 fallback: if it is set and the new one is not, the worker stops with an error asking for
 the rename.
 
-**Use the asset UUID, not the registry id.** SDK 0.7.5 resolves a UUID with a direct
-fetch. It resolves a registry id such as `the-robot-studio/so101` through a list call that
-returns nothing once the client carries a workspace filter, and `cw.twin()` adds that
-filter itself, so the registry id fails with "Asset not found". Details are in
-`docs/robot-capabilities.md`, section 8.
+**The twin is looked up, never created.** Anything that loads the twin
+(`config.load_cyberwave_twin_settings`, `SimulatedRobot.load_existing_twin`) needs all
+three of `CYBERWAVE_ENVIRONMENT_ID`, `CYBERWAVE_TWIN_ID` and `ROBOT_ASSET_IDENTIFIER`, each
+a canonical UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). A missing, blank or malformed
+value stops with an error naming the variable. There is no default and no fallback: the
+worker never calls the SDK's get-or-create `Cyberwave.twin()`, so it cannot create a twin
+or a "Quickstart Environment" (a test checks that no worker module calls it).
+
+The lookup is two read-only calls, both GET in SDK 0.7.5:
+
+| Call | Request | Used for |
+|---|---|---|
+| `client.twins.get_raw(twin_id)` | `GET /api/v1/twins/{uuid}` | the twin record: its `uuid`, `environment_uuid`, `asset_uuid` |
+| `client.twins.list(environment_id=...)` | `GET /api/v1/environments/{uuid}/twins` | the environment's own list of twins |
+
+The twin is accepted only if the record is the configured twin, the record's
+`environment_uuid` is the configured environment, the record's `asset_uuid` is the
+configured asset UUID, **and**, independently of the record, the environment's own twin
+list contains the twin. Any failed call, unreadable field or mismatch is a refusal with no
+twin loaded.
+
+**Use the asset UUID, not the registry id.** For twin loading a registry id such as
+`the-robot-studio/so101` is refused, not resolved: the asset check compares a UUID with a
+UUID and never compares unlike identifiers. SDK 0.7.5 cannot be relied on to resolve a
+registry id anyway: it uses a list call that returns nothing once the client carries a
+workspace filter, and hides the error. Details are in `docs/robot-capabilities.md`,
+section 8.
 
 ## Commands
 
@@ -218,12 +253,11 @@ The behaviour is explained under "Supabase smoke test" below.
 
 - It never calls `affect()`, so it does not start a billable simulation, and it sends no
   joint, gripper or motion command.
-- `Cyberwave.twin()` is get-or-create. On first run it may create an SO-101 twin, and a
-  "Quickstart Environment" if `CYBERWAVE_ENVIRONMENT_ID` is not set.
-- With `CYBERWAVE_WORKSPACE_ID` unset, the SDK picks the workspace itself when it needs
-  one for the Quickstart Environment: a workspace named "Quickstart Workspace" if the token
-  sees one, otherwise the first workspace the token sees. If the token sees none, it
-  creates "Quickstart Workspace".
+- It creates nothing. It looks up the existing twin (`CYBERWAVE_TWIN_ID`) and stops unless
+  the twin belongs to `CYBERWAVE_ENVIRONMENT_ID` and is the asset `ROBOT_ASSET_IDENTIFIER`.
+  The SDK's get-or-create `Cyberwave.twin()` is no longer called by any worker module.
+- Reading joint positions opens the SDK's MQTT connection, which can publish session
+  messages for the twin. No joint, gripper or motion command is sent.
 - With no simulation running, no joint telemetry arrives and the SDK returns 0.0 for every
   joint. The script says so instead of presenting zeros as measurements.
 
@@ -586,14 +620,204 @@ request to the critic; an approved plan is dry-run and its execution events are 
 .venv\Scripts\python.exe command_processor.py --confirm-write
 ```
 
+## Simulation rehearsal (blocked)
+
+**Live simulated movement is blocked. No simulation has been started, no movement has been
+sent, and no rehearsal has been performed.** What exists is offline code and offline tests
+with a fake twin. There is no physical-hardware mode at all.
+
+### What is blocked, and why
+
+`simulation_processor.py --simulation --confirm-write` prints the open items and exits with
+code 3 **before it claims a command**. Two independent locks, both in source code:
+
+1. `simulation_gates.CYBERWAVE_GATES`: six confirmations, every one `False`.
+2. `simulation_processor._production_twin()`: there is no Cyberwave implementation of the
+   twin interface, so it always refuses. No file in `worker/` calls `set_joints`,
+   `affect()` or any other SDK movement or simulation-start method (a test checks this).
+
+Neither lock is a setting. No flag, environment variable or configuration value can open
+them; that takes a reviewed code change.
+
+| Gate | Needs | State |
+|---|---|---|
+| `stop_method_confirmed` | Cyberwave engineers: the supported stop/cancel method for an arm twin, its arguments, its behaviour if the connection is lost | not confirmed |
+| `stop_success_contract_confirmed` | Cyberwave engineers: what response proves the arm stopped, and its time limit | not confirmed |
+| `telemetry_is_actual_state_confirmed` | Cyberwave engineers: that `get_joints` (or the documented method) returns actual simulation state | not confirmed |
+| `telemetry_source_confirmed` | Cyberwave engineers: how a reading identifies the simulation as its source | not confirmed |
+| `measured_vs_placeholder_confirmed` | Cyberwave engineers: how to tell measured positions from placeholders and commanded targets | not confirmed |
+| `first_movement_approved` | Abhijit: explicit approval of the first simulated movement | not given |
+
+What the installed SDK (0.7.5) source shows today, which is why the gates are closed:
+`get_joints()` returns a bare `{joint: position}` mapping with no timestamp and no source,
+and returns 0.0 for every joint when no update arrived; the only `stop` methods are for
+navigation, locomotion and flight twins, none for an arm.
+
+### Flags and default behaviour
+
+| Command | What happens |
+|---|---|
+| `command_processor.py --confirm-write` | The default worker. Dry run only, unchanged. It has no simulation option. |
+| `simulation_processor.py` with no flag, or only one of `--simulation` / `--confirm-write` | Nothing. Exit code 2. Nothing claimed, written or sent. It does not fall back to a dry run. |
+| `simulation_processor.py --simulation --confirm-write` | Today: **BLOCKED**, exit code 3, nothing claimed. Once unblocked: ONE command, simulation only. |
+
+There is no `--live`, `--target` or `--mode` option, no polling mode and no retry option.
+One invocation processes at most one command.
+
+### Simulation-only guarantees
+
+- The target is the constant `simulation_gates.EXECUTION_TARGET = "simulation"`. There is
+  no selector, and no parameter of the twin interface names a target.
+- Before any read or movement, both the SDK runtime and the twin itself must report exactly
+  `"simulation"`. Missing, ambiguous or anything else: refused, nothing sent, no fallback.
+- The twin interface has no method that starts a simulation session.
+
+### First-rehearsal restriction
+
+Only this plan is executed, whatever the shared limits allow:
+
+```
+set joint _1 to 0.25 rad
+```
+
+Exactly one action, type `set_joint`, joint `_1`, value `0.25`, unit `rad`. Another joint,
+another value, a second action or another type is refused with `rehearsal_restriction`
+(the command ends `failed`), even though the validator and the critic approved it. The
+check runs on the immutable `PlanSnapshot`; the command text is never parsed again.
+
+### Sequence
+
+`simulation_processor.process_one_simulation_command`:
+
+| Step | What | If it fails |
+|---|---|---|
+| 1 | Claim ONE command, plan, validator, critic, `received -> approved` (`command_processor.decide_one_command`, the same pipeline as the dry-run worker) | as in the dry-run worker; nothing is connected |
+| 2 | Pre-checks on the approved snapshot: re-hash, validator pass and critic approval of this command, plan and hash (`execution_gate`), first-rehearsal restriction, gates, shared limits | `execution_failed` (`stop: "not_needed"`), `approved -> failed` |
+| 3 | `execution_started` `{"dryRun": false, "mode": "simulation"}` | nothing connected, read or sent; `execution_failed`, `approved -> failed` |
+| 4 | `approved -> executing` | nothing connected, read or sent; `execution_failed` (`not_needed`). A conflict leaves the status untouched |
+| 5 | Connect; verify SDK runtime and twin are simulation | `not_simulation` / `connection_failed`, nothing sent |
+| 6 | Read START positions of all six joints, validate them | `telemetry_invalid` / `telemetry_unavailable`, nothing sent |
+| 7 | Re-hash the snapshot again; re-check the action and the return position against `shared/so101-limits.json` | `limits_revalidation_failed`, nothing sent |
+| 8 | ONE movement: `_1` to 0.25 rad | stop attempted once |
+| 9 | Wait (bounded) for `_1` within 0.01 rad of 0.25; fresh TARGET reading; `_1` at target and the other five joints within 0.01 rad of start | stop attempted once; no return movement |
+| 10 | ONE return movement: `_1` to its captured start position | stop attempted once; no second return movement |
+| 11 | Wait (bounded) for all six joints; fresh RESTORED reading; all six within 0.01 rad of start | stop attempted once |
+| 12 | `execution_completed` (start, target, restored readings, `toleranceRad: 0.01`), then `executing -> completed` | see "Failure and manual recovery" |
+
+`execution_completed` is built only from a verified restoration, and the payload validator
+itself refuses a "completed" payload whose restored joints are not within 0.01 rad of start.
+
+### Event payloads
+
+Exactly the shapes agreed with Abhijit, enforced by `simulation_payloads.py` before every
+write (`audit_events` is append-only, so a malformed payload must never get in):
+
+- `execution_started`: `{"dryRun": false, "mode": "simulation"}`
+- `execution_completed`: `{"dryRun": false, "mode": "simulation", "summary", "telemetry": {"start", "target", "restored"}, "toleranceRad": 0.01}`
+- `execution_failed`: `{"dryRun": false, "mode": "simulation", "error": {"kind", "detail"}, "stop": "confirmed" | "unconfirmed" | "not_needed"}`, plus `lastTelemetry` only after a reading validated
+- a snapshot: `{"readAt": "2026-11-14T08:30:01Z", "joints": {"_1": .., ..., "_6": ..}}`
+
+Refused: missing or extra keys, a missing or extra snapshot or joint, a boolean or a
+numeric string as a number, NaN or infinity, a `readAt` that is not canonical UTC ending in
+`Z` (an offset such as `+00:00` is refused too), text over 200 characters or with control
+characters, an error kind that is not short snake_case, a `toleranceRad` other than `0.01`.
+The tolerance is a constant, not a parameter. Dry-run payloads are unchanged (`dryRun: true`,
+no `mode`).
+
+**`docs/schema-draft.md` does not describe these shapes yet** (Abhijit is updating it). It
+still lists `execution_failed` as `{ "dryRun": boolean, "error": string }`; for simulation
+`error` is an object. See the pull request description for the full list of differences.
+
+### Telemetry validation
+
+A successful SDK call is not proof. `sim_telemetry.validate_telemetry` accepts a reading
+only if all of these hold: exactly joints `_1` to `_6`, finite numbers; source verified as
+`"simulation"`; kind verified as `"measured"` (not `"commanded"`, not a placeholder); a state
+update actually arrived for this read; a timezone-aware acquisition time no older than 2 s,
+not in the future, and not from before the movement it is meant to verify. A zero-filled
+reading without that proof is `placeholder_suspected`. A missing fact is never defaulted.
+
+`read_joint_telemetry.py --confirm-connect` is the read-only check. It uses only the
+read-only `SimulatedRobot` wrapper, never moves anything and never starts a simulation.
+**It reports `"verified": false` today**, because the SDK read gives no source and no
+timestamp, and because real positions need a running simulation, which nothing here starts
+(starting one may be billable and is a separate, approved step). Unverified values are
+printed as `unverifiedPositions`, for diagnosis only.
+
+### Time limits
+
+`simulation_executor.Timeouts`. The defaults are also the caps: a caller may tighten a
+limit, never loosen it. Every twin call runs on a worker thread and is abandoned when its
+limit passes, so no call can block the worker.
+
+| Limit | Seconds |
+|---|---|
+| SDK connection / initialisation | 10 |
+| Each simulation-target check (two) | 3 |
+| One telemetry read | 3 |
+| One movement call returning | 5 |
+| Waiting for the target | 10 |
+| Target verification reading | 3 |
+| Waiting for the return | 10 |
+| Restoration verification reading | 3 |
+| Stop call | 5 |
+| Disconnect | 3 |
+| **Whole execution, recovery included** | **75** |
+
+The movement phases add up to at most 55 s and failure recovery (stop, one last reading,
+disconnect) to 11 s. The movement phases are cut off 11 s before the total deadline, so
+recovery always fits inside it. Polling interval while waiting: 0.2 s.
+
+### Stop / cancel
+
+The stop method is **not known**. The twin interface has a `stop` method, and only a fake
+implements it. Rules that are already enforced:
+
+- `stop: "not_needed"` when no movement call was started. No stop is attempted.
+- Once a movement call was started (even if that call raised or timed out, since it may
+  still have been sent), stop is called **once**. `"confirmed"` only if it returned the
+  documented success (`StopResult(confirmed=True)`); an exception, a timeout, `None`,
+  `True` or anything else is `"unconfirmed"`.
+- After a failure nothing else is sent: no retry, and no automatic return to the start.
+
+### Failure and manual recovery
+
+Nothing is retried, ever: not a movement, not an event, not a status update.
+
+| Failure | Recorded as | Arm state |
+|---|---|---|
+| Before any movement | `execution_failed`, `stop: "not_needed"`, then `approved -> failed` or `executing -> failed` | not moved |
+| After the target movement was sent, before the target was verified | `execution_failed` with the real stop result and `lastTelemetry` if a fresh read validated; `executing -> failed` | **uncertain** |
+| After the target was reached, before restoration was verified | same; no return movement is sent | **not restored** unless `lastTelemetry` shows it |
+| Return movement failed or timed out | same; no second return movement | **uncertain** |
+| `execution_failed` could not be written | `SimulationProcessingError`, stage `execution_failed_write`. Status NOT changed. The message and the exception carry the failure kind, whether a movement was sent, the stop result and the last reading | as above |
+| `-> failed` did not apply after `execution_failed` | stage `failed_update`. The event is not written again | as above |
+| `execution_completed` could not be written | stage `execution_completed_write`. Status stays `executing`. The readings are in the message | restored and verified |
+| `executing -> completed` did not apply | stage `completed_update`. Not retried, event not written again, simulation not run again | restored and verified |
+| `approved -> executing` matched no row | stage `executing_update`. `execution_failed` attempted once, status left alone | not moved |
+
+The manual steps are the same as under "Manual recovery" above, with one difference: for a
+simulation failure, read `movement_dispatched`, `stop` and the last reading first. If a
+movement was sent and the stop is `unconfirmed`, look at the twin in Cyberwave before doing
+anything else. Interrupting the worker (Ctrl-C) while it is executing tries the stop once
+and then exits; the command stays `executing` with no failure event and needs a person.
+
+Error kinds are a fixed list (`simulation_payloads.ERROR_KINDS`). Details are fixed text
+plus at most an exception class name, at most 200 characters. No SDK error text, URL,
+header, credential or key is written to an event or printed.
+
 ## Safety rules for this code
 
 - Simulation only. `SimulatedRobot` refuses to continue if the SDK client is not in
   simulation mode.
-- No movement code exists. `command_processor.py` runs only the offline dry run
-  (`dry_run.py`) after both gates approved, and writes only `dryRun: true`. There is no
+- No Cyberwave movement code exists. `command_processor.py` runs only the offline dry run
+  (`dry_run.py`) after both gates approved, and writes only `dryRun: true`. It has no
   flag, setting, environment variable or injectable executor that could turn it into
-  simulation or physical execution; real execution would be a separate, agreed change.
+  simulation or physical execution.
+- The simulation entry point (`simulation_processor.py`) is blocked in source code until the
+  Cyberwave engineers confirm the stop method and the telemetry provenance and Abhijit
+  approves the first movement. It has no physical-hardware mode. See "Simulation rehearsal
+  (blocked)".
 - Every test runs under the process-wide network guard (`tests/net_guard.py`, see "The
   test suite is network-isolated"). Critic responses come from `httpx.MockTransport` or
   an offline fake.

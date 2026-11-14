@@ -4,17 +4,19 @@ Run from the worker directory:
 
     .venv\\Scripts\\python.exe test_cyberwave_connection.py
 
-What it does: authenticates, selects simulation mode, gets the twin for the
-asset named by ROBOT_ASSET_IDENTIFIER (the SO-101 asset UUID), lists its
-joints, reads current joint positions, and disconnects.
+What it does: authenticates, selects simulation mode, looks up the EXISTING
+twin named by CYBERWAVE_TWIN_ID, verifies that it belongs to
+CYBERWAVE_ENVIRONMENT_ID and is the asset named by ROBOT_ASSET_IDENTIFIER (the
+SO-101 asset UUID), lists its joints, reads current joint positions, and
+disconnects.
 
 What it does NOT do: it never calls ``affect()`` (which would start a billable
 MuJoCo simulation), never targets live hardware, and never sends a joint,
-gripper or motion command.
+gripper or motion command. It never creates a twin or an environment: all three
+ids are required, and a missing or mismatching one stops the script.
 
-Side effect to know about: ``Cyberwave.twin()`` is get-or-create. If the
-workspace has no SO-101 twin yet, one is created, and if CYBERWAVE_ENVIRONMENT_ID
-is not set the SDK reuses or creates a "Quickstart Environment" to hold it.
+Side effect to know about: reading joint positions opens the SDK's MQTT
+connection, which can publish session messages for the twin (no command).
 
 This is a script, not a unit test. It contains no TestCase classes, so unittest
 discovery imports it without running anything.
@@ -28,7 +30,7 @@ import math
 import sys
 from typing import Any
 
-from config import ConfigError, load_cyberwave_settings, redact
+from config import ConfigError, load_cyberwave_twin_settings, redact
 from cyberwave_client import RobotConnectionError, SimulatedRobot
 
 
@@ -54,7 +56,7 @@ def _print_joint_descriptors(descriptors: list[dict[str, Any]]) -> None:
 
 def run(timeout_s: float) -> int:
     try:
-        settings = load_cyberwave_settings()
+        settings = load_cyberwave_twin_settings()
     except ConfigError as exc:
         print(f"CONFIG ERROR: {exc}")
         return 2
@@ -69,8 +71,8 @@ def run(timeout_s: float) -> int:
         workspace_count = robot.verify_auth()
         print(f"    OK. Workspaces visible to this key: {workspace_count}")
 
-        _step(3, f"Get or create twin for asset '{settings.robot_asset_identifier}'")
-        robot.load_twin()
+        _step(3, "Look up the existing twin and verify its environment and asset (no create)")
+        robot.load_existing_twin()
         for key, value in robot.twin_summary().items():
             print(f"    {key}: {value}")
 
