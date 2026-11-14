@@ -77,300 +77,128 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Control Ledger: paper, ink, and a single cobalt interaction colour. */
 :root {
-  --background: #06080c;
-  --foreground: #e6edf6;
-  --card: #0b0f16;
-  --card-foreground: #e6edf6;
-  --popover: #101620;
-  --popover-foreground: #e6edf6;
-  --surface: #0b0f16;
-  --raised: #101620;
-  --primary: #4da3ff;
-  --primary-foreground: #06080c;
-  --secondary: #101620;
-  --secondary-foreground: #e6edf6;
-  --muted: #101620;
-  --muted-foreground: #8b97a8;
-  --accent: #10233a;
-  --accent-foreground: #e6edf6;
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: rgb(255 255 255 / 7%);
-  --input: rgb(255 255 255 / 10%);
-  --ring: #4da3ff;
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --background: #f3f2ed;
+  --foreground: #20282b;
+  --card: #ffffff;
+  --card-foreground: #20282b;
+  --popover: #ffffff;
+  --popover-foreground: #20282b;
+  --surface: #ffffff;
+  --raised: #eeefea;
+  --primary: #244bc5;
+  --primary-foreground: #ffffff;
+  --secondary: #e8ebe5;
+  --secondary-foreground: #20282b;
+  --muted: #eeefea;
+  --muted-foreground: #596368;
+  --accent: #e9edfc;
+  --accent-foreground: #244bc5;
+  --destructive: #a32e32;
+  --border: #7a857c;
+  --input: #7a857c;
+  --ring: #244bc5;
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  --status-received: oklch(0.9 0.015 255);
-  --status-received-foreground: oklch(0.3 0.03 255);
-  --status-approved: oklch(0.88 0.06 255);
-  --status-approved-foreground: oklch(0.3 0.12 255);
-  --status-rejected: oklch(0.55 0.21 27);
-  --status-rejected-foreground: oklch(0.99 0 0);
-  --status-executing: oklch(0.89 0.06 205);
-  --status-executing-foreground: oklch(0.33 0.07 215);
-  --status-completed: oklch(0.89 0.09 150);
-  --status-completed-foreground: oklch(0.32 0.09 150);
-  --status-failed: oklch(0.9 0.09 65);
-  --status-failed-foreground: oklch(0.36 0.09 55);
-  --status-info: oklch(0.9 0.05 235);
-  --status-info-foreground: oklch(0.33 0.09 240);
-  --status-received-accent: oklch(0.55 0.03 255);
-  --status-approved-accent: oklch(0.5 0.17 255);
-  --status-rejected-accent: oklch(0.55 0.21 27);
-  --status-executing-accent: oklch(0.55 0.1 210);
-  --status-completed-accent: oklch(0.5 0.13 150);
-  --status-failed-accent: oklch(0.6 0.14 65);
-  --status-info-accent: oklch(0.55 0.12 240);
-}
-
-.dark {
-  --background: #06080c; /* #0a0a0a */
-  --surface: #0b0f16; /* ~#111 */
-  --raised: #101620; /* ~#171717 */
-  --foreground: #e6edf6;
-  --card: #0b0f16;
-  --card-foreground: #e6edf6;
-  --popover: #101620;
-  --popover-foreground: #e6edf6;
-  --primary: #4da3ff;
-  --primary-foreground: #06080c;
-  --secondary: #101620;
-  --secondary-foreground: #e6edf6;
-  --muted: #101620;
-  --muted-foreground: #8b97a8;
-  --accent: #10233a;
-  --accent-foreground: #e6edf6;
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: rgb(255 255 255 / 7%);
-  --input: rgb(255 255 255 / 10%);
-  --ring: #4da3ff;
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-  --status-received: oklch(0.32 0.02 255);
-  --status-received-foreground: oklch(0.92 0.01 255);
-  --status-approved: oklch(0.34 0.09 255);
-  --status-approved-foreground: oklch(0.92 0.04 255);
-  --status-rejected: oklch(0.52 0.2 27);
-  --status-rejected-foreground: oklch(0.99 0 0);
-  --status-executing: oklch(0.36 0.07 205);
-  --status-executing-foreground: oklch(0.93 0.05 205);
-  --status-completed: oklch(0.35 0.08 150);
-  --status-completed-foreground: oklch(0.92 0.06 150);
-  --status-failed: oklch(0.4 0.09 60);
-  --status-failed-foreground: oklch(0.94 0.06 75);
-  --status-info: oklch(0.35 0.07 240);
-  --status-info-foreground: oklch(0.93 0.04 240);
-  --status-received-accent: oklch(0.72 0.03 255);
-  --status-approved-accent: oklch(0.72 0.14 255);
-  --status-rejected-accent: oklch(0.68 0.2 25);
-  --status-executing-accent: oklch(0.78 0.11 205);
-  --status-completed-accent: oklch(0.76 0.15 150);
-  --status-failed-accent: oklch(0.8 0.15 75);
-  --status-info-accent: oklch(0.76 0.11 235);
+  --chart-1: #244bc5;
+  --chart-2: #226246;
+  --chart-3: #885715;
+  --chart-4: #a32e32;
+  --chart-5: #596368;
+  --sidebar: #f3f2ed;
+  --sidebar-foreground: #20282b;
+  --sidebar-primary: #244bc5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e9edfc;
+  --sidebar-accent-foreground: #244bc5;
+  --sidebar-border: #7a857c;
+  --sidebar-ring: #244bc5;
+  --status-received: #e9ece8;
+  --status-received-foreground: #47534e;
+  --status-received-accent: #59665f;
+  --status-approved: #e9edfc;
+  --status-approved-foreground: #244bc5;
+  --status-approved-accent: #244bc5;
+  --status-rejected: #fbeeed;
+  --status-rejected-foreground: #a32e32;
+  --status-rejected-accent: #a32e32;
+  --status-executing: #e8f0f6;
+  --status-executing-foreground: #275d7b;
+  --status-executing-accent: #275d7b;
+  --status-completed: #edf5ef;
+  --status-completed-foreground: #226246;
+  --status-completed-accent: #226246;
+  --status-failed: #faf1df;
+  --status-failed-foreground: #885715;
+  --status-failed-accent: #885715;
+  --status-info: #e8f0f6;
+  --status-info-foreground: #275d7b;
+  --status-info-accent: #275d7b;
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
+  * { @apply border-border; }
+  html {
+    @apply font-sans;
+    color-scheme: light;
+    scroll-padding-top: 11rem;
   }
   body {
     @apply bg-background text-foreground;
     font-size: 14px;
-    /* Flight-recorder atmosphere: a faint azure glow at the top over a 24px dot grid. */
-    background-image:
-      radial-gradient(ellipse 80% 40% at 50% -10%, rgb(77 163 255 / 8%), transparent),
-      radial-gradient(rgb(255 255 255 / 4%) 1px, transparent 1px);
-    background-size: 100% 100%, 24px 24px;
-    background-attachment: fixed;
+    line-height: 1.5;
   }
-  html {
-    @apply font-sans;
-    color-scheme: dark;
-    /* Focus and scrollIntoView never land under the sticky top bar. */
-    scroll-padding-top: 4.5rem;
-  }
-  /* Tailwind v4 resets buttons to cursor: default. Interactive things get a pointer,
-     disabled things get not-allowed (last, so it wins). */
+  ::selection { background: #dce4ff; color: #20282b; }
   button:not(:disabled),
   [role="button"]:not(:disabled):not([aria-disabled="true"]),
   [role="switch"]:not(:disabled),
   [role="tab"]:not(:disabled),
-  summary,
-  label[for],
-  a[href] {
-    cursor: pointer;
-  }
-  :disabled,
-  [aria-disabled="true"] {
-    cursor: not-allowed;
-  }
+  summary, label[for], a[href] { cursor: pointer; }
+  :disabled, [aria-disabled="true"] { cursor: not-allowed; }
 }
 
-/* New realtime events flash briefly (Dashboard clears the class after 1.5s). */
+/* Kept outside layers so component outline resets cannot hide keyboard focus. */
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+
+.surface-card {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 2px 3px rgb(32 40 43 / 2%);
+}
+.keycap {
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+.scroll-subtle { scrollbar-width: thin; scrollbar-color: var(--input) transparent; }
+.scroll-subtle::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll-subtle::-webkit-scrollbar-thumb { background: var(--input); border-radius: 8px; }
+
+/* Arrival highlights remain tied to the existing Realtime display state. */
 @keyframes event-flash {
-  from {
-    background-color: color-mix(in oklab, var(--primary) 22%, transparent);
-  }
-  to {
-    background-color: transparent;
-  }
+  from { background-color: #e9edfc; }
+  to { background-color: transparent; }
 }
-.event-flash {
-  animation: event-flash 1.5s ease-out;
+.event-flash { animation: event-flash 1.5s ease-out; }
+.skeleton { background: var(--border); }
+@keyframes evidence-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: no-preference) {
+  .anim-verdict { animation: evidence-in 140ms ease-out; }
+  .anim-timeline { animation: evidence-in 160ms ease-out; }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-  .event-flash {
-    animation: none;
-  }
+  .event-flash { animation: none; }
 }
 
-/* Loading placeholder for the Suspense fallback. */
-.skeleton {
-  background: linear-gradient(90deg, var(--surface), var(--raised), var(--surface));
-  background-size: 200% 100%;
-  animation: skeleton 1.4s ease-in-out infinite;
+/* The dashboard has a sticky top bar on phones; desktop and preview records scroll
+   in their own panes. No animation is needed to keep the case header available. */
+.sticky-case { top: 11rem; }
+@media (min-width: 1024px) {
+  .sticky-case { top: 0; }
 }
-@keyframes skeleton {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .skeleton { animation: none; }
-}
-
-/* Subtle scrollbars for the two columns. */
-.scroll-subtle {
-  scrollbar-width: thin;
-  scrollbar-color: rgb(255 255 255 / 18%) transparent;
-}
-.scroll-subtle::-webkit-scrollbar {
-  width: 8px;
-}
-.scroll-subtle::-webkit-scrollbar-thumb {
-  background: rgb(255 255 255 / 14%);
-  border-radius: 9999px;
-}
-.scroll-subtle::-webkit-scrollbar-thumb:hover {
-  background: rgb(255 255 255 / 28%);
-}
-
-/* Card surface: border, subtle top-to-bottom gradient, inset top highlight, soft shadow. */
-.surface-card {
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, #0d121a, #0b0f16);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 5%),
-    0 8px 24px -12px rgb(0 0 0 / 60%);
-}
-
-/* Keycap look for the example chips and key hints. */
-.keycap {
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, #131a25, #0e141d);
-  box-shadow: 0 1px 0 rgb(255 255 255 / 8%), 0 2px 0 rgb(0 0 0 / 55%);
-}
-
-/* Entry motion. Only when the viewer has not asked for reduced motion. The case file is keyed
-   by command id, so these replay on every selection change. */
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes scale-in {
-  from { opacity: 0; transform: scale(0.98); }
-  to { opacity: 1; transform: none; }
-}
-@keyframes line-draw {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
-}
-@media (prefers-reduced-motion: no-preference) {
-  .anim-row {
-    animation: fade-up 200ms ease-out both;
-    animation-delay: calc(min(var(--i, 0), 10) * 30ms);
-  }
-  .anim-verdict {
-    animation: scale-in 180ms ease-out both;
-  }
-  .anim-line {
-    transform-origin: left center;
-    animation: line-draw 200ms ease-out both;
-  }
-}
-
-/* Example chips: one scrollable row, snap scrolling, faded edges, scrollbar hidden. */
-.chip-row {
-  scrollbar-width: none;
-  mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
-}
-.chip-row::-webkit-scrollbar {
-  display: none;
-}
-
-/* Sticky bar at the top of the case file. By default it is a quiet strip that is always visible.
-   Where scroll-driven animations exist (and motion is allowed) it overlaps the title block and
-   fades in only once the title has scrolled away. CSS only. */
-@keyframes sticky-in {
-  to {
-    opacity: 1;
-  }
-}
-@supports (animation-timeline: scroll()) {
-  @media (prefers-reduced-motion: no-preference) {
-    .sticky-case {
-      margin-bottom: -3.5rem; /* its own 2.5rem height plus the 1rem flex gap: takes no space */
-      opacity: 0;
-      animation: sticky-in linear both;
-      animation-timeline: scroll(nearest block);
-      animation-range: 0 96px;
-    }
-  }
-}
-
-/* Live indicator: a slow ring pulse on the dot. */
-@keyframes live-pulse {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, var(--status-completed-accent) 55%, transparent);
-  }
-  70%,
-  100% {
-    box-shadow: 0 0 0 6px transparent;
-  }
-}
-@media (prefers-reduced-motion: no-preference) {
-  .live-dot {
-    animation: live-pulse 2s ease-out infinite;
-  }
-}
+.preview-workspace .sticky-case { top: 0; }

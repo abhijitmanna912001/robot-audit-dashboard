@@ -41,13 +41,13 @@ function LoadingShell() {
   return (
     <div role="status" aria-label="Loading" className="flex min-h-dvh flex-col">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90">
-        <div className="mx-auto flex min-h-14 w-full max-w-7xl items-center px-4 py-2 sm:px-6">
+        <div className="mx-auto flex min-h-14 w-full max-w-[1440px] items-center px-4 py-6 sm:px-8">
           <Brand />
         </div>
       </div>
-      <div className="mx-auto grid w-full max-w-7xl flex-1 gap-6 px-4 py-4 sm:px-6 sm:py-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+      <div className="mx-auto grid w-full max-w-[1440px] flex-1 gap-8 px-4 py-8 sm:px-8 lg:grid-cols-[336px_minmax(0,1fr)]">
         <div className="flex flex-col gap-3">
-          <Skeleton className="h-24" />
+          <Skeleton className="h-64" />
           <Skeleton className="h-8" />
           <Skeleton className="h-16" />
           <Skeleton className="h-16" />

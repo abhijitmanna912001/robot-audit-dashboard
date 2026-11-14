@@ -23,23 +23,23 @@ import { LocalTime } from "./LocalTime";
 // Red = blocked (fail), amber = broke (error). Pass is green. These are the same status
 // tokens as the badges: fail -> rejected (red), error -> failed (amber).
 const markerStyles: Record<Marker, string> = {
-  pass: "bg-status-completed text-status-completed-foreground",
-  fail: "bg-status-rejected text-status-rejected-foreground",
-  error: "bg-status-failed text-status-failed-foreground",
+  pass: "border-status-completed-accent bg-status-completed text-status-completed-foreground",
+  fail: "border-status-rejected-accent bg-status-rejected text-status-rejected-foreground",
+  error: "border-status-failed-accent bg-status-failed text-status-failed-foreground",
 };
 
 // Rail segment below a node, coloured by that event's outcome.
 const railStyles: Record<Marker | "neutral", string> = {
-  pass: "bg-status-completed-accent/60",
-  fail: "bg-status-rejected-accent/60",
-  error: "bg-status-failed-accent/60",
+  pass: "bg-status-completed-accent",
+  fail: "bg-status-rejected-accent",
+  error: "bg-status-failed-accent",
   neutral: "bg-border",
 };
 
 const nodeStyles: Record<Marker | "neutral", string> = {
-  pass: "border-status-completed-accent text-status-completed-accent shadow-[0_0_12px_-2px_var(--status-completed-accent)]",
-  fail: "border-status-rejected-accent text-status-rejected-accent shadow-[0_0_12px_-2px_var(--status-rejected-accent)]",
-  error: "border-status-failed-accent text-status-failed-accent shadow-[0_0_12px_-2px_var(--status-failed-accent)]",
+  pass: "border-status-completed-accent text-status-completed-accent",
+  fail: "border-status-rejected-accent text-status-rejected-accent",
+  error: "border-status-failed-accent text-status-failed-accent",
   neutral: "border-border text-muted-foreground",
 };
 
@@ -74,12 +74,12 @@ export function AuditTimeline({
   highlightIds?: ReadonlySet<string>;
 }) {
   if (events.length === 0) {
-    return <p className="text-sm text-muted-foreground">No audit events to show.</p>;
+    return <p className="text-sm text-muted-foreground">No audit events recorded yet. This record will update as events arrive.</p>;
   }
 
   const ctx = eventContext(events);
   return (
-    <ol className="relative">
+    <ol className="anim-timeline relative">
       {events.map((e, i) => {
         const marker = getMarker(e);
         const Icon = icons[e.eventType as string] ?? CircleHelp;
@@ -94,44 +94,43 @@ export function AuditTimeline({
         return (
           <li
             key={e.id}
-            style={{ "--i": i } as React.CSSProperties}
             className={cn(
-              "anim-row relative grid min-w-0 grid-cols-[4.25rem_1.75rem_minmax(0,1fr)] gap-x-2 rounded-ui-md @case:grid-cols-[5rem_1.75rem_minmax(0,1fr)] @case:gap-x-3",
-              last ? "pb-0" : "pb-6",
+              "relative grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 rounded-ui-sm @case:grid-cols-[5rem_1.75rem_minmax(0,1fr)] @case:gap-x-4",
+              last ? "pb-0" : "pb-7",
               highlightIds?.has(e.id) && "event-flash",
             )}
           >
-            <div className="pt-1 text-right font-mono text-xs leading-4 text-muted-foreground">
+            <div className="col-start-2 mb-2 flex flex-wrap items-center gap-x-3 font-mono text-xs leading-4 text-muted-foreground @case:col-start-1 @case:row-start-1 @case:mb-0 @case:block @case:pt-1 @case:text-right">
               <LocalTime iso={e.createdAt} className="block" />
-              {gap && <span className="mt-1 block tabular-nums">{gap}</span>}
+              {gap && <span className="block tabular-nums @case:mt-1">{gap}</span>}
             </div>
-            <div className="relative flex justify-center">
+            <div className="relative col-start-1 row-span-2 row-start-1 flex justify-center @case:col-start-2 @case:row-span-1">
               {!last && (
                 <span
                   aria-hidden="true"
-                  className={cn("absolute top-8 -bottom-6 w-px", railStyles[tone])}
+                  className={cn("absolute top-8 -bottom-7 w-px", railStyles[tone])}
                 />
               )}
               <span
                 aria-hidden="true"
                 className={cn(
-                  "relative flex size-7 items-center justify-center rounded-full border-2 bg-raised",
+                  "relative flex size-7 items-center justify-center rounded-full border bg-surface",
                   nodeStyles[tone],
                 )}
               >
                 <Icon className="size-3.5" />
               </span>
             </div>
-            <div className="min-w-0">
+            <div className="col-start-2 min-w-0 @case:col-start-3 @case:row-start-1">
               <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-1">
-                <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm leading-5 font-medium text-balance">
+                <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm leading-5 font-semibold">
                   {title}
                 </p>
                 {marker && (
                   <span
                     className={cn(
                       badgeVariants(),
-                      "h-auto rounded-full! px-2 py-1 font-mono text-[11px] leading-none uppercase tracking-wide",
+                      "h-auto rounded-ui-sm! px-2 py-1 font-mono text-xs leading-none uppercase tracking-wide",
                       markerStyles[marker],
                     )}
                   >
@@ -140,7 +139,7 @@ export function AuditTimeline({
                 )}
               </div>
               {summary && hasLine && (
-                <p className="wrap-anywhere mt-1 flex flex-wrap items-center gap-x-2 text-sm leading-5 text-muted-foreground">
+                <p className="wrap-anywhere mt-1.5 flex flex-wrap items-center gap-x-2 text-sm leading-5 text-muted-foreground">
                   {lineText && <span>{lineText}</span>}
                   {summary.shortHash && summary.hash && (
                     <span className="inline-flex items-center gap-0.5">

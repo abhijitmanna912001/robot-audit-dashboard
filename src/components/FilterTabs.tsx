@@ -27,8 +27,8 @@ export function FilterTabs({
 }) {
   const label = !showTest && hiddenTestCount > 0 ? `Test commands (${hiddenTestCount})` : "Test commands";
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2">
-      <div role="group" aria-label="Filter commands" className="flex flex-wrap gap-0.5">
+    <div className="flex flex-col items-start gap-3">
+      <div role="group" aria-label="Filter commands" className="flex w-full flex-wrap gap-1 border-b border-border pb-2">
         {TABS.map((t) => (
           <Button
             key={t.id}
@@ -38,8 +38,8 @@ export function FilterTabs({
             aria-pressed={tab === t.id}
             onClick={() => onTab(t.id)}
             className={cn(
-              "h-7 px-2 text-xs text-muted-foreground transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted",
-              tab === t.id && "bg-primary/15 text-foreground hover:bg-primary/25 active:bg-primary/30",
+              "min-h-9 rounded-ui-sm px-2 text-xs text-muted-foreground transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted",
+              tab === t.id && "bg-surface text-primary shadow-xs hover:bg-accent active:bg-accent",
             )}
           >
             {t.label}
@@ -51,18 +51,18 @@ export function FilterTabs({
         role="switch"
         aria-checked={showTest}
         onClick={onShowTest}
-        className="inline-flex h-7 items-center gap-2 rounded-full px-1 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground active:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 [&:hover>span:first-child]:border-primary/60"
+        className="inline-flex min-h-9 items-center gap-2 rounded-full px-1 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground active:text-foreground focus-visible:ring-3 focus-visible:ring-ring/30 [&:hover>span:first-child]:border-primary"
       >
         <span
           aria-hidden="true"
           className={cn(
-            "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border border-border transition-colors duration-150",
+            "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border border-input transition-colors duration-150",
             showTest ? "bg-primary" : "bg-raised",
           )}
         >
           <span
             className={cn(
-              "absolute left-0.5 size-3 rounded-full bg-foreground transition-transform duration-150",
+              "absolute left-0.5 size-3 rounded-full border border-input bg-surface shadow-xs",
               showTest && "translate-x-3",
             )}
           />

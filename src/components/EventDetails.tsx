@@ -105,7 +105,7 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
 // Native details/summary with our own chevron instead of the browser marker. Keyboard
 // behaviour (Tab, Enter, Space) is the browser's own.
 const summaryClass =
-  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-1 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden";
+  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-2 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/30 [&::-webkit-details-marker]:hidden";
 
 function Chevron() {
   return (
@@ -119,17 +119,17 @@ function Chevron() {
 export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | "payload"> }) {
   const { rows, dryRun, raw } = build(event);
   const type = (
-    <p className="font-mono text-xs text-muted-foreground">{text(event.eventType) ?? "unknown"}</p>
+    <p className="wrap-anywhere font-mono text-xs text-muted-foreground">{text(event.eventType) ?? "unknown"}</p>
   );
 
   if (raw !== undefined) {
     return (
-      <details className="group mt-2 text-xs">
+      <details className="group mt-1 text-sm leading-5">
         <summary className={summaryClass}>
           <Chevron />
           Raw payload
         </summary>
-        <div className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
+        <div className="mt-2 space-y-3 rounded-ui-sm border border-border bg-background p-3 @case:ml-5 @case:p-4">
           {type}
           <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
         </div>
@@ -137,7 +137,7 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
     );
   }
   return (
-    <details className="group mt-2 text-xs">
+    <details className="group mt-1 text-sm leading-5">
       <summary className={summaryClass}>
         <Chevron />
         Details
@@ -147,14 +147,14 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
           </span>
         )}
       </summary>
-      <dl className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
+      <dl className="mt-2 space-y-3 rounded-ui-sm border border-border bg-background p-3 @case:ml-5 @case:p-4">
         <div className="min-w-0">
           <dt className="sr-only">event type</dt>
           <dd>{type}</dd>
         </div>
         {rows.map((r) => (
           <div key={r.label} className="min-w-0">
-            <dt className="text-muted-foreground">{r.label}</dt>
+            <dt className="mb-0.5 text-xs text-muted-foreground">{r.label}</dt>
             <dd className={cn("wrap-anywhere flex min-w-0 items-start gap-1", r.mono && "font-mono")}>
               {Array.isArray(r.value) ? (
                 <ul className="min-w-0 list-inside list-disc">

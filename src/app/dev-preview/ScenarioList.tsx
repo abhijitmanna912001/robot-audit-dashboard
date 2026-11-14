@@ -48,9 +48,9 @@ export function ScenarioList({ rows, current }: { rows: ScenarioRow[]; current: 
       tabIndex={n === index ? 0 : -1}
       onClick={() => select(id)}
       className={cn(
-        "flex w-full min-w-0 items-center gap-3 rounded-ui-md border px-3 py-2 text-left text-sm leading-5 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
+        "flex min-h-11 w-full min-w-0 items-center gap-3 rounded-ui-sm border px-3 py-2 text-left text-sm leading-5 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
         n === index
-          ? "border-primary/30 border-l-2 border-l-primary bg-primary/12 text-foreground hover:bg-primary/16"
+          ? "border-primary border-l-2 border-l-primary bg-accent text-primary hover:bg-primary/15"
           : "border-transparent text-muted-foreground hover:bg-raised hover:text-foreground active:bg-muted",
       )}
     >
@@ -83,7 +83,7 @@ export function ScenarioList({ rows, current }: { rows: ScenarioRow[]; current: 
         ALL,
         rows.length,
         <>
-          <span aria-hidden="true" className="size-2 shrink-0 rounded-sm border border-muted-foreground/60" />
+          <span aria-hidden="true" className="size-2 shrink-0 rounded-sm border border-muted-foreground" />
           <span className="min-w-0 flex-1 truncate">All scenarios (stacked)</span>
         </>,
       )}

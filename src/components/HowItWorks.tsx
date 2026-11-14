@@ -21,17 +21,17 @@ function Body() {
           <li key={s.name} className="flex gap-3">
             <span
               aria-hidden="true"
-              className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border font-mono text-[11px] leading-4 text-muted-foreground"
+              className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border font-mono text-xs leading-4 text-muted-foreground"
             >
               {i + 1}
             </span>
-            <p className="min-w-0 text-xs leading-4 text-muted-foreground">
+            <p className="min-w-0 text-sm leading-5 text-muted-foreground">
               <span className="font-medium text-foreground">{s.name}</span> {s.text}
             </p>
           </li>
         ))}
       </ol>
-      <p className="mt-3 text-xs leading-4 text-muted-foreground">{CLOSING}</p>
+      <p className="mt-3 text-sm leading-5 text-muted-foreground">{CLOSING}</p>
     </>
   );
 }
@@ -41,16 +41,16 @@ function Body() {
 export function HowItWorks() {
   return (
     <>
-      <section aria-label={TITLE} className="surface-card hidden rounded-ui-lg p-4 lg:block">
-        <h2 className="mb-3 text-[11px] leading-4 font-medium tracking-[0.14em] text-muted-foreground uppercase">
+      <section aria-label={TITLE} className="surface-card hidden rounded-ui-md p-4 lg:block">
+        <h2 className="mb-3 font-mono text-xs leading-4 font-medium tracking-[0.12em] text-muted-foreground uppercase">
           {TITLE}
         </h2>
         <Body />
       </section>
-      <details className="surface-card group rounded-ui-lg p-4 lg:hidden">
-        <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] leading-4 font-medium tracking-[0.14em] text-muted-foreground uppercase outline-none select-none focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+      <details className="surface-card group rounded-ui-md p-4 lg:hidden">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-1 font-mono text-xs leading-4 font-medium tracking-[0.12em] text-muted-foreground uppercase outline-none select-none focus-visible:ring-3 focus-visible:ring-ring/30 [&::-webkit-details-marker]:hidden">
           {TITLE}
-          <span aria-hidden="true" className="transition-transform duration-150 group-open:rotate-180">
+          <span aria-hidden="true" className="group-open:rotate-180">
             ▾
           </span>
         </summary>
