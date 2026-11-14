@@ -597,6 +597,55 @@ nothing anywhere and never re-reads the command text), `execution_completed`
 `dryRun: true`: there is no real execution path, and no flag, setting or environment variable
 that could create one. Real execution (`dryRun: false`) remains a future, separately agreed step.
 
+#### Proposed simulation payloads
+
+**PROPOSED, not implemented. The worker currently writes only `dryRun: true`. Simulation movement
+gates are closed and the worker's simulation executor (draft PR #19) is not merged. These shapes
+are proposed with the worker owner and are to be confirmed.**
+
+| Event | `payload` (simulation mode) |
+|---|---|
+| `execution_started` | `{ "dryRun": false, "mode": "simulation" }` |
+| `execution_completed` | `{ "dryRun": false, "mode": "simulation", "summary": string, "telemetry": { "start": snapshot, "target": snapshot, "restored": snapshot }, "toleranceRad": number }` |
+| `execution_failed` | `{ "dryRun": false, "mode": "simulation", "error": { "kind": string, "detail": string }, "stop": "confirmed" \| "unconfirmed" \| "not_needed", "lastTelemetry": snapshot? }` |
+
+- `summary` and `error.detail` are at most 200 characters. `error.kind` is a short snake_case
+  string.
+- `lastTelemetry` is optional and present only if a joint read succeeded.
+- `stop` records whether the simulation was confirmed stopped after a failure: `confirmed`,
+  `unconfirmed`, or `not_needed` (nothing was moving).
+
+**Snapshot shape:**
+
+```json
+{
+  "readAt": "2026-11-14T08:30:01Z",
+  "joints": { "_1": 0.0, "_2": 0.0, "_3": 0.0, "_4": 0.0, "_5": 0.0, "_6": 0.0 }
+}
+```
+
+`readAt` is an ISO 8601 UTC string with a trailing `Z`. `joints` contains finite numbers in
+radians and only those six joint names (`_1` to `_6`).
+
+**Rules:**
+
+- Timestamps are ISO 8601 UTC strings with a trailing `Z` (for example `2026-11-14T08:30:01Z`).
+  The worker converts Cyberwave's Unix timestamps to this format.
+- Payloads never contain keys, headers, URLs or raw SDK responses.
+- Dry-run payloads stay exactly as they are today (`dryRun: true`, no `mode` field).
+- `stop: "confirmed"` is allowed only when the stop method returned a confirmation.
+
+**Dashboard note:** a future dashboard change would show a "Simulated" label only when `mode` is
+exactly the string `"simulation"` and `dryRun` is strictly boolean `false`. This display is not
+built yet.
+
+**Open verification items (all unverified):**
+
+- What the simulation stop call cancels, and how to confirm the server-side status. Unverified.
+- Whether joint readings are measured simulator state or echoed commanded values. Unverified.
+- Whether live hardware can be reached from the workspace and API key. Unverified.
+- Whether a lookup-only twin call exists. Unverified.
+
 ## 7. Row Level Security and Realtime
 
 The SQL for this section is in `db/001_init.sql` and is applied. The blocks below are the
