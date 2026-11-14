@@ -214,7 +214,7 @@ export function Dashboard({
           aria-label="Selected command audit"
           tabIndex={-1}
           key={selectedId ?? "none"}
-          className="scroll-subtle min-w-0 scroll-pt-6 lg:min-h-0 lg:overflow-y-auto lg:p-1.5 lg:pr-3 lg:[scrollbar-gutter:stable]"
+          className="case-scrollport scroll-subtle min-w-0 lg:min-h-0 lg:overflow-y-auto lg:px-1.5 lg:pb-1.5 lg:pr-3 lg:[scrollbar-gutter:stable]"
         >
           {selected ? (
             <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />

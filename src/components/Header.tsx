@@ -42,7 +42,7 @@ export function TopBar({
 }) {
   const shown = COMMAND_STATUSES.filter((s) => counts[s] > 0);
   return (
-    <header className="sticky top-0 z-20 shrink-0 border-b border-border bg-background/95 backdrop-blur">
+    <header data-dashboard-header className="sticky top-0 z-20 shrink-0 border-b border-border bg-background">
       <div className="mx-auto flex min-h-22 w-full max-w-[1440px] flex-wrap items-center justify-between gap-x-6 gap-y-4 px-4 py-4 sm:px-8">
         <Brand />
         <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2">

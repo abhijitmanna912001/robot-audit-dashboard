@@ -38,7 +38,7 @@ export function ViewportFrame({ title, children }: { title: string; children: Re
       <div
         id="scenario-panel"
         role="tabpanel"
-        className="scroll-subtle min-h-0 min-w-0 flex-1 scroll-pt-6 overflow-y-auto p-3 [scrollbar-gutter:stable] sm:p-6"
+        className="case-scrollport scroll-subtle min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 [scrollbar-gutter:stable] sm:px-6 sm:pb-6"
       >
         <div
           className={cn(

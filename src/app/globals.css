@@ -195,10 +195,10 @@
   .event-flash { animation: none; }
 }
 
-/* The dashboard has a sticky top bar on phones; desktop and preview records scroll
-   in their own panes. No animation is needed to keep the case header available. */
-.sticky-case { top: 11rem; }
-@media (min-width: 1024px) {
-  .sticky-case { top: 0; }
-}
-.preview-workspace .sticky-case { top: 0; }
+/* The header is measured against the actual scroll pane and rendered outside the
+   content clipping layer. Its background is opaque, with no fade or translucency. */
+.case-header-measure { position: absolute; inset: 0 0 auto; visibility: hidden; pointer-events: none; }
+.case-compact-header { padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.case-floating-header { position: fixed; z-index: 30; background: var(--surface); border-inline: 1px solid var(--border); }
+.case-scrollport { scroll-padding-block-start: var(--case-header-clearance, 7rem); scroll-padding-block-end: 1rem; }
+html { scroll-padding-block-start: var(--case-header-clearance, 11rem); }
