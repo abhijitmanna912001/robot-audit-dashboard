@@ -51,35 +51,35 @@ export function CommandList({
     );
   }
   return (
-    <ul ref={list} onKeyDown={onKeyDown} className="scroll-subtle -m-1.5 flex max-h-64 flex-col gap-1 overflow-y-auto p-1.5 lg:max-h-none lg:overflow-visible">
+    <ul ref={list} onKeyDown={onKeyDown} className="scroll-subtle -m-1.5 flex max-h-64 flex-col divide-y divide-border overflow-y-auto p-1.5 lg:max-h-none lg:overflow-visible">
       {commands.map((c) => {
         const selected = c.id === selectedId;
         return (
-          <li key={c.id} className="min-w-0">
+          <li key={c.id} className="min-w-0 py-1.5">
             <button
               type="button"
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "relative block min-h-20 w-full min-w-0 rounded-ui-sm border px-3 py-3 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
+                "relative block w-full min-w-0 rounded-ui-sm border-l-3 border-l-transparent px-3 py-3 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
                 selected
-                  ? "border-primary border-l-3 border-l-primary bg-accent hover:bg-accent active:bg-primary/15"
-                  : "border-transparent border-b-border bg-transparent hover:border-border hover:bg-surface active:bg-muted",
+                  ? "border-l-primary bg-accent hover:bg-accent active:bg-primary/15"
+                  : "bg-transparent hover:bg-surface active:bg-muted",
               )}
             >
               <span className="flex min-w-0 items-center justify-between gap-3">
-                <span className="block min-w-0 line-clamp-2 wrap-anywhere font-medium leading-5" title={c.text}>
+                <span className="block h-10 min-w-0 line-clamp-2 wrap-anywhere font-medium leading-5" title={c.text}>
                   {c.text}
                 </span>
                 {stagesById?.get(c.id) && <MiniPipeline stages={stagesById.get(c.id)!} />}
               </span>
-              <span className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-4 text-muted-foreground">
+              <span className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-1 text-xs leading-4 text-muted-foreground">
                 <span className="inline-flex items-center gap-2">
                   <span aria-hidden="true" className={cn("size-1.5 rounded-full", statusDot[c.status])} />
                   <span className="capitalize">{c.status}</span>
                 </span>
-                <span className="font-mono">{shortId(c.id)}</span>
-                <LocalTime iso={c.createdAt} showDate className="font-mono" />
+                <span className="font-mono" title={c.id}>Run {shortId(c.id)}</span>
+                <LocalTime iso={c.createdAt} showDate showRelative className="col-span-2 font-mono" />
               </span>
             </button>
           </li>

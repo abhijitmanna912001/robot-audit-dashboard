@@ -202,3 +202,7 @@
 .case-floating-header { position: fixed; z-index: 30; background: var(--surface); border-inline: 1px solid var(--border); }
 .case-scrollport { scroll-padding-block-start: var(--case-header-clearance, 7rem); scroll-padding-block-end: 1rem; }
 html { scroll-padding-block-start: var(--case-header-clearance, 11rem); }
+
+/* Pane borders stay fixed while its content scrolls; padding protects composer
+   borders, shadows and keyboard focus from clipping at either edge. */
+.command-scrollport { scroll-padding-block: 1rem; }
