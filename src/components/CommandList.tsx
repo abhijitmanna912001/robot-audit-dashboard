@@ -2,21 +2,12 @@
 
 import { useRef } from "react";
 import { Inbox } from "lucide-react";
-import type { Command, CommandStatus } from "@/types/draft";
+import type { Command } from "@/types/draft";
 import { cn } from "@/lib/utils";
 import { LocalTime } from "./LocalTime";
 import { MiniPipeline } from "./MiniPipeline";
+import { statusDot } from "./status-dot";
 import type { PipelineStage } from "@/lib/pipeline";
-
-// Literal class names so Tailwind can see them. A small dot plus the status word.
-const dot: Record<CommandStatus, string> = {
-  received: "bg-status-received-accent",
-  approved: "bg-status-approved-accent",
-  rejected: "bg-status-rejected-accent",
-  executing: "bg-status-executing-accent",
-  completed: "bg-status-completed-accent",
-  failed: "bg-status-failed-accent",
-};
 
 // First 8 characters of the id, as plain text (ids are uuids; the row also has a title).
 const shortId = (id: string) => id.slice(0, 8);
@@ -82,9 +73,9 @@ export function CommandList({
                 </span>
                 {stagesById?.get(c.id) && <MiniPipeline stages={stagesById.get(c.id)!} />}
               </span>
-              <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
-                  <span aria-hidden="true" className={cn("size-1.5 rounded-full", dot[c.status])} />
+              <span className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-4 text-muted-foreground">
+                <span className="inline-flex items-center gap-2">
+                  <span aria-hidden="true" className={cn("size-1.5 rounded-full", statusDot[c.status])} />
                   <span className="capitalize">{c.status}</span>
                 </span>
                 <span className="font-mono">{shortId(c.id)}</span>

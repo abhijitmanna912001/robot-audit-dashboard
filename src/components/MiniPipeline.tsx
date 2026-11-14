@@ -23,7 +23,7 @@ const word: Record<StageState, string> = {
 export function MiniPipeline({ stages }: { stages: readonly PipelineStage[] }) {
   const label = `Pipeline: ${stages.map((s) => `${s.stage} ${word[s.state]}`).join(", ")}`;
   return (
-    <span role="img" aria-label={label} title={label} className="flex shrink-0 items-center gap-1.5">
+    <span role="img" aria-label={label} title={label} className="flex shrink-0 items-center gap-2">
       {stages.map((s) => (
         <span key={s.stage} aria-hidden="true" className={cn("size-2 rounded-full", dot[s.state])} />
       ))}

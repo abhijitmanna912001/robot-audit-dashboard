@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stageDetails, verdictFacts, verdictStamp } from "./verdict.ts";
+import { bindUnits, stageDetails, verdictFacts, verdictStamp } from "./verdict.ts";
 
+const NB = "\u00A0";
 const H = "sha256:" + "ab".repeat(32);
 let n = 0;
 const ev = (eventType: unknown, payload: unknown) => ({
@@ -28,20 +29,20 @@ test("verdictStamp", () => {
 });
 
 test("verdictFacts: derived pieces only", () => {
-  assert.deepEqual(verdictFacts([plan(), vPass(), cApprove()]), ["2 of 2 checks passed", "0 rules triggered", "4 s elapsed"]);
-  assert.deepEqual(verdictFacts([plan(), vFail()]), ["0 of 1 checks passed", "2 validator errors", "2 s elapsed"]);
+  assert.deepEqual(verdictFacts([plan(), vPass(), cApprove()]), [`2${NB}of${NB}2${NB}checks passed`, `0${NB}rules triggered`, `4${NB}s elapsed`]);
+  assert.deepEqual(verdictFacts([plan(), vFail()]), [`0${NB}of${NB}1${NB}checks passed`, `2${NB}validator errors`, `2${NB}s elapsed`]);
   assert.deepEqual(verdictFacts([plan()]), []);
   assert.deepEqual(verdictFacts([]), []);
 });
 
 test("verdictFacts: a critic without a triggeredRules array shows no rule count", () => {
   const out = verdictFacts([ev("critic_result", { outcome: "approve" })]);
-  assert.deepEqual(out, ["1 of 1 checks passed"]);
+  assert.deepEqual(out, [`1${NB}of${NB}1${NB}checks passed`]);
 });
 
 test("stageDetails", () => {
   const d = stageDetails([plan(), vPass(), cApprove(), done(true)]);
-  assert.deepEqual(d, { planned: "1 action", validator: "v1.0 · 1 action checked", critic: "0 rules triggered", execution: "dry run" });
+  assert.deepEqual(d, { planned: "1 action", validator: "v1.0 · 1 action checked", critic: "0 rules triggered", execution: "nothing sent to a robot" });
   assert.equal(stageDetails([plan(), vFail()]).validator, "2 errors");
   assert.equal(stageDetails([plan(), vPass(), cErr("timeout")]).critic, "Critic timed out");
   assert.equal(stageDetails([ev("plan_generated", { outcome: "error", error: { kind: "unsupported_command" } })]).planned, "Not a supported command");
@@ -56,4 +57,27 @@ test("malformed input never throws", () => {
     assert.equal(typeof stageDetails(b), "object");
   }
   assert.deepEqual(stageDetails([ev("critic_result", { outcome: "error", error: { kind: 5 } })]), {});
+});
+
+test("bindUnits: numbers stay with their units", () => {
+  assert.equal(bindUnits("5 s elapsed"), `5${NB}s elapsed`);
+  assert.equal(bindUnits("2 min 5 s elapsed"), `2${NB}min${NB}5${NB}s elapsed`);
+  assert.equal(bindUnits("1 h 3 min"), `1${NB}h${NB}3${NB}min`);
+  assert.equal(bindUnits("no numbers here"), "no numbers here");
+  assert.equal(bindUnits(""), "");
+});
+
+test("stageDetails: dry run wording and no repeated lines", () => {
+  const dryDone = stageDetails([plan(), vPass(), cApprove(), done(true)]);
+  assert.equal(dryDone.execution, "nothing sent to a robot");
+  assert.equal(stageDetails([plan(), vPass(), cApprove(), done(false)]).execution, "executed");
+  // Started (running) dry run: the state word is "running", so "dry run" is new information.
+  assert.equal(stageDetails([plan(), vPass(), cApprove(), ev("execution_started", { dryRun: true })]).execution, "dry run");
+  // A failed dry run: "failed" then "dry run".
+  assert.equal(stageDetails([plan(), vPass(), cApprove(), ev("execution_failed", { dryRun: true })]).execution, "dry run");
+  // No detail ever equals the state word shown above it.
+  const words = ["passed", "failed", "error", "not reached", "dry run", "running"];
+  for (const set of [[plan(), vPass(), cApprove(), done(true)], [plan(), vFail()], [plan(), vPass(), cErr("timeout")]]) {
+    for (const d of Object.values(stageDetails(set))) assert.ok(!words.includes((d as string).toLowerCase()));
+  }
 });

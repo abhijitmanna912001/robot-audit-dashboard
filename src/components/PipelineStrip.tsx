@@ -11,7 +11,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { activeStage, type PipelineStage, type StageName, type StageState } from "@/lib/pipeline";
+import { activeStage, STATE_WORD, type PipelineStage, type StageName, type StageState } from "@/lib/pipeline";
 import { cn } from "@/lib/utils";
 
 const stageIcon: Record<StageName, LucideIcon> = {
@@ -26,15 +26,6 @@ const stageLabel: Record<StageName, string> = {
   validator: "Validator",
   critic: "Critic",
   execution: "Execution",
-};
-
-const stateLabel: Record<StageState, string> = {
-  passed: "passed",
-  failed: "failed",
-  error: "error",
-  not_reached: "not reached",
-  dry_run: "dry run",
-  running: "running",
 };
 
 // Red = blocked (validator fail, critic reject), amber = something broke (errors and a
@@ -114,7 +105,7 @@ export function PipelineStrip({
   return (
     <ol
       aria-label="Pipeline"
-      className="surface-card grid grid-cols-2 gap-x-3 gap-y-4 rounded-ui-lg px-3 py-4 sm:grid-cols-4"
+      className="surface-card grid grid-cols-2 gap-x-3 gap-y-4 rounded-ui-lg px-3 py-4 @case:grid-cols-4"
     >
       {stages.map(({ stage, state }, i) => {
         const tone = toneOf(stage, state);
@@ -126,14 +117,14 @@ export function PipelineStrip({
           <li
             key={stage}
             aria-current={stage === active ? "step" : undefined}
-            className="relative flex min-w-0 items-center gap-2 sm:flex-col sm:gap-1.5 sm:text-center"
+            className="relative flex min-w-0 items-center gap-2 @case:flex-col @case:gap-2 @case:text-center"
           >
             {next && (
               <span
                 aria-hidden="true"
                 style={{ width: "calc(100% - 28px)" }}
                 className={cn(
-                  "absolute top-[19px] left-[calc(50%+1.5rem)] hidden sm:block",
+                  "absolute top-[19px] left-[calc(50%+1.5rem)] hidden @case:block",
                   solid
                     ? `anim-line h-0.5 rounded-full bg-linear-to-r ${connectorFrom[tone as Exclude<Tone, "idle">]} ${connectorTo[nextTone]}`
                     : DASHED,
@@ -146,23 +137,23 @@ export function PipelineStrip({
                 circle[tone],
               )}
             >
-              <Icon aria-hidden="true" className="size-[18px]" />
+              <Icon aria-hidden="true" className="size-5" />
             </span>
             <span className="min-w-0">
-              <span className="block truncate text-sm font-medium text-foreground">
+              <span className="block truncate text-sm leading-5 font-medium text-foreground">
                 {stageLabel[stage]}
               </span>
               <span
                 className={cn(
-                  "flex items-center gap-1 text-xs sm:justify-center",
+                  "flex items-center gap-1 text-xs leading-4 @case:justify-center",
                   tone === "idle" ? "text-muted-foreground" : "text-foreground/80",
                 )}
               >
                 <StateGlyph state={state} />
-                {stateLabel[state]}
+                {STATE_WORD[state]}
               </span>
               {details[stage] && (
-                <span className="mt-0.5 block wrap-anywhere font-mono text-[11px] leading-snug text-muted-foreground">
+                <span className="mt-1 block text-xs leading-4 wrap-anywhere text-muted-foreground">
                   {details[stage]}
                 </span>
               )}

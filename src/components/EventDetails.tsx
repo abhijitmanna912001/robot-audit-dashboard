@@ -105,7 +105,7 @@ function build(e: Pick<AuditEvent, "eventType" | "payload">): {
 // Native details/summary with our own chevron instead of the browser marker. Keyboard
 // behaviour (Tab, Enter, Space) is the browser's own.
 const summaryClass =
-  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-0.5 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden";
+  "-mx-1 inline-flex list-none items-center gap-1 rounded-sm px-1 py-1 select-none text-muted-foreground outline-none transition-colors duration-150 hover:bg-raised hover:text-foreground active:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden";
 
 function Chevron() {
   return (
@@ -129,7 +129,7 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
           <Chevron />
           Raw payload
         </summary>
-        <div className="mt-1.5 ml-5 space-y-1.5 rounded-ui-md bg-raised p-2">
+        <div className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
           {type}
           <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
         </div>
@@ -142,12 +142,12 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
         <Chevron />
         Details
         {dryRun && (
-          <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
+          <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-1 font-medium uppercase tracking-wide text-status-info-foreground">
             dry run
           </span>
         )}
       </summary>
-      <dl className="mt-1.5 ml-5 space-y-1.5 rounded-ui-md bg-raised p-2">
+      <dl className="mt-2 ml-5 space-y-2 rounded-ui-md bg-raised p-2">
         <div className="min-w-0">
           <dt className="sr-only">event type</dt>
           <dd>{type}</dd>

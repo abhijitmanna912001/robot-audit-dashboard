@@ -14,6 +14,7 @@ import { CommandInput } from "./CommandInput";
 import { CommandList } from "./CommandList";
 import type { ConnectionStatus } from "./ConnectionIndicator";
 import { FilterTabs } from "./FilterTabs";
+import { HowItWorks } from "./HowItWorks";
 import { TopBar } from "./Header";
 import { isTestCommand } from "./test-commands";
 
@@ -179,7 +180,7 @@ export function Dashboard({
             Could not load or refresh data
           </p>
         )}
-        <section aria-label="Commands" className="flex min-w-0 flex-col gap-3 scroll-subtle lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <section aria-label="Commands" className="scroll-subtle flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:p-1 lg:pr-3 lg:[scrollbar-gutter:stable]">
           <CommandInput onSubmitted={handleSubmitted} />
           <FilterTabs
             tab={tab}
@@ -196,10 +197,17 @@ export function Dashboard({
             stagesById={stagesById}
             emptyText={emptyText}
           />
+          <HowItWorks />
         </section>
-        <section className="scroll-subtle min-w-0 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        {/* Keyed by the selection: switching commands remounts the scroll container, so it starts
+            at the top (no scroll code). The padding keeps focus rings and shadows from being
+            clipped; the stable gutter keeps the scrollbar off the cards. */}
+        <section
+          key={selectedId ?? "none"}
+          className="scroll-subtle min-w-0 scroll-pt-14 lg:min-h-0 lg:overflow-y-auto lg:p-1 lg:pr-3 lg:[scrollbar-gutter:stable]"
+        >
           {selected ? (
-            <CaseFile key={selected.id} command={selected} events={selectedEvents} highlightIds={freshIds} />
+            <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />
           ) : (
             <div className="surface-card flex flex-col items-center gap-2 rounded-ui-lg px-4 py-12 text-center">
               <FileSearch aria-hidden="true" className="size-6 text-muted-foreground" />

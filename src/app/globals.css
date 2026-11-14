@@ -5,6 +5,9 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* Case-file container breakpoint (@case:). Inside the case file, layout follows the column
+     width, not the window, so the /dev-preview phone frame shows the real mobile layout. */
+  --container-case: 30rem;
   --color-background: var(--background);
   --radius-ui-sm: 6px;
   --radius-ui-md: 8px;
@@ -206,6 +209,8 @@
   html {
     @apply font-sans;
     color-scheme: dark;
+    /* Focus and scrollIntoView never land under the sticky top bar. */
+    scroll-padding-top: 4.5rem;
   }
   /* Tailwind v4 resets buttons to cursor: default. Interactive things get a pointer,
      disabled things get not-allowed (last, so it wins). */
@@ -268,17 +273,17 @@
 /* Subtle scrollbars for the two columns. */
 .scroll-subtle {
   scrollbar-width: thin;
-  scrollbar-color: oklch(1 0 0 / 22%) transparent;
+  scrollbar-color: rgb(255 255 255 / 18%) transparent;
 }
 .scroll-subtle::-webkit-scrollbar {
   width: 8px;
 }
 .scroll-subtle::-webkit-scrollbar-thumb {
-  background: oklch(1 0 0 / 18%);
+  background: rgb(255 255 255 / 14%);
   border-radius: 9999px;
 }
 .scroll-subtle::-webkit-scrollbar-thumb:hover {
-  background: oklch(1 0 0 / 32%);
+  background: rgb(255 255 255 / 28%);
 }
 
 /* Card surface: border, subtle top-to-bottom gradient, inset top highlight, soft shadow. */
@@ -322,5 +327,50 @@
   .anim-line {
     transform-origin: left center;
     animation: line-draw 200ms ease-out both;
+  }
+}
+
+/* Example chips: one scrollable row, snap scrolling, faded edges, scrollbar hidden. */
+.chip-row {
+  scrollbar-width: none;
+  mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
+}
+.chip-row::-webkit-scrollbar {
+  display: none;
+}
+
+/* Sticky bar at the top of the case file. By default it is a quiet strip that is always visible.
+   Where scroll-driven animations exist (and motion is allowed) it overlaps the title block and
+   fades in only once the title has scrolled away. CSS only. */
+@keyframes sticky-in {
+  to {
+    opacity: 1;
+  }
+}
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .sticky-case {
+      margin-bottom: -3.5rem; /* its own 2.5rem height plus the 1rem flex gap: takes no space */
+      opacity: 0;
+      animation: sticky-in linear both;
+      animation-timeline: scroll(nearest block);
+      animation-range: 0 96px;
+    }
+  }
+}
+
+/* Live indicator: a slow ring pulse on the dot. */
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--status-completed-accent) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .live-dot {
+    animation: live-pulse 2s ease-out infinite;
   }
 }

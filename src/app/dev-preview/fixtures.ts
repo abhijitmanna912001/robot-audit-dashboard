@@ -67,9 +67,6 @@ const criticApprove = (s: string) =>
     },
   });
 
-// Query value for "show every scenario". Lives here, not in the client picker, so the server page gets a real string.
-export const ALL = "all";
-
 const slug = (title: string) =>
   title
     .toLowerCase()

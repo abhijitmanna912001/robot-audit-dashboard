@@ -5,11 +5,17 @@ import { elapsedMs, formatElapsed } from "./elapsed.ts";
 import { eventContext } from "./event-summary.ts";
 import { kindLabel } from "./kind-label.ts";
 import { readCritic, readExecution, readPlanFailure, readValidator, asRecord } from "./payload.ts";
-import { bannerTone, derivePipeline, type StageName } from "./pipeline.ts";
+import { bannerTone, derivePipeline, STATE_WORD, type StageName } from "./pipeline.ts";
 
 type EventLike = { eventType: unknown; payload: unknown };
 
 const list = (events: unknown): EventLike[] => (Array.isArray(events) ? (events as EventLike[]) : []);
+// Non-breaking spaces between a number and its unit, so "5 s" or "2 min 5 s" never split across
+// lines. A unit that is followed by another number ("2 min 5 s") is bound to it as well.
+export function bindUnits(s: string): string {
+  return s.replace(/(\d) (?=[A-Za-z])/g, "$1\u00A0").replace(/\b(min|h|of) (?=\d)/g, "$1\u00A0");
+}
+
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function last(events: EventLike[], type: string, pick?: (p: unknown) => boolean): EventLike | undefined {
@@ -82,7 +88,7 @@ export function verdictFacts(events: unknown): string[] {
     const ms = elapsedMs(list_ as never);
     const span = ms === undefined ? undefined : formatElapsed(ms);
     if (span !== undefined) out.push(`${span} elapsed`);
-    return out;
+    return out.map(bindUnits);
   } catch {
     return [];
   }
@@ -143,7 +149,16 @@ export function stageDetails(events: unknown): Partial<Record<StageName, string>
       const e =
         last(list_, "execution_completed") ?? last(list_, "execution_failed") ?? last(list_, "execution_started");
       const dry = e ? readExecution(e.payload).dryRun : undefined;
-      if (dry !== undefined) out.execution = dry ? "dry run" : "executed";
+      if (dry !== undefined) {
+        // A finished dry run says what it means; a repeated "dry run" under "dry run" is dropped below.
+        out.execution = !dry ? "executed" : state("execution") === "dry_run" ? "nothing sent to a robot" : "dry run";
+      }
+    }
+    // A detail must not repeat the line above it (the state word).
+    const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    for (const s of stages) {
+      const d = out[s.stage];
+      if (d !== undefined && norm(d) === norm(STATE_WORD[s.state])) delete out[s.stage];
     }
   } catch {
     // Details are optional.

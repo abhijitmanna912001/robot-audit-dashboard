@@ -9,6 +9,16 @@ export type StageName = (typeof STAGES)[number];
 
 export type StageState = "passed" | "failed" | "error" | "not_reached" | "dry_run" | "running";
 
+// The word shown for each state. One table so the stepper and the detail-line rule agree.
+export const STATE_WORD: Record<StageState, string> = {
+  passed: "passed",
+  failed: "failed",
+  error: "error",
+  not_reached: "not reached",
+  dry_run: "dry run",
+  running: "running",
+};
+
 export type PipelineStage = { stage: StageName; state: StageState };
 
 export type BannerTone = "success" | "blocked" | "broke" | "running" | "waiting";

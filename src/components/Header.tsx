@@ -51,12 +51,12 @@ export function TopBar({
           {shown.length > 0 && (
             <ul
               aria-label="Commands by status"
-              className="flex flex-wrap items-center divide-x divide-border overflow-hidden rounded-ui-md border border-border bg-surface font-mono text-xs text-muted-foreground"
+              className="flex flex-wrap items-center divide-x divide-border overflow-hidden rounded-ui-md border border-border bg-surface text-xs leading-4 text-muted-foreground"
             >
               {shown.map((s) => (
-                <li key={s} className="inline-flex items-center gap-1.5 px-2.5 py-1">
+                <li key={s} className="inline-flex items-center gap-2 px-3 py-1">
                   <span aria-hidden="true" className={`size-1.5 rounded-full ${dot[s]}`} />
-                  <span className="font-medium text-foreground tabular-nums">{counts[s]}</span>
+                  <span className="font-mono font-medium text-foreground tabular-nums">{counts[s]}</span>
                   <span>{s}</span>
                 </li>
               ))}
@@ -64,7 +64,7 @@ export function TopBar({
           )}
           <span
             title="Nothing is sent to a robot"
-            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 font-mono text-xs text-muted-foreground"
+            className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs leading-4 text-muted-foreground"
           >
             <FlaskConical aria-hidden="true" className="size-3 text-status-info-accent" />
             <span>Mode</span>

@@ -66,14 +66,27 @@ export function VerdictCard({
         <Icon className={cn("size-6", tone === "running" && "animate-spin")} />
       </span>
       <div className="min-w-0 flex-1 basis-56">
-        <p className="wrap-anywhere text-xl leading-snug font-semibold text-balance">{headline}</p>
+        <p className="wrap-anywhere text-xl leading-tight font-semibold text-balance">{headline}</p>
         {facts.length > 0 && (
-          <p className="mt-1 font-mono text-xs text-muted-foreground tabular-nums">{facts.join(" · ")}</p>
+          // Each fact is one unbreakable unit (its numbers are already bound to their units with
+          // non-breaking spaces), so a line only wraps between facts.
+          <p className="mt-1 flex flex-wrap gap-x-2 text-[13px] leading-5 text-muted-foreground tabular-nums">
+            {facts.map((f, i) => (
+              <span key={f} className="whitespace-nowrap">
+                {i > 0 && (
+                  <span aria-hidden="true" className="mr-2">
+                    ·
+                  </span>
+                )}
+                {f}
+              </span>
+            ))}
+          </p>
         )}
       </div>
       <span
         className={cn(
-          "shrink-0 rounded-full border px-3 py-1 font-mono text-xs font-medium tracking-[0.14em] whitespace-nowrap",
+          "shrink-0 rounded-full border px-3 py-1 font-mono text-xs leading-4 font-medium tracking-[0.14em] whitespace-nowrap",
           t.stamp,
         )}
       >

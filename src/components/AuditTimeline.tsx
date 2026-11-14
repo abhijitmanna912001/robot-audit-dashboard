@@ -96,14 +96,14 @@ export function AuditTimeline({
             key={e.id}
             style={{ "--i": i } as React.CSSProperties}
             className={cn(
-              "anim-row relative grid min-w-0 grid-cols-[4.25rem_1.75rem_minmax(0,1fr)] gap-x-2 rounded-ui-md sm:grid-cols-[5rem_1.75rem_minmax(0,1fr)] sm:gap-x-3",
+              "anim-row relative grid min-w-0 grid-cols-[4.25rem_1.75rem_minmax(0,1fr)] gap-x-2 rounded-ui-md @case:grid-cols-[5rem_1.75rem_minmax(0,1fr)] @case:gap-x-3",
               last ? "pb-0" : "pb-6",
               highlightIds?.has(e.id) && "event-flash",
             )}
           >
-            <div className="pt-1 text-right font-mono text-xs leading-tight text-muted-foreground">
+            <div className="pt-1 text-right font-mono text-xs leading-4 text-muted-foreground">
               <LocalTime iso={e.createdAt} className="block" />
-              {gap && <span className="mt-0.5 block tabular-nums">{gap}</span>}
+              {gap && <span className="mt-1 block tabular-nums">{gap}</span>}
             </div>
             <div className="relative flex justify-center">
               {!last && (
@@ -123,15 +123,15 @@ export function AuditTimeline({
               </span>
             </div>
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
-                <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm leading-snug font-medium text-balance">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-1">
+                <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm leading-5 font-medium text-balance">
                   {title}
                 </p>
                 {marker && (
                   <span
                     className={cn(
                       badgeVariants(),
-                      "h-auto rounded-full! px-2 py-px font-mono text-[11px] uppercase tracking-wide",
+                      "h-auto rounded-full! px-2 py-1 font-mono text-[11px] leading-none uppercase tracking-wide",
                       markerStyles[marker],
                     )}
                   >
@@ -140,7 +140,7 @@ export function AuditTimeline({
                 )}
               </div>
               {summary && hasLine && (
-                <p className="wrap-anywhere mt-0.5 flex flex-wrap items-center gap-x-1 text-sm text-muted-foreground">
+                <p className="wrap-anywhere mt-1 flex flex-wrap items-center gap-x-2 text-sm leading-5 text-muted-foreground">
                   {lineText && <span>{lineText}</span>}
                   {summary.shortHash && summary.hash && (
                     <span className="inline-flex items-center gap-0.5">

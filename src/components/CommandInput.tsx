@@ -109,7 +109,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
         <div className="relative min-w-0 sm:flex-1">
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute top-[7px] left-2.5 font-mono text-sm text-primary select-none"
+          className="pointer-events-none absolute top-2 left-3 font-mono text-sm text-primary select-none"
         >
           &gt;
         </span>
@@ -125,16 +125,16 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               void handleSubmit(e);
             }
           }}
-          rows={expanded ? 3 : 1}
+          rows={expanded ? 2 : 1}
           maxLength={MAX_TEXT_LENGTH}
-          placeholder="Type a command for the robot..."
+          placeholder="Type a command..."
           aria-describedby={`${helpId} ${countId}`}
           className="min-h-9 w-full min-w-0 resize-none bg-raised pr-14 pl-7 font-mono text-sm caret-primary transition-[height] duration-150 md:text-sm"
         />
         <kbd
           aria-hidden="true"
           title="Cmd or Ctrl + Enter submits"
-          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-1.5 py-px font-mono text-[11px] leading-none text-muted-foreground"
+          className="keycap pointer-events-none absolute right-2 bottom-2 rounded-ui-sm px-2 py-1 font-mono text-[11px] leading-none text-muted-foreground"
         >
           ⌘ ↵
         </kbd>
@@ -143,8 +143,10 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           {submitting ? "Submitting..." : "Submit"}
         </Button>
       </div>
-      <div className="flex flex-wrap items-center justify-start gap-2 text-xs text-muted-foreground">
-        <span>Try:</span>
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="shrink-0">Try:</span>
+        {/* One scrollable row: no wrapping, snap scrolling, faded edges, hidden scrollbar. */}
+        <div className="chip-row -my-1 flex min-w-0 flex-1 snap-x snap-proximity items-center gap-2 overflow-x-auto px-1 py-1">
         {EXAMPLES.map((ex) => (
           <button
             key={ex}
@@ -155,20 +157,25 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               setText(ex);
               setNotice(null);
             }}
-            className="keycap inline-flex h-7 max-w-full items-center rounded-ui-sm px-2.5 font-mono text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:text-foreground active:translate-y-px active:shadow-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="keycap inline-flex h-7 shrink-0 snap-start items-center rounded-ui-sm px-3 font-mono text-xs whitespace-nowrap text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:text-foreground active:translate-y-px active:shadow-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            <span className="truncate">{ex}</span>
+            {ex}
           </button>
         ))}
+        </div>
       </div>
       <div
         className={`flex items-start justify-between gap-3 text-xs text-muted-foreground ${
           showCount ? "" : "sr-only"
         }`}
       >
-        <p id={helpId} className={`flex items-start gap-1.5 ${focused ? "" : "sr-only"}`}>
-          <Info aria-hidden="true" className="mt-px size-3 shrink-0" />
-          {FORMAT_HELP}
+        <p
+          id={helpId}
+          title={FORMAT_HELP}
+          className={`flex min-w-0 items-center gap-2 leading-4 ${focused ? "" : "sr-only"}`}
+        >
+          <Info aria-hidden="true" className="size-3 shrink-0" />
+          <span className="truncate">{FORMAT_HELP}</span>
         </p>
         <span id={countId} className="shrink-0 tabular-nums">
           {text.length}/{MAX_TEXT_LENGTH}
