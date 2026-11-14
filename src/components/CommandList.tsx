@@ -42,20 +42,22 @@ export function CommandList({
     const next = rows[i + (e.key === "ArrowDown" ? 1 : -1)];
     if (next) {
       e.preventDefault();
-      next.focus();
+      next.focus({ preventScroll: true });
+      const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      next.scrollIntoView({ block: "nearest", behavior: calm ? "auto" : "smooth" });
     }
   }
 
   if (commands.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-lg bg-surface px-4 py-8 text-center">
+      <div className="flex flex-col items-center gap-2 rounded-ui-lg bg-surface px-4 py-8 text-center">
         <Inbox aria-hidden="true" className="size-6 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">{emptyText}</p>
       </div>
     );
   }
   return (
-    <ul ref={list} onKeyDown={onKeyDown} className="flex flex-col gap-1">
+    <ul ref={list} onKeyDown={onKeyDown} className="flex flex-col gap-2">
       {commands.map((c) => {
         const selected = c.id === selectedId;
         return (
@@ -65,10 +67,10 @@ export function CommandList({
               onClick={() => onSelect(c.id)}
               aria-current={selected ? "true" : undefined}
               className={cn(
-                "block min-h-16 w-full min-w-0 rounded-lg border-l-[3px] px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
+                "block min-h-16 w-full min-w-0 rounded-ui-md border-l-[3px] px-3 py-2 text-left text-sm text-card-foreground outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/60",
                 leftBorder[c.status],
                 selected
-                  ? "bg-primary/15 ring-2 ring-primary"
+                  ? "bg-primary/20"
                   : "bg-surface hover:bg-raised",
               )}
             >
@@ -78,7 +80,7 @@ export function CommandList({
               <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
                 <StatusBadge status={c.status} />
                 <span className="font-mono">{shortId(c.id)}</span>
-                <LocalTime iso={c.createdAt} />
+                <LocalTime iso={c.createdAt} showDate />
               </span>
             </button>
           </li>

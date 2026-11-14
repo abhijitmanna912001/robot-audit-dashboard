@@ -100,7 +100,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false);
       }}
-      className="flex flex-col gap-2 rounded-lg bg-surface p-3"
+      className="flex flex-col gap-2 rounded-ui-lg bg-surface p-3"
     >
       <label htmlFor={id} className="sr-only">
         New command
@@ -128,40 +128,37 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           {submitting ? "Submitting..." : "Submit"}
         </Button>
       </div>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center justify-start gap-2 text-xs text-muted-foreground">
         <span>Try:</span>
         {EXAMPLES.map((ex) => (
-          <Button
+          <button
             key={ex}
             type="button"
-            variant="ghost"
-            size="xs"
             // Keep focus in the textarea so the composer does not collapse when a chip is used.
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               setText(ex);
               setNotice(null);
             }}
-            className="h-auto max-w-full min-w-0 py-1 text-left whitespace-normal text-muted-foreground transition-colors duration-150 hover:text-foreground"
+            className="inline-flex h-7 max-w-full items-center rounded-full border border-border px-3 text-xs text-muted-foreground outline-none transition-colors duration-150 hover:border-primary/60 hover:bg-raised hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            {ex}
-          </Button>
+            <span className="truncate">{ex}</span>
+          </button>
         ))}
-        <span
-          id={countId}
-          aria-hidden={!showCount}
-          className={`ml-auto tabular-nums ${showCount ? "" : "invisible"}`}
-        >
+      </div>
+      <div
+        className={`flex items-start justify-between gap-3 text-xs text-muted-foreground ${
+          showCount ? "" : "sr-only"
+        }`}
+      >
+        <p id={helpId} className={`flex items-start gap-1.5 ${focused ? "" : "sr-only"}`}>
+          <Info aria-hidden="true" className="mt-px size-3 shrink-0" />
+          {FORMAT_HELP}
+        </p>
+        <span id={countId} className="shrink-0 tabular-nums">
           {text.length}/{MAX_TEXT_LENGTH}
         </span>
       </div>
-      <p
-        id={helpId}
-        className={`flex items-start gap-1.5 text-xs text-muted-foreground ${focused ? "" : "sr-only"}`}
-      >
-        <Info aria-hidden="true" className="mt-px size-3 shrink-0" />
-        {FORMAT_HELP}
-      </p>
       {notice && (
         <p
           role="alert"

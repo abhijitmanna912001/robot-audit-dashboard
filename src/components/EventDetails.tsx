@@ -110,7 +110,7 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
         <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
           Raw payload
         </summary>
-        <div className="mt-1.5 space-y-1.5 rounded-lg bg-raised p-2">
+        <div className="mt-1.5 space-y-1.5 rounded-ui-md bg-raised p-2">
           {type}
           <pre className="whitespace-pre-wrap wrap-anywhere font-mono">{raw}</pre>
         </div>
@@ -122,12 +122,12 @@ export function EventDetails({ event }: { event: Pick<AuditEvent, "eventType" | 
       <summary className="cursor-pointer rounded-sm select-none text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
         Details
         {dryRun && (
-          <span className="ml-2 rounded-full bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
+          <span className="ml-2 rounded-ui-sm bg-status-info px-2 py-0.5 font-medium uppercase tracking-wide text-status-info-foreground">
             dry run
           </span>
         )}
       </summary>
-      <dl className="mt-1.5 space-y-1.5 rounded-lg bg-raised p-2">
+      <dl className="mt-1.5 space-y-1.5 rounded-ui-md bg-raised p-2">
         <div className="min-w-0">
           <dt className="sr-only">event type</dt>
           <dd>{type}</dd>

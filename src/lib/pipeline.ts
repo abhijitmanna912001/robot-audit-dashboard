@@ -161,3 +161,12 @@ export function bannerTone(status: string | undefined, events: readonly EventLik
       return "waiting";
   }
 }
+
+// The step to mark aria-current: the one still running (or in a dry run), otherwise the one
+// where the pipeline stopped (failed or error). None when it is all done or nothing started.
+export function activeStage(stages: readonly PipelineStage[]): StageName | undefined {
+  return (
+    stages.find((s) => s.state === "running" || s.state === "dry_run")?.stage ??
+    stages.find((s) => s.state === "failed" || s.state === "error")?.stage
+  );
+}

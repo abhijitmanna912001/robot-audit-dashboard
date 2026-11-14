@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bannerTone, derivePipeline, type StageState } from "./pipeline.ts";
+import { activeStage, bannerTone, derivePipeline, type StageState } from "./pipeline.ts";
 import { summarize } from "./summary.ts";
 
 const e = (eventType: string, payload: unknown) => ({ eventType, payload });
@@ -199,4 +199,21 @@ test("banner tone falls back on the command status when events explain nothing",
   assert.equal(bannerTone("received", []), "waiting");
   assert.equal(bannerTone(undefined, []), "waiting");
   assert.equal(bannerTone("???", []), "waiting");
+});
+
+test("activeStage: running, then where it stopped, otherwise none", () => {
+  const st = (a: StageState, b: StageState, c: StageState, d: StageState) =>
+    [
+      { stage: "planned", state: a },
+      { stage: "validator", state: b },
+      { stage: "critic", state: c },
+      { stage: "execution", state: d },
+    ] as const;
+  assert.equal(activeStage(st("passed", "passed", "passed", "running")), "execution");
+  assert.equal(activeStage(st("passed", "passed", "passed", "dry_run")), "execution");
+  assert.equal(activeStage(st("passed", "failed", "not_reached", "not_reached")), "validator");
+  assert.equal(activeStage(st("passed", "passed", "error", "not_reached")), "critic");
+  assert.equal(activeStage(st("passed", "passed", "passed", "passed")), undefined);
+  assert.equal(activeStage(st("not_reached", "not_reached", "not_reached", "not_reached")), undefined);
+  assert.equal(activeStage([]), undefined);
 });

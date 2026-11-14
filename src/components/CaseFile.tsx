@@ -1,4 +1,5 @@
 import type { AuditEvent, Command } from "@/types/draft";
+import { elapsedLabel } from "@/lib/elapsed";
 import { bannerTone, derivePipeline } from "@/lib/pipeline";
 import { summarize } from "@/lib/summary";
 import { AuditTimeline } from "./AuditTimeline";
@@ -19,20 +20,22 @@ export function CaseFile({
   events: AuditEvent[];
   highlightIds?: ReadonlySet<string>;
 }) {
+  const elapsed = elapsedLabel(command.status, events);
   return (
     <article className="flex min-w-0 flex-col gap-4" aria-label="Case file">
       <header className="min-w-0">
         <h2 className={sectionLabel}>Case file</h2>
         {/* The full text lives only in this element's title, so no tooltip covers the banner. */}
         <p
-          className="mt-2 line-clamp-2 wrap-anywhere text-xl font-semibold leading-snug"
+          className="mt-2 line-clamp-2 wrap-anywhere text-xl font-semibold leading-snug text-balance"
           title={command.text}
         >
           {command.text}
         </p>
         <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
           <span className="font-mono">{command.id.slice(0, 8)}</span>
-          <LocalTime iso={command.createdAt} />
+          <LocalTime iso={command.createdAt} showDate />
+          {elapsed && <span className="tabular-nums">{elapsed}</span>}
         </p>
       </header>
       <SummaryBanner
@@ -40,7 +43,7 @@ export function CaseFile({
         tone={bannerTone(command.status, events)}
       />
       <PipelineStrip stages={derivePipeline(events)} />
-      <section aria-label="Audit timeline" className="min-w-0 rounded-lg bg-surface p-4">
+      <section aria-label="Audit timeline" className="min-w-0 rounded-ui-lg bg-surface p-4">
         <h3 className={`${sectionLabel} mb-4`}>Audit timeline</h3>
         <AuditTimeline events={events} highlightIds={highlightIds} />
       </section>

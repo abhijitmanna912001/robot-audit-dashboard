@@ -11,10 +11,11 @@ import {
 } from "lucide-react";
 import type { AuditEvent } from "@/types/draft";
 import { badgeVariants } from "@/components/ui/badge";
-import { actionTargets, isRedundant, summarizeEvent } from "@/lib/event-summary";
+import { eventContext, isRedundant, summarizeEvent } from "@/lib/event-summary";
 import { getMarker, type Marker } from "@/lib/outcome";
 import { readPlanFailure, text } from "@/lib/payload";
 import { cn } from "@/lib/utils";
+import { CopyButton } from "./CopyButton";
 import { EventDetails } from "./EventDetails";
 import { LocalTime } from "./LocalTime";
 
@@ -67,20 +68,23 @@ export function AuditTimeline({
     return <p className="text-sm text-muted-foreground">No audit events to show.</p>;
   }
 
-  const targets = actionTargets(events);
+  const ctx = eventContext(events);
   return (
     <ol className="relative">
       {events.map((e, i) => {
         const marker = getMarker(e);
         const Icon = icons[e.eventType as string] ?? CircleHelp;
         const last = i === events.length - 1;
-        const line = summarizeEvent(e, targets);
         const title = text(e.message) ?? text(e.eventType) ?? "Unknown event";
+        const summary = summarizeEvent(e, ctx);
+        // Hide text that only repeats the title; a hash is always new information.
+        const lineText = summary && !isRedundant(title, summary.text) ? summary.text : "";
+        const hasLine = lineText !== "" || summary?.shortHash !== undefined;
         return (
           <li
             key={e.id}
             className={cn(
-              "relative min-w-0 rounded-lg pl-11",
+              "relative min-w-0 rounded-ui-md pl-11",
               last ? "pb-0" : "pb-6",
               highlightIds?.has(e.id) && "event-flash",
             )}
@@ -98,7 +102,7 @@ export function AuditTimeline({
               <Icon className="size-4" />
             </span>
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-1">
-              <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm font-medium leading-snug">
+              <p className="wrap-anywhere min-w-0 flex-1 basis-40 text-sm font-medium leading-snug text-balance">
                 {title}
               </p>
               <div className="flex shrink-0 items-center gap-2">
@@ -106,7 +110,7 @@ export function AuditTimeline({
                   <span
                     className={cn(
                       badgeVariants(),
-                      "h-auto px-2 py-px text-xs uppercase tracking-wide",
+                      "h-auto rounded-ui-sm! px-2 py-px text-xs uppercase tracking-wide",
                       markerStyles[marker],
                     )}
                   >
@@ -116,8 +120,19 @@ export function AuditTimeline({
                 <LocalTime iso={e.createdAt} className="text-xs text-muted-foreground" />
               </div>
             </div>
-            {line && !isRedundant(title, line) && (
-              <p className="wrap-anywhere mt-0.5 text-sm text-muted-foreground">{line}</p>
+            {summary && hasLine && (
+              <p className="wrap-anywhere mt-0.5 flex flex-wrap items-center gap-x-1 text-sm text-muted-foreground">
+                {lineText && <span>{lineText}</span>}
+                {summary.shortHash && summary.hash && (
+                  <span className="inline-flex items-center gap-0.5">
+                    {lineText && <span aria-hidden="true">·</span>}
+                    <span className="font-mono text-xs" title={summary.hash}>
+                      #{summary.shortHash}
+                    </span>
+                    <CopyButton value={summary.hash} label="plan hash" />
+                  </span>
+                )}
+              </p>
             )}
             <EventDetails event={e} />
           </li>

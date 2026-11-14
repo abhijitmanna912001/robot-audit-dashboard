@@ -6,6 +6,9 @@
 
 @theme inline {
   --color-background: var(--background);
+  --radius-ui-sm: 6px;
+  --radius-ui-md: 10px;
+  --radius-ui-lg: 16px;
   --color-surface: var(--surface);
   --color-raised: var(--raised);
   --color-foreground: var(--foreground);
@@ -195,6 +198,7 @@
   }
   html {
     @apply font-sans;
+    color-scheme: dark;
   }
 }
 
@@ -237,4 +241,20 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .skeleton { animation: none; }
+}
+
+/* Subtle scrollbars for the two columns. */
+.scroll-subtle {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(1 0 0 / 22%) transparent;
+}
+.scroll-subtle::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-subtle::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 18%);
+  border-radius: 9999px;
+}
+.scroll-subtle::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 32%);
 }

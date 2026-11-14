@@ -11,7 +11,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import type { PipelineStage, StageName, StageState } from "@/lib/pipeline";
+import { activeStage, type PipelineStage, type StageName, type StageState } from "@/lib/pipeline";
 import { cn } from "@/lib/utils";
 
 const stageIcon: Record<StageName, LucideIcon> = {
@@ -57,13 +57,24 @@ function toneOf(stage: StageName, state: StageState): Tone {
   }
 }
 
+// Circles are opaque (bg-raised) so a connector never shows through them.
 const circle: Record<Tone, string> = {
-  ok: "border-status-completed-accent bg-status-completed-accent/15 text-status-completed-accent",
-  blocked: "border-status-rejected-accent bg-status-rejected-accent/15 text-status-rejected-accent",
-  broke: "border-status-failed-accent bg-status-failed-accent/15 text-status-failed-accent",
-  info: "border-status-info-accent bg-status-info-accent/15 text-status-info-accent",
-  idle: "border-dashed border-border bg-surface text-muted-foreground",
+  ok: "border-status-completed-accent text-status-completed-accent",
+  blocked: "border-status-rejected-accent text-status-rejected-accent",
+  broke: "border-status-failed-accent text-status-failed-accent",
+  info: "border-status-info-accent text-status-info-accent",
+  idle: "border-dashed border-muted-foreground/50 text-muted-foreground",
 };
+
+// Connector colour = the earlier step's colour. It is dashed and muted when the next step was
+// not reached (or the earlier one is idle), so a line only looks solid where the flow went.
+const connector: Record<Exclude<Tone, "idle">, string> = {
+  ok: "bg-status-completed-accent",
+  blocked: "bg-status-rejected-accent",
+  broke: "bg-status-failed-accent",
+  info: "bg-status-info-accent",
+};
+const DASHED = "border-t-2 border-dashed border-muted-foreground/50";
 
 function StateGlyph({ state }: { state: StageState }) {
   const cls = "size-3 shrink-0";
@@ -86,26 +97,36 @@ function StateGlyph({ state }: { state: StageState }) {
 // One horizontal stepper: a continuous line behind four circles (sm and up). Below sm it is
 // a compact 2x2 grid with no line. The state word is always written out.
 export function PipelineStrip({ stages }: { stages: PipelineStage[] }) {
+  const active = activeStage(stages);
   return (
     <ol
       aria-label="Pipeline"
-      className="relative grid grid-cols-2 gap-x-3 gap-y-3 rounded-lg bg-surface px-3 py-3 sm:grid-cols-4"
+      className="grid grid-cols-2 gap-x-3 gap-y-3 rounded-ui-lg bg-surface px-3 py-3 sm:grid-cols-4"
     >
-      <span
-        aria-hidden="true"
-        className="absolute top-7 right-[12.5%] left-[12.5%] hidden h-px bg-border sm:block"
-      />
-      {stages.map(({ stage, state }) => {
+      {stages.map(({ stage, state }, i) => {
         const tone = toneOf(stage, state);
         const Icon = stageIcon[stage];
+        const next = stages[i + 1];
+        const solid = tone !== "idle" && next !== undefined && next.state !== "not_reached";
         return (
           <li
             key={stage}
+            aria-current={stage === active ? "step" : undefined}
             className="relative flex min-w-0 items-center gap-2 sm:flex-col sm:gap-1.5 sm:text-center"
           >
+            {next && (
+              <span
+                aria-hidden="true"
+                style={{ width: "calc(100% - 20px)" }}
+                className={cn(
+                  "absolute top-[15px] left-[calc(50%+1rem)] hidden sm:block",
+                  solid ? `h-0.5 ${connector[tone as Exclude<Tone, "idle">]}` : DASHED,
+                )}
+              />
+            )}
             <span
               className={cn(
-                "flex size-8 shrink-0 items-center justify-center rounded-full border transition-colors duration-150",
+                "relative flex size-8 shrink-0 items-center justify-center rounded-full border-2 bg-raised transition-colors duration-150",
                 circle[tone],
               )}
             >

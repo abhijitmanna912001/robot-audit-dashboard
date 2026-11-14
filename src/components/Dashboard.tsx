@@ -1,5 +1,6 @@
 "use client";
 
+import { FileSearch } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import { fetchSnapshot } from "@/lib/queries";
@@ -166,19 +167,15 @@ export function Dashboard({
             Could not load or refresh data
           </p>
         )}
-        <section aria-label="Commands" className="flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <section aria-label="Commands" className="flex min-w-0 flex-col gap-3 scroll-subtle lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           <CommandInput onSubmitted={handleSubmitted} />
           <FilterTabs
             tab={tab}
             onTab={setTab}
             showTest={showTest}
             onShowTest={() => setShowTest((v) => !v)}
+            hiddenTestCount={hiddenTestCount}
           />
-          {hiddenTestCount > 0 && (
-            <p className="text-xs tabular-nums text-muted-foreground" role="status">
-              {hiddenTestCount} test {hiddenTestCount === 1 ? "command" : "commands"} hidden
-            </p>
-          )}
           <h2 className={sectionLabel}>Commands</h2>
           <CommandList
             commands={visibleCommands}
@@ -187,13 +184,14 @@ export function Dashboard({
             emptyText={emptyText}
           />
         </section>
-        <section className="min-w-0 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <section className="scroll-subtle min-w-0 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           {selected ? (
             <CaseFile command={selected} events={selectedEvents} highlightIds={freshIds} />
           ) : (
-            <p className="rounded-lg bg-surface px-4 py-8 text-center text-sm text-muted-foreground">
-              Select a command to see its case file.
-            </p>
+            <div className="flex flex-col items-center gap-2 rounded-ui-lg bg-surface px-4 py-12 text-center">
+              <FileSearch aria-hidden="true" className="size-6 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">Select a command to see its audit trail</p>
+            </div>
           )}
         </section>
       </div>

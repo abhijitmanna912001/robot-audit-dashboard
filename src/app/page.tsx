@@ -33,7 +33,7 @@ async function LoadedDashboard({ searchParams }: { searchParams: SearchParams })
 }
 
 function Skeleton({ className }: { className: string }) {
-  return <div aria-hidden="true" className={`skeleton rounded-lg ${className}`} />;
+  return <div aria-hidden="true" className={`skeleton rounded-ui-md ${className}`} />;
 }
 
 // Loading state only: same shell as the dashboard, so the page does not jump.

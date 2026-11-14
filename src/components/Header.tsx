@@ -1,4 +1,4 @@
-import { ShieldCheck } from "lucide-react";
+import { FlaskConical, ShieldCheck } from "lucide-react";
 import { COMMAND_STATUSES, type CommandStatus } from "@/types/draft";
 import { ConnectionIndicator, type ConnectionStatus } from "./ConnectionIndicator";
 
@@ -17,7 +17,7 @@ export function Brand() {
     <div className="flex min-w-0 items-center gap-3">
       <span
         aria-hidden="true"
-        className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary-foreground ring-1 ring-primary/40"
+        className="flex size-8 shrink-0 items-center justify-center rounded-ui-md bg-primary/15 text-primary-foreground ring-1 ring-primary/40"
       >
         <ShieldCheck className="size-4" />
       </span>
@@ -30,6 +30,9 @@ export function Brand() {
     </div>
   );
 }
+
+// Static for now: the worker only dry-runs. One line to change when that is no longer true.
+const MODE = "Dry run";
 
 // Sticky top bar. Counts show nonzero statuses only, and nothing at all when there are none.
 export function TopBar({
@@ -56,6 +59,15 @@ export function TopBar({
               ))}
             </ul>
           )}
+          <span
+            title="Nothing is sent to a robot"
+            className="inline-flex items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-xs text-muted-foreground"
+          >
+            <FlaskConical aria-hidden="true" className="size-3 text-status-info-accent" />
+            <span>Mode</span>
+            <span className="font-medium text-foreground">{MODE}</span>
+            <span className="sr-only">: nothing is sent to a robot</span>
+          </span>
           <ConnectionIndicator status={status} />
         </div>
       </div>
