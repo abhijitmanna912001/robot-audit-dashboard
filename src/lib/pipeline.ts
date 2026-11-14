@@ -2,12 +2,23 @@
 // Stages: Planned, Validator, Critic, Execution. Never throws: payloads are untrusted
 // (see lib/payload.ts), so every field is read through the defensive readers there.
 // Precedence mirrors lib/summary.ts so the banner colour and the summary text agree.
-import { readCritic, readExecution, readPlanFailure, readValidator } from "./payload.ts";
+import { readCritic, readPlanFailure, readValidator } from "./payload.ts";
+import { executionMode, executionOutcome, type ExecMode } from "./simulation.ts";
 
 export const STAGES = ["planned", "validator", "critic", "execution"] as const;
 export type StageName = (typeof STAGES)[number];
 
-export type StageState = "passed" | "failed" | "error" | "not_reached" | "dry_run" | "running";
+// "simulated" = a simulation run (mode "simulation", dryRun false). "unknown" = execution finished but
+// the mode is neither a dry run nor a simulation, so it must not be shown as a real execution.
+export type StageState =
+  | "passed"
+  | "failed"
+  | "error"
+  | "not_reached"
+  | "dry_run"
+  | "simulated"
+  | "unknown"
+  | "running";
 
 // The word shown for each state. One table so the stepper and the detail-line rule agree.
 export const STATE_WORD: Record<StageState, string> = {
@@ -16,12 +27,14 @@ export const STATE_WORD: Record<StageState, string> = {
   error: "error",
   not_reached: "not reached",
   dry_run: "dry run",
+  simulated: "simulated",
+  unknown: "mode not recorded",
   running: "running",
 };
 
 export type PipelineStage = { stage: StageName; state: StageState };
 
-export type BannerTone = "success" | "blocked" | "broke" | "running" | "waiting";
+export type BannerTone = "success" | "blocked" | "broke" | "running" | "waiting" | "warning";
 
 type EventLike = { eventType: string; payload: unknown };
 
@@ -32,7 +45,7 @@ type Facts = {
   criticReject: boolean; // any critic reject is sticky
   criticLast: "approve" | "error" | undefined; // latest recognised non-reject outcome
   terminal: "completed" | "failed" | undefined; // latest terminal execution event
-  terminalDryRun: boolean; // dryRun === true on that terminal event
+  terminalMode: ExecMode; // mode of that terminal event (see lib/simulation.ts)
   started: boolean;
 };
 
@@ -45,7 +58,7 @@ function analyze(events: readonly EventLike[]): Facts {
     criticReject: false,
     criticLast: undefined,
     terminal: undefined,
-    terminalDryRun: false,
+    terminalMode: "unknown",
     started: false,
   };
   if (!Array.isArray(events)) return f;
@@ -76,11 +89,11 @@ function analyze(events: readonly EventLike[]): Facts {
         break;
       case "execution_completed":
         f.terminal = "completed";
-        f.terminalDryRun = readExecution(e.payload).dryRun === true;
+        f.terminalMode = executionMode(e.payload);
         break;
       case "execution_failed":
         f.terminal = "failed";
-        f.terminalDryRun = readExecution(e.payload).dryRun === true;
+        f.terminalMode = executionMode(e.payload);
         break;
     }
   }
@@ -124,7 +137,7 @@ export function derivePipeline(events: readonly EventLike[]): PipelineStage[] {
     } else if (f.terminal === "failed") {
       execution = "failed";
     } else if (f.terminal === "completed") {
-      execution = f.terminalDryRun ? "dry_run" : "passed";
+      execution = f.terminalMode === "dry_run" ? "dry_run" : f.terminalMode === "simulation" ? "simulated" : "unknown";
     } else if (f.started) {
       execution = "running";
     } else {
@@ -149,6 +162,9 @@ export function bannerTone(status: string | undefined, events: readonly EventLik
   try {
     const f = analyze(events);
     if (f.validatorFail || f.criticReject) return "blocked";
+    // Simulated runs and runs of unknown mode may be a warning; the same builder drives the text.
+    const outcome = executionOutcome(events);
+    if (outcome) return outcome.tone;
     if (f.terminal === "completed") return "success";
     if (f.terminal === "failed") return "broke";
     if (f.started) return "running";
@@ -172,11 +188,11 @@ export function bannerTone(status: string | undefined, events: readonly EventLik
   }
 }
 
-// The step to mark aria-current: the one still running (or in a dry run), otherwise the one
+// The step to mark aria-current: the one still running (or in a dry run or simulation), otherwise the one
 // where the pipeline stopped (failed or error). None when it is all done or nothing started.
 export function activeStage(stages: readonly PipelineStage[]): StageName | undefined {
   return (
-    stages.find((s) => s.state === "running" || s.state === "dry_run")?.stage ??
+    stages.find((s) => s.state === "running" || s.state === "dry_run" || s.state === "simulated")?.stage ??
     stages.find((s) => s.state === "failed" || s.state === "error")?.stage
   );
 }

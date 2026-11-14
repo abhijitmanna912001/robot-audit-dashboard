@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { AuditEvent } from "@/types/draft";
 import { badgeVariants } from "@/components/ui/badge";
-import { eventContext, isRedundant, summarizeEvent } from "@/lib/event-summary";
+import { eventContext, eventTitle, isRedundant, summarizeEvent } from "@/lib/event-summary";
 import { getMarker, type Marker } from "@/lib/outcome";
 import { readPlanFailure, text } from "@/lib/payload";
 import { formatGap } from "@/lib/time-gap";
@@ -84,7 +84,7 @@ export function AuditTimeline({
         const marker = getMarker(e);
         const Icon = icons[e.eventType as string] ?? CircleHelp;
         const last = i === events.length - 1;
-        const title = text(e.message) ?? text(e.eventType) ?? "Unknown event";
+        const title = eventTitle(e) ?? text(e.message) ?? text(e.eventType) ?? "Unknown event";
         const summary = summarizeEvent(e, ctx);
         // Hide text that only repeats the title; a hash is always new information.
         const lineText = summary && !isRedundant(title, summary.text) ? summary.text : "";

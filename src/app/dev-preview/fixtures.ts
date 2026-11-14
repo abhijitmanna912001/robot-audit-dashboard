@@ -77,6 +77,37 @@ function withIds(list: Omit<Scenario, "id">[]): Scenario[] {
   return list.map((sc) => ({ id: slug(sc.title), ...sc }));
 }
 
+
+// Simulation fixtures. PROPOSED payloads (docs/schema-draft.md "Proposed simulation payloads").
+const snap = (sec: number, joints: Record<string, unknown>) => ({
+  readAt: `2026-11-14T10:00:${String(sec).padStart(2, "0")}Z`,
+  joints,
+});
+const J0 = { _1: 0, _2: 0, _3: 0, _4: 0, _5: 0, _6: 0 };
+const simPrelude = (s: string) => [
+  received(s),
+  planned(s, 0.5),
+  validatorPass(s),
+  criticApprove(s),
+  ev(s, "execution_started", "Execution started", { dryRun: false, mode: "simulation" }),
+];
+const simDone = (s: string, telemetry: unknown, toleranceRad?: number) =>
+  ev(s, "execution_completed", "Execution completed", {
+    dryRun: false,
+    mode: "simulation",
+    summary: "1 action simulated",
+    telemetry,
+    ...(toleranceRad === undefined ? {} : { toleranceRad }),
+  });
+const simFail = (s: string, kind: string, detail: string, stop: string, extra: object = {}) =>
+  ev(s, "execution_failed", "Execution failed", {
+    dryRun: false,
+    mode: "simulation",
+    error: { kind, detail },
+    stop,
+    ...extra,
+  });
+
 // Ids are derived from the titles (unique, URL-safe) so the fixtures themselves stay as they are.
 export const scenarios: Scenario[] = withIds([
   {
@@ -95,7 +126,9 @@ export const scenarios: Scenario[] = withIds([
     ],
   },
   {
-    title: "Real execution completed (not a dry run)",
+    // dryRun false without mode "simulation": the worker only writes dry runs and simulations, so
+    // this must not be shown as a real execution.
+    title: "Execution finished, mode not recorded",
     status: "completed",
     events: [
       received("real"),
@@ -121,6 +154,68 @@ export const scenarios: Scenario[] = withIds([
       ev("xfail", "execution_failed", "Execution failed", {
         dryRun: false,
         error: "the simulation stopped before the action finished",
+      }),
+    ],
+  },
+  {
+    title: "Simulated move completed, arm restored",
+    status: "completed",
+    events: [
+      ...simPrelude("simok"),
+      simDone("simok", { start: snap(3, J0), target: snap(4, { ...J0, _1: 0.5 }), restored: snap(5, { ...J0, _1: 0.002, _3: -0.001 }) }, 0.01),
+    ],
+  },
+  {
+    title: "Simulated move completed, arm not restored",
+    status: "completed",
+    events: [
+      ...simPrelude("simnr"),
+      simDone("simnr", { start: snap(3, J0), target: snap(4, { ...J0, _1: 0.5 }), restored: snap(5, { ...J0, _1: 0.08 }) }, 0.01),
+    ],
+  },
+  {
+    title: "Simulated move completed, no toleranceRad",
+    status: "completed",
+    events: [
+      ...simPrelude("simnt"),
+      simDone("simnt", { start: snap(3, J0), target: snap(4, { ...J0, _1: 0.5 }), restored: snap(5, J0) }),
+    ],
+  },
+  {
+    title: "Simulation failed, stop confirmed",
+    status: "failed",
+    events: [...simPrelude("simfc"), simFail("simfc", "timeout", "joint read timed out after 5 s", "confirmed")],
+  },
+  {
+    title: "Simulation failed, stop unconfirmed",
+    status: "failed",
+    events: [
+      ...simPrelude("simfu"),
+      simFail("simfu", "timeout", "no answer to the stop call", "unconfirmed", {
+        lastTelemetry: snap(4, { ...J0, _1: 0.31 }),
+      }),
+    ],
+  },
+  {
+    title: "Simulation failed, no stop needed",
+    status: "failed",
+    events: [...simPrelude("simfn"), simFail("simfn", "planner_error", "target unreachable before any move", "not_needed")],
+  },
+  {
+    // mode "simulation" but dryRun is missing or a string: must NOT render as simulated.
+    title: "Malformed simulation payload",
+    status: "completed",
+    events: [
+      received("simbad"),
+      planned("simbad", 0.5),
+      validatorPass("simbad"),
+      criticApprove("simbad"),
+      ev("simbad", "execution_started", "dryRun is missing", { mode: "simulation" }),
+      ev("simbad", "execution_completed", 'dryRun is the string "false"', {
+        dryRun: "false",
+        mode: "simulation",
+        telemetry: { start: snap(3, J0), target: { readAt: "2026-11-14T10:00:04", joints: { _1: 0.5 } }, restored: snap(5, { _1: Number.NaN }) },
+        toleranceRad: 0.01,
       }),
     ],
   },

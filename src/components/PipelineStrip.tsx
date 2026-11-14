@@ -1,6 +1,8 @@
 import {
+  Box,
   Check,
   CircleDashed,
+  CircleHelp,
   ClipboardList,
   FlaskConical,
   Loader,
@@ -30,7 +32,7 @@ const stageLabel: Record<StageName, string> = {
 
 // Red = blocked (validator fail, critic reject), amber = something broke (errors and a
 // failed execution). The state word is always shown, so colour is never the only cue.
-type Tone = "ok" | "blocked" | "broke" | "idle" | "info";
+type Tone = "ok" | "blocked" | "broke" | "idle" | "info" | "neutral";
 
 function toneOf(stage: StageName, state: StageState): Tone {
   switch (state) {
@@ -41,8 +43,11 @@ function toneOf(stage: StageName, state: StageState): Tone {
     case "error":
       return "broke";
     case "dry_run":
+    case "simulated":
     case "running":
       return "info";
+    case "unknown":
+      return "neutral"; // finished, but the mode was not recorded: neither success nor failure
     default:
       return "idle";
   }
@@ -54,6 +59,7 @@ const circle: Record<Tone, string> = {
   blocked: "border-status-rejected-accent text-status-rejected-accent",
   broke: "border-status-failed-accent text-status-failed-accent",
   info: "border-status-info-accent text-status-info-accent",
+  neutral: "border-input text-muted-foreground",
   idle: "border-dashed border-input text-muted-foreground",
 };
 
@@ -64,12 +70,14 @@ const connectorFrom: Record<Exclude<Tone, "idle">, string> = {
   blocked: "from-status-rejected-accent",
   broke: "from-status-failed-accent",
   info: "from-status-info-accent",
+  neutral: "from-input",
 };
 const connectorTo: Record<Tone, string> = {
   ok: "to-status-completed-accent",
   blocked: "to-status-rejected-accent",
   broke: "to-status-failed-accent",
   info: "to-status-info-accent",
+  neutral: "to-input",
   idle: "to-input",
 };
 const DASHED = "border-t border-dashed border-input";
@@ -85,6 +93,10 @@ function StateGlyph({ state }: { state: StageState }) {
       return <TriangleAlert aria-hidden="true" className={cls} />;
     case "dry_run":
       return <FlaskConical aria-hidden="true" className={cls} />;
+    case "simulated":
+      return <Box aria-hidden="true" className={cls} />;
+    case "unknown":
+      return <CircleHelp aria-hidden="true" className={cls} />;
     case "running":
       return <Loader aria-hidden="true" className={cls} />;
     default:

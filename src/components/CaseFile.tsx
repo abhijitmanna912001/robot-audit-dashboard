@@ -2,10 +2,12 @@ import { elapsedLabel, workerWaitLabel } from "@/lib/elapsed";
 import type { AuditEvent, Command } from "@/types/draft";
 import { bannerTone, derivePipeline } from "@/lib/pipeline";
 import { summarize } from "@/lib/summary";
+import { latestSimulation, telemetryRows } from "@/lib/simulation";
 import { stageDetails, verdictFacts, verdictStamp } from "@/lib/verdict";
 import { AuditTimeline } from "./AuditTimeline";
 import { LocalTime } from "./LocalTime";
 import { PipelineStrip } from "./PipelineStrip";
+import { TelemetryTable } from "./TelemetryTable";
 import { VerdictCard } from "./VerdictCard";
 import { CaseFileFrame } from "./CaseFileFrame";
 
@@ -25,6 +27,7 @@ export function CaseFile({
   const stamp = verdictStamp(command.status, events);
   const processing = elapsedLabel(command.status, events);
   const wait = workerWaitLabel(events);
+  const telemetry = telemetryRows(latestSimulation(events));
   return (
     <CaseFileFrame
       compactHeader={
@@ -61,6 +64,12 @@ export function CaseFile({
         <h3 className={`${sectionLabel} mb-5`}>Verification chain</h3>
         <PipelineStrip stages={derivePipeline(events)} details={stageDetails(events)} />
       </section>
+      {telemetry && (
+        <section aria-label="Telemetry" className="min-w-0 border-b border-border pb-6">
+          <h3 className={`${sectionLabel} mb-5`}>Telemetry (rad)</h3>
+          <TelemetryTable telemetry={telemetry} />
+        </section>
+      )}
       <section aria-label="Audit timeline" className="min-w-0">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <h3 className={sectionLabel}>Audit timeline</h3>

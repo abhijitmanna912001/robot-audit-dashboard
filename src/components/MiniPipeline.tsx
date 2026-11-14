@@ -8,6 +8,8 @@ const dot: Record<StageState, string> = {
   error: "bg-status-failed-accent rotate-45 rounded-none",
   not_reached: "border border-muted-foreground",
   dry_run: "bg-status-info-accent ring-2 ring-status-info-accent",
+  simulated: "bg-status-info-accent rounded-xs ring-2 ring-status-info-accent",
+  unknown: "bg-muted-foreground",
   running: "bg-status-info-accent",
 };
 
@@ -17,6 +19,8 @@ const word: Record<StageState, string> = {
   error: "error",
   not_reached: "not reached",
   dry_run: "dry run",
+  simulated: "simulated",
+  unknown: "mode not recorded",
   running: "running",
 };
 

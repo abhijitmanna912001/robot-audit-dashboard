@@ -110,7 +110,9 @@ test("critic reject and error", () => {
 
 test("execution events and command_received", () => {
   assert.equal(text(summarizeEvent(e("execution_started", { dryRun: true }))), "dry run");
-  assert.equal(text(summarizeEvent(e("execution_completed", { dryRun: false }))), "executed");
+  assert.equal(text(summarizeEvent(e("execution_completed", { dryRun: false, mode: "simulation" }))), "simulation");
+  // Never "executed": the mode is not a dry run or a simulation.
+  assert.equal(summarizeEvent(e("execution_completed", { dryRun: false })), undefined);
   assert.equal(summarizeEvent(e("execution_completed", { dryRun: "true" })), undefined);
   assert.equal(text(summarizeEvent(e("command_received", { source: "dashboard" }))), "dashboard");
   assert.equal(summarizeEvent(e("command_received", { source: 3 })), undefined);
