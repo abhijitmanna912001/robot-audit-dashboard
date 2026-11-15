@@ -81,7 +81,9 @@ class InProcessProvider:
     def gate_blockers(self) -> tuple[str, ...]:
         return twin_gate_blockers(self.twin)
 
-    def start(self) -> InProcessSession:
+    def start(self, on_created: Callable[[InProcessSession], Any] | None = None) -> InProcessSession:
         session = InProcessSession(self.twin)
         self.sessions.append(session)
+        if on_created is not None:
+            on_created(session)
         return session

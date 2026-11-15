@@ -877,6 +877,37 @@ class StubSession:
         pass
 
 
+class RefusedDispatchWordingTests(ExecutorCase):
+    """N4: the failure text must not say "before it was sent" once GO was in play."""
+
+    def refused(self, *, after_ack: bool) -> RehearsalFailure:
+        from simulation_supervisor import SessionRefused
+
+        class RefusingSession(InProcessSession):
+            def dispatch_move(self, joint: str, value_rad: float, deadline: float, on_acknowledged: Any) -> None:
+                if after_ack:
+                    on_acknowledged()  # the parent recorded "may have been sent", then GO was refused
+                raise SessionRefused("no_pending_intent")
+
+        outcome = run_rehearsal(snapshot(), RefusingSession(self.twin), FAST)
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        self.assertEqual(outcome.kind, "dispatch_failed", outcome.detail)
+        self.assertEqual(self.twin.moves(), [])  # this stub never reaches move_joint
+        return outcome
+
+    def test_a_refusal_before_the_acknowledgement_says_nothing_was_sent(self) -> None:
+        outcome = self.refused(after_ack=False)
+        self.assertIn("before any movement was sent", outcome.detail)
+        self.assertFalse(outcome.target_dispatched)
+
+    def test_a_refusal_after_the_acknowledgement_does_not_claim_it_was_not_sent(self) -> None:
+        outcome = self.refused(after_ack=True)
+        self.assertNotIn("before it was sent", outcome.detail)
+        self.assertNotIn("before any movement was sent", outcome.detail)
+        self.assertIn("treated as sent", outcome.detail)
+        self.assertTrue(outcome.target_dispatched)  # still recorded as possibly sent
+
+
 class DeadlineAndClassificationTests(ExecutorCase):
     def test_the_disconnect_is_not_started_after_its_deadline(self) -> None:
         rehearsal = simulation_executor._Rehearsal(snapshot(), InProcessSession(self.twin), FAST)

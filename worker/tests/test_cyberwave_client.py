@@ -78,6 +78,10 @@ class FakeCyberwave:
         self.config = SimpleNamespace(
             runtime_mode=type(self).reported_runtime_mode,
             source_type=type(self).reported_source_type,
+            # What the real SDK would build from the arguments it was given.
+            base_url=kwargs.get("base_url"),
+            mqtt_host=kwargs.get("mqtt_host"),
+            mqtt_port=kwargs.get("mqtt_port"),
         )
         self.twins = FakeTwins()
         self.disconnected = False
@@ -98,6 +102,26 @@ def twin_settings(**overrides: Any) -> CyberwaveTwinSettings:
     return CyberwaveTwinSettings(**fields)
 
 
+def clean_environment(extra: dict[str, str] | None = None, file_values: dict[str, str] | None = None):
+    """No .env file and no CYBERWAVE_* variable, unless ``extra`` / ``file_values`` say so."""
+    import contextlib
+    import os
+
+    import config
+
+    @contextlib.contextmanager
+    def manager():
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CYBERWAVE_")}
+        env.update(extra or {})
+        with (
+            mock.patch.object(config, "dotenv_values", return_value=file_values or {}),
+            mock.patch.dict(os.environ, env, clear=True),
+        ):
+            yield
+
+    return manager()
+
+
 def connect_with(
     workspace_id: str | None = None,
     fake: type = FakeCyberwave,
@@ -106,7 +130,7 @@ def connect_with(
     if settings is None:
         settings = twin_settings(workspace_id=workspace_id)
     robot = SimulatedRobot(settings)
-    with mock.patch("cyberwave.Cyberwave", fake):
+    with mock.patch("cyberwave.Cyberwave", fake), clean_environment():
         robot.connect()
     return robot
 
@@ -390,3 +414,75 @@ class NoCreatePathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndpointTests(unittest.TestCase):
+    """The SDK reads CYBERWAVE_BASE_URL / CYBERWAVE_MQTT_* itself: the worker must not let it."""
+
+    OFFICIAL = {
+        "base_url": "https://api.cyberwave.com",
+        "mqtt_host": "mqtt.cyberwave.com",
+        "mqtt_port": 8883,
+        "mqtt_username": "mqttcyb",
+        "mqtt_use_tls": True,
+    }
+
+    def test_the_official_endpoints_are_passed_explicitly(self) -> None:
+        connect_with()
+        for name, value in self.OFFICIAL.items():
+            with self.subTest(name=name):
+                self.assertEqual(FakeCyberwave.last_kwargs[name], value)
+
+    def test_a_foreign_variable_refuses_before_the_sdk_is_built(self) -> None:
+        for name, value in (
+            ("CYBERWAVE_BASE_URL", "https://evil.example"),
+            ("CYBERWAVE_MQTT_HOST", "mqtt.evil.example"),
+        ):
+            with self.subTest(name=name):
+                FakeCyberwave.last_kwargs = {}
+                robot = SimulatedRobot(twin_settings())
+                with (
+                    mock.patch("cyberwave.Cyberwave", FakeCyberwave),
+                    clean_environment({name: value}),
+                    self.assertRaises(RobotConnectionError) as caught,
+                ):
+                    robot.connect()
+                self.assertIn(name, str(caught.exception))
+                self.assertNotIn(value, str(caught.exception))
+                self.assertEqual(FakeCyberwave.last_kwargs, {})  # never constructed
+                with self.assertRaises(RobotConnectionError):
+                    robot.verify_auth()  # no client was kept
+
+    def test_a_foreign_variable_in_the_env_file_layer_refuses_too(self) -> None:
+        robot = SimulatedRobot(twin_settings())
+        FakeCyberwave.last_kwargs = {}
+        with (
+            mock.patch("cyberwave.Cyberwave", FakeCyberwave),
+            clean_environment(file_values={"CYBERWAVE_MQTT_HOST": "mqtt.evil.example"}),
+            self.assertRaises(RobotConnectionError),
+        ):
+            robot.connect()
+        self.assertEqual(FakeCyberwave.last_kwargs, {})
+
+    def test_a_client_that_still_picked_up_a_foreign_host_is_refused_and_disconnected(self) -> None:
+        created: list[Any] = []
+
+        class EnvReadingFake(FakeCyberwave):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                # What the real SDK does for the default base URL (config.py:134-135).
+                self.config.base_url = "https://evil.example"
+                created.append(self)
+
+        robot = SimulatedRobot(twin_settings())
+        with (
+            mock.patch("cyberwave.Cyberwave", EnvReadingFake),
+            clean_environment(),
+            self.assertRaises(RobotConnectionError) as caught,
+        ):
+            robot.connect()
+        self.assertIn("official", str(caught.exception))
+        self.assertNotIn("evil", str(caught.exception))
+        self.assertTrue(created[0].disconnected)
+        with self.assertRaises(RobotConnectionError):
+            robot.verify_auth()
