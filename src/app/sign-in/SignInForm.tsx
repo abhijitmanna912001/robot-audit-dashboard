@@ -2,10 +2,8 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { createAuthBrowserClient } from "@/lib/supabase/auth-browser";
-
-const SENT = "If this email can sign in, a link is on its way. Check your inbox.";
-const FAILED = "Could not send the link. Try again in a minute.";
+import { SIGN_IN_FAILED as FAILED, signInMessage } from "@/lib/sign-in-message";
+import { getBrowserClient } from "@/lib/supabase/browser";
 
 // Email magic link. The answer is the same whether or not the email is allowlisted, so this form
 // never reveals who is an operator. The server route checks the allowlist on every submission.
@@ -22,15 +20,13 @@ export function SignInForm({ failedBefore }: { failedBefore: boolean }) {
     if (busy || !value) return;
     setBusy(true);
     try {
-      const auth = createAuthBrowserClient();
+      const auth = getBrowserClient();
       const { error } = await auth.auth.signInWithOtp({
         email: value,
         options: { shouldCreateUser: false, emailRedirectTo: `${window.location.origin}/auth/callback` },
       });
-      // Unknown users also error (sign-ups are off): show the same text. Only a rate limit or a
-      // network failure, which say nothing about the address, get the failure text.
-      const status = (error as { status?: number } | null)?.status;
-      setMessage(error && (status === 429 || status === undefined || status >= 500) ? FAILED : SENT);
+      // The message depends only on the error code and status, never on its text or the address.
+      setMessage(signInMessage(error));
     } catch {
       setMessage(FAILED);
     } finally {
