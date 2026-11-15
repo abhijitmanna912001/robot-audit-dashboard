@@ -645,13 +645,14 @@ already break these rules. `db/002_terminal_guards_test.sql` (`BEGIN ... ROLLBAC
 triggers in the SQL editor. These rules are now enforced by the database;
 the worker lock remains the guard against two writers on one machine.
 
-**Database guards: 003 (prepared, NOT APPLIED).** `db/003_status_event_consistency.sql` is a
+**Database guards: 003 (applied 2026-11-15).** `db/003_status_event_consistency.sql` is a
 new migration (002 is unchanged). It makes the status and the terminal execution events agree.
-It was tested only on a throwaway local Postgres 18 (55 of 55 rows of
-`db/003_status_event_consistency_test.sql`, the two-session script `db/003_two_session_test.sh`,
-and `db/002_terminal_guards_test.sql` still 19 of 19). Before applying it, run
-`db/003_status_event_consistency_check.sql` (read only). Nothing in 003 has been applied to
-Supabase.
+It was applied to Supabase on 2026-11-15: the check script showed no violations, the test
+script `db/003_status_event_consistency_test.sql` passed 55 of 55, and the row counts were
+unchanged afterwards. Before testing it on Supabase it was run on a throwaway local Postgres 18
+(the same 55 of 55, the two-session script `db/003_two_session_test.sh`, and
+`db/002_terminal_guards_test.sql` still 19 of 19). Historical guidance: before it was applied,
+`db/003_status_event_consistency_check.sql` (read only) was run first.
 
 1. `audit_events_terminal_requires_state` (before insert on `audit_events`, for
    `execution_completed` and `execution_failed`): does `select ... from commands where id =
@@ -822,8 +823,8 @@ Accepted for the simulation-only meetup demo.
 - **An event insert and the matching status update are not atomic.** `audit_store.append_event`
   and `audit_store.set_command_status` are separate calls, so a crash between them leaves an event
   without its status change, or the reverse. The worker writes the event first, then the status. A
-  Postgres function called through `rpc` would make it atomic later. `db/003` (prepared, not
-  applied) does not change that, but makes the database refuse a contradicting pair: the status
+  Postgres function called through `rpc` would make it atomic later. `db/003` (applied
+  2026-11-15) does not change that, but makes the database refuse a contradicting pair: the status
   change `executing -> completed` needs the `execution_completed` event first, so only the
   "event without its status change" state can remain, never the reverse (see section 6,
   "Database guards: 003").

@@ -1,5 +1,6 @@
 -- 003_status_event_consistency_test.sql
--- MANUAL TEST for db/003_status_event_consistency.sql. NOT APPLIED to Supabase yet.
+-- MANUAL TEST for db/003_status_event_consistency.sql. 003 was applied to Supabase on
+-- 2026-11-15 (this test script passed 55/55, row counts unchanged).
 -- Run it in the Supabase SQL editor AFTER 003 has been applied (before that, the
 -- "rejected" cases show FAIL, which is also a useful proof that the test can fail).
 --

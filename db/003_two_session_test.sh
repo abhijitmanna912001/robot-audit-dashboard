@@ -3,7 +3,8 @@
 # LOCAL ONLY. Never run this against Supabase: it needs a Postgres it can create
 # and destroy. It starts a THROWAWAY cluster on a unix socket (no TCP port is
 # opened), applies db/001, db/002 and db/003, runs the two-session scenarios below
-# under READ COMMITTED, and deletes the cluster. NOT APPLIED to Supabase.
+# under READ COMMITTED, and deletes the cluster. 003 was applied to Supabase on 2026-11-15 (test script 55/55,
+# row counts unchanged); this script itself is only for a local Postgres.
 #
 # What it proves (two psql sessions, A and B, coordinated through named pipes, with
 # pg_stat_activity used to see that a statement is really waiting on a lock):

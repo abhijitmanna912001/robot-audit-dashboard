@@ -1,5 +1,5 @@
 -- 003_status_event_consistency.sql
--- STATUS: NOT APPLIED. Prepared and tested on a throwaway local Postgres only.
+-- STATUS: applied to Supabase on 2026-11-15; test script passed 55/55.
 -- 001 and 002 are applied and must not change: this is a new migration.
 -- Run db/003_status_event_consistency_check.sql FIRST (read-only): the new triggers
 -- only act on new writes and never look back, but you should know about existing rows

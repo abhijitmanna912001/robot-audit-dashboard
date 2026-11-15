@@ -1,5 +1,6 @@
 -- 003_status_event_consistency_check.sql
--- READ-ONLY. NOT APPLIED anywhere by Claude. Run it (before applying 003) in the
+-- READ-ONLY. 003 was applied to Supabase on 2026-11-15 (this check showed no violations,
+-- test script 55/55, row counts unchanged). It was run (before applying 003) in the
 -- Supabase SQL editor to see whether existing rows already break the rules the two
 -- new triggers enforce. It only SELECTs: no insert, update, delete or DDL.
 --
