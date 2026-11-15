@@ -645,6 +645,64 @@ already break these rules. `db/002_terminal_guards_test.sql` (`BEGIN ... ROLLBAC
 triggers in the SQL editor. These rules are now enforced by the database;
 the worker lock remains the guard against two writers on one machine.
 
+**Database guards: 003 (prepared, NOT APPLIED).** `db/003_status_event_consistency.sql` is a
+new migration (002 is unchanged). It makes the status and the terminal execution events agree.
+It was tested only on a throwaway local Postgres 18 (55 of 55 rows of
+`db/003_status_event_consistency_test.sql`, the two-session script `db/003_two_session_test.sh`,
+and `db/002_terminal_guards_test.sql` still 19 of 19). Before applying it, run
+`db/003_status_event_consistency_check.sql` (read only). Nothing in 003 has been applied to
+Supabase.
+
+1. `audit_events_terminal_requires_state` (before insert on `audit_events`, for
+   `execution_completed` and `execution_failed`): does `select ... from commands where id =
+   command_id for no key update`, then accepts `execution_completed` only while the command is
+   `executing`, and `execution_failed` only while it is `approved` or `executing`. `approved`
+   is allowed for `execution_failed` because the worker records a run that failed before it
+   reached `executing` (a refused pre-check, a failed `execution_started` insert, an
+   `approved -> executing` update that did not apply) with `execution_failed` first, then
+   `approved -> failed`. `execution_started` and the other event types are not restricted by
+   003 (002 still refuses an execution event after a terminal one).
+2. `commands_terminal_status_needs_event` (before update on `commands`, only when the status
+   changes to `completed` or `failed`): takes the same row lock explicitly (`for no key update`), then
+   requires: `completed` only from `executing` and only with an `execution_completed` event;
+   `failed` from `executing` or `approved` only with an `execution_failed` event; `failed` never
+   with an `execution_completed` event. `received -> failed` (a planner failure, which has no
+   execution events) is unchanged. Updates that keep the status (claim, `plan_id`) are untouched.
+
+Both triggers lock the same `commands` row, so a status update and a terminal event insert for
+one command cannot race: whichever comes second waits for the first to commit, then checks again
+against the latest committed row. 002's advisory lock still orders two event inserts. This
+relies on READ COMMITTED (the PostgreSQL and Supabase default), as 002 does.
+
+*What the database now guarantees:* a terminal execution event exists only for a command that was
+`approved` or `executing` when it was written; `completed` and `failed` (from `approved` or
+`executing`) always have the matching event; a command never has both terminal events; a terminal
+status never changes; and these checks hold under concurrent writers on READ COMMITTED.
+
+*What it still does NOT guarantee:*
+
+- **Event and status are still two calls, not one transaction.** A crash between them leaves an
+  `executing` command with a terminal event, or an `approved` command with `execution_failed`.
+  Both states are allowed and are finished by hand or by `worker/reconcile_executing.py` (status
+  only). Atomicity needs a Postgres function called through `rpc`.
+- **It cannot prove what physically happened.** An `execution_completed` or `execution_failed`
+  event is whatever the writer says. A failed command can still be "possibly moved".
+- **`execution_started` is not enforced.** A command can become `executing`, or be `completed`,
+  without an `execution_started` event.
+- **Not every jump is blocked.** Only changes to `completed` and `failed` are checked.
+  `received -> approved -> executing` has no event requirement, and a row inserted directly with
+  any status (the service role can) is not checked.
+- **Existing rows are not rewritten or rejected.** The check script only reports them.
+- **Only READ COMMITTED is supported.** Under REPEATABLE READ or SERIALIZABLE the existence
+  checks could use an old snapshot.
+- **The lock is `FOR NO KEY UPDATE`, not `FOR UPDATE`, on purpose.** The foreign key check of
+  every event insert holds `FOR KEY SHARE` on the command row, and `FOR UPDATE` conflicts with it:
+  one transaction that inserts a non-terminal event and then a terminal event for the same
+  command, run twice concurrently, would deadlock. With `FOR NO KEY UPDATE` it does not
+  (`db/003_two_session_test.sh`, X6, which also shows the deadlock with `FOR UPDATE`).
+- **The service role bypasses RLS, not triggers.** It is bound by 002 and 003. Someone who can
+  disable or drop a trigger (a database owner) is not.
+
 **Snapshot shape:**
 
 ```json
@@ -764,7 +822,11 @@ Accepted for the simulation-only meetup demo.
 - **An event insert and the matching status update are not atomic.** `audit_store.append_event`
   and `audit_store.set_command_status` are separate calls, so a crash between them leaves an event
   without its status change, or the reverse. The worker writes the event first, then the status. A
-  Postgres function called through `rpc` would make it atomic later.
+  Postgres function called through `rpc` would make it atomic later. `db/003` (prepared, not
+  applied) does not change that, but makes the database refuse a contradicting pair: the status
+  change `executing -> completed` needs the `execution_completed` event first, so only the
+  "event without its status change" state can remain, never the reverse (see section 6,
+  "Database guards: 003").
 - **Crash recovery is manual.** A claimed-but-abandoned command is restarted by hand, and a
   command is never retried automatically once execution has started (section 3).
 - **A claimed command can be stranded.** The claim has no lease and nothing releases it, so a
