@@ -13,16 +13,11 @@
 -- the FALLBACK at the bottom instead: it reports through an error message, which
 -- also aborts the transaction, so nothing is kept either.
 --
--- Concurrency (advisory lock) cannot be shown in one session. Optional proof with
--- two SQL editor tabs, using any real command id C that has no terminal event:
---   Tab 1:  begin;  insert into public.audit_events (command_id, event_type, message)
---                   values ('C', 'execution_failed', 'tab 1');       -- do not commit yet
---   Tab 2:  begin;  insert into public.audit_events (command_id, event_type, message)
---                   values ('C', 'execution_failed', 'tab 2');       -- waits on the lock
---   Tab 1:  commit;      -- tab 2 now fails with "already has a terminal execution event"
---   Tab 2:  rollback;
---   Then delete nothing: audit_events is append-only, so use a throwaway command
---   created for this and accept that its event stays (do NOT do this on a real command).
+-- WARNING: never run concurrency tests against production command records. audit_events is
+-- append-only (a trigger blocks UPDATE and DELETE), so a terminal event written by such a test can
+-- never be removed, and it would permanently end that command's history. Concurrency (the advisory
+-- lock) cannot be shown in one session anyway. db/003_two_session_test.sh covers concurrent
+-- terminal-event inserts on a disposable LOCAL Postgres; use that, not the Supabase project.
 
 begin;
 

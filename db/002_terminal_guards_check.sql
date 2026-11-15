@@ -12,7 +12,15 @@
 --   more_than_one_terminal_event   trigger (a): a command with two or more
 --                                  execution_completed / execution_failed events.
 --   execution_event_after_terminal trigger (a): an execution_* event recorded after
---                                  the command's first terminal event.
+--                                  the command's first terminal event. LIMITS: it orders
+--                                  by created_at, so events with identical timestamps
+--                                  can escape it (an event that is not strictly later
+--                                  than the first terminal event is not reported).
+--                                  There is no reliable ordering column: audit_events.id
+--                                  is a random uuid. Since migration 003 the triggers
+--                                  prevent this situation for new rows, so the check
+--                                  only matters for rows written before 002 and 003
+--                                  were applied (it found none).
 --   status_contradicts_event       a terminal status that disagrees with the
 --                                  terminal event (completed + execution_failed,
 --                                  failed + execution_completed), or an
