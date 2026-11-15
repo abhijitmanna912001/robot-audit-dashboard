@@ -79,11 +79,16 @@ def build(config: dict[str, Any], notify: Any) -> FakeTwin:
 
     ``build_marker`` (test only): a file path that is created the moment a twin is
     built, so a test can prove that a child which was refused its lock built nothing.
+    ``build_hang_s`` (test only, needs the marker): the build then waits this long
+    after creating the marker, so a child that wrongly got that far stays alive and
+    visible instead of racing to its exit.
     """
     marker = config.get("build_marker")
     if marker:
         with open(marker, "w", encoding="utf-8"):
             pass
+        if config.get("build_hang_s"):
+            time.sleep(float(config["build_hang_s"]))
     canonical = config.get("canonical")
     if canonical is not None:
         # Test-only, in this child process only: the counterpart of use_canonical_gates.

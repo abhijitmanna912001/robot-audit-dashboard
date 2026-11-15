@@ -94,6 +94,16 @@ class AdapterAllowlistTests(ChildCase):
                 session.start()
 
 
+HELPER_HOLDS_SHARED = """
+import sys
+sys.path.insert(0, {worker_dir!r})
+import worker_lock
+worker_lock.ActivityLock({path!r}, exclusive=False).acquire()
+print("held", flush=True)
+sys.stdin.read()  # holds until the test closes stdin (or kills this process)
+"""
+
+
 def run_child_main(wire: dict, *, then_shutdown: bool = False) -> tuple[object, int | None]:
     """Spawn the real ``child_main`` directly: its first message and its exit code."""
     ctx = multiprocessing.get_context("spawn")
@@ -130,13 +140,35 @@ class ActivityLockTests(ChildCase):
         return dataclasses.replace(spec, **{"activity_lock_path": self.path, **options})
 
     def test_a_child_holds_the_shared_lock_for_its_whole_life(self) -> None:
-        hold_shared_activity_lock(self.path)  # this process is the parent
-        session = ProcessTwinSession(self.spec()).start()
+        # The shared lock that start() needs is held by a SECOND process, and that
+        # process lets go once the children are up. Neither this process nor the helper
+        # holds anything when the assertions run, so an exclusive attempt can only fail
+        # because of a child's own lock.
+        helper = subprocess.Popen(
+            [sys.executable, "-c", HELPER_HOLDS_SHARED.format(
+                worker_dir=str(Path(__file__).resolve().parents[1]), path=self.path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(helper.kill)
+        self.assertEqual(helper.stdout.readline().strip(), "held")
+        with mock.patch.object(worker_lock, "holds_shared_activity_lock", return_value=True):
+            session = ProcessTwinSession(self.spec()).start()  # the parent check is the helper's
         try:
-            for _ in range(2):  # main and standby both hold it
-                with self.assertRaises(worker_lock.LockHeld):
-                    worker_lock.ActivityLock(self.path, exclusive=True).acquire()
+            helper.stdin.close()
+            self.assertEqual(helper.wait(timeout=10), 0)  # the helper's lock is gone
+            self.assertFalse(worker_lock.holds_shared_activity_lock(self.path))  # and not ours
+            self.assertEqual(len(session.children), 2)  # main and standby
+            with self.assertRaises(worker_lock.LockHeld):
+                worker_lock.ActivityLock(self.path, exclusive=True).acquire()
             with worker_lock.ActivityLock(self.path, exclusive=False):  # shared coexists
+                pass
+            # Each child holds its own: end the standby, the main child still holds it;
+            # end the main child too and the lock is free.
+            session._terminate(session.standby)
+            with self.assertRaises(worker_lock.LockHeld):
+                worker_lock.ActivityLock(self.path, exclusive=True).acquire()
+            session._terminate(session.main)
+            with worker_lock.ActivityLock(self.path, exclusive=True):
                 pass
         finally:
             session.close()
