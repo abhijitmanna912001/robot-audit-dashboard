@@ -12,6 +12,7 @@ import ast
 import dataclasses
 import inspect
 import io
+import os
 import json
 import signal
 import subprocess
@@ -213,6 +214,23 @@ class CommandLineTests(SimulationTestCase):
                 dry_run.assert_not_called()  # no fallback to a dry run either
                 self.assertEqual(self.call_names(), [])
                 self.assert_twin_untouched()
+
+    def test_a_foreign_cyberwave_endpoint_refuses_before_the_lock_and_any_write(self) -> None:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CYBERWAVE_")}
+        env["CYBERWAVE_BASE_URL"] = "https://evil.example"
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(simulation_processor.worker_lock, "WorkerLock") as lock, \
+                mock.patch.object(simulation_processor, "decide_one_command") as decide:
+            code, text = self.run_main(["--simulation", "--confirm-write"])
+        self.assertEqual(code, 4)
+        self.assertIn("REFUSED", text)
+        self.assertIn("CYBERWAVE_BASE_URL", text)
+        self.assertNotIn("evil.example", text)
+        self.assertIn("Nothing was written", text)
+        lock.assert_not_called()
+        decide.assert_not_called()
+        self.assertEqual(self.call_names(), [])  # no claim, no event, no status
+        self.assert_twin_untouched()
 
     def test_both_flags_are_blocked_today_before_anything_is_claimed(self) -> None:
         code, text = self.run_main(["--simulation", "--confirm-write"])
@@ -1172,6 +1190,40 @@ class InterruptionLifecycleTests(SimulationTestCase):
         self.assertIn("status failed", " ".join(raised.__notes__))
         self.assert_twin_untouched()
 
+    def test_ctrl_c_right_after_the_session_exists_still_closes_it(self) -> None:
+        # The old window: start() produced a live session and an interrupt arrived
+        # before the processor had recorded it. The session is now handed over
+        # BEFORE any child exists, so an interrupt at any later point finds it.
+        provider = InProcessProvider(self.twin)
+        real_start = provider.start
+
+        def start_then_interrupt(on_created: Any = None) -> Any:
+            real_start(on_created=on_created)
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(provider, "start", start_then_interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual(len(provider.sessions), 1)
+        self.assertTrue(provider.sessions[0].closed)  # closed, not leaked
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "not_needed"))
+        self.assert_nothing_sent()
+
+    def test_a_failed_start_leaves_no_session_to_close_twice(self) -> None:
+        provider = InProcessProvider(self.twin)
+        real_start = provider.start
+
+        def failing_start(on_created: Any = None) -> Any:
+            real_start(on_created=on_created)
+            raise RuntimeError("could not start")
+
+        with mock.patch.object(provider, "start", failing_start):
+            result = process_one_simulation_command(WORKER_ID, twin=provider, timeouts=FAST)
+        self.assertEqual(self.failed_event()["error"]["kind"], "connection_failed")
+        self.assert_nothing_sent()
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+
     def test_ctrl_c_before_dispatch(self) -> None:
         self.twin.fail["connect"] = KeyboardInterrupt()
         self.run_interrupted(KeyboardInterrupt)
@@ -1276,8 +1328,8 @@ class InterruptionLifecycleTests(SimulationTestCase):
         provider = InProcessProvider(self.twin)
         real_start = provider.start
 
-        def start_with_stuck_close() -> Any:
-            session = real_start()
+        def start_with_stuck_close(**kwargs: Any) -> Any:
+            session = real_start(**kwargs)
             session.close = mock.Mock(side_effect=SupervisionError("stuck"))
             return session
 
@@ -1432,8 +1484,8 @@ class InterruptionLifecycleTests(SimulationTestCase):
         provider = InProcessProvider(self.twin)
         real_start = provider.start
 
-        def start_with_stuck_close() -> Any:
-            session = real_start()
+        def start_with_stuck_close(**kwargs: Any) -> Any:
+            session = real_start(**kwargs)
             session.close = mock.Mock(side_effect=SupervisionError("stuck"))
             return session
 
@@ -1449,8 +1501,8 @@ class InterruptionLifecycleTests(SimulationTestCase):
         real_start = provider.start
         interrupt = KeyboardInterrupt()
 
-        def start_with_interrupted_close() -> Any:
-            session = real_start()
+        def start_with_interrupted_close(**kwargs: Any) -> Any:
+            session = real_start(**kwargs)
             session.cleanup_failure = "the main twin process could not be confirmed stopped"
             session.close = mock.Mock(side_effect=interrupt)
             return session

@@ -6,12 +6,23 @@ most one requested twin method at a time. Every decision (the sequence, the
 deadlines, the stop policy, whether a movement may have been sent, the audit
 lifecycle) stays in the parent.
 
-Import isolation. ``spawn`` imports this module in the child BEFORE the entry
-function runs, so it imports only the standard library at module level. Worker
-and test modules are imported inside ``child_main``; in test mode that happens
-only after ``tests.net_guard`` is installed. This is the only simulation module
-allowed to use ``os``, and only ``os._exit``, only in ``_exit_now`` (a test
-checks both).
+Import isolation. What the child imports, and when:
+
+1. ``spawn`` first re-imports the PARENT'S MAIN MODULE in the child, as
+   ``__mp_main__``, and then imports this module. If the parent was started as
+   ``simulation_processor`` (or any script that imports worker modules), those
+   worker modules are already loaded in the child before ``child_main`` runs and
+   before any guard can be installed. ``preloaded_before_guard`` in READY reports
+   which ones (``tests/test_simulation_child.py`` shows this with a script that
+   imports ``simulation_processor``).
+2. This module itself imports only the standard library at module level.
+3. Inside ``child_main``: ``tests.net_guard`` (test mode only, first), then the
+   factory (``tests.fake_twin_child``, ``fake`` adapter in test mode only), then
+   ``simulation_gates`` in EVERY mode, which loads ``plan_hasher``,
+   ``plan_snapshot``, ``safety_validator`` and ``simulation_payloads``.
+
+This is the only simulation module allowed to use ``os``, and only
+``os._exit``, only in ``_exit_now`` (a test checks both).
 
 What the child guarantees:
 
@@ -50,7 +61,7 @@ import time
 from multiprocessing.connection import wait
 from typing import Any
 
-__all__ = ["ADAPTER_KEYS", "CALL_METHODS", "MAX_MOVES", "child_main"]
+__all__ = ["ADAPTER_KEYS", "CALL_METHODS", "GATED_CALL_METHODS", "MAX_MOVES", "child_main"]
 
 ADAPTER_PRODUCTION = "production"
 ADAPTER_FAKE = "fake"
@@ -63,6 +74,13 @@ _FAKE_FACTORY_MODULE = "tests.fake_twin_child"
 CALL_METHODS = frozenset(
     {"connect", "runtime_target", "twin_target", "read_telemetry", "stop", "disconnect"}
 )
+# Gate policy (agreed stop policy, commit e1871b3): ONLY the main child's
+# ``connect`` is refused when the gates do not hold. ``stop`` is never gated, and
+# neither is the standby child's ``connect``: the standby exists only to attempt
+# one best-effort stop, which must stay possible even when the gates fail. A stop
+# that was refused, failed or unanswered is never reported as confirmed (the
+# executor decides that, not this module).
+GATED_CALL_METHODS = frozenset({"connect"})
 MAX_MOVES = 2  # the target movement and the return movement
 
 # Exit codes, for diagnosis in tests.
@@ -203,6 +221,11 @@ def child_main(conn: Any, spec: dict[str, Any], role: str, start_limit_s: float)
             _, seq, method, args = message
             if method not in CALL_METHODS or type(args) is not tuple:
                 _send(conn, ("refused", seq, "method_not_allowed"))
+                continue
+            # Only the MAIN child's connect is gated (see GATED_CALL_METHODS);
+            # stop and the standby's connect always go through.
+            if role == "main" and method in GATED_CALL_METHODS and not gates_ok():
+                _send(conn, ("refused", seq, "gates_unconfirmed"))
                 continue
             if method == "stop":
                 if stopped:

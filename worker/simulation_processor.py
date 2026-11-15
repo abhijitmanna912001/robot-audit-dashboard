@@ -125,7 +125,7 @@ from command_processor import (
     _written_flag,
     decide_one_command,
 )
-from config import redact
+from config import ConfigError, load_cyberwave_endpoints, redact
 from execution_gate import decide_execution
 from plan_snapshot import PlanSnapshot
 from safety_validator import ValidationResult
@@ -733,9 +733,17 @@ def _lifecycle_steps(
     # 4. The supervised twin session: children started and READY before the
     #    rehearsal clock. Nothing is connected or sent while it starts.
     progress.at("starting the twin session (nothing connected or sent)")
+
+    def remember_session(created: Any) -> None:
+        # Called by the provider BEFORE any child is spawned, so there is no
+        # moment (between start() returning and an assignment here) in which a
+        # live session exists that an interrupt could not find and close.
+        progress.session = created
+
     try:
-        session = twin.start()
+        session = twin.start(on_created=remember_session)
     except Exception as exc:
+        progress.session = None  # start() already cleaned up after a failed start
         return fail(
             "executing", "connection_failed",
             f"the twin process could not be started ({type(exc).__name__}); nothing was sent",
@@ -744,16 +752,20 @@ def _lifecycle_steps(
         )
     except BaseException as exc:
         interrupted = exc
+        # The session was handed over before any child existed (remember_session):
+        # close it here, whatever point of start() the interruption reached. A
+        # session that start() already cleaned up closes again harmlessly.
+        cleanup = _close_open_session(progress)
         _record_then_reraise(progress, interrupted, lambda: fail(
             "executing", interruption_kind(interrupted),
             _interrupted_text(interrupted, "while the twin process was starting"),
             f"the run was interrupted ({type(interrupted).__name__}) while the twin process "
-            "was starting. Nothing was connected or sent.",
+            f"was starting. Nothing was connected or sent.{cleanup}",
         ))
 
     # 5. The rehearsal, on the snapshot that was validated and approved. The
     #    session is closed (every child verified gone) before anything is recorded.
-    progress.session = session
+    progress.session = session  # already set by remember_session; kept for providers that ignore on_created
     progress.at("the rehearsal")
     interrupt: BaseException | None = None
     try:
@@ -1149,6 +1161,14 @@ def main(argv: list[str] | None = None) -> int:
             "command_processor.py, is dry-run only.)"
         )
         return 2
+
+    # The SDK reads CYBERWAVE_* endpoint variables on its own; a stray host would
+    # receive the API key. Refuse before the lock, the claim or any write.
+    try:
+        load_cyberwave_endpoints()
+    except ConfigError as exc:
+        print(f"REFUSED: {exc}")
+        return 4
 
     blockers = live_simulation_blockers()
     if blockers:

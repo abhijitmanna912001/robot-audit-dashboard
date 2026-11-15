@@ -26,6 +26,7 @@ from simulation_supervisor import (
     WATCHDOG_MARGIN_S,
     ProcessTwinSession,
     SessionCrashed,
+    SessionRefused,
     SessionStartError,
     TwinCallFailed,
     TwinSpec,
@@ -115,6 +116,42 @@ class GuardAndFactoryTests(ChildCase):
         twin.confirmations = dataclasses.replace(ALL_CONFIRMED)  # an equal copy: not canonical
         session = open_process_session(self, twin)
         self.assertTrue(any("not the canonical" in b for b in session.gate_blockers()))
+
+    def test_the_main_childs_connect_is_refused_when_the_gates_do_not_hold(self) -> None:
+        twin = FakeTwin()
+        twin.confirmations = dataclasses.replace(ALL_CONFIRMED)  # not the canonical object
+        session = open_process_session(self, twin)
+        with self.assertRaises(SessionRefused) as ctx:
+            session.call("connect", (1.0,), time.monotonic() + 5)
+        self.assertEqual(ctx.exception.reason, "gates_unconfirmed")
+        self.assertEqual(twin.calls, [])  # the twin itself was never called
+        self.assertTrue(session.healthy)  # a refusal is not a crash
+
+    def test_stop_is_never_gated_in_the_child(self) -> None:
+        # Agreed stop policy (e1871b3): one best-effort stop even when the gates fail.
+        twin = FakeTwin()
+        twin.confirmations = dataclasses.replace(ALL_CONFIRMED)
+        session = open_process_session(self, twin)
+        session.call("stop", (1.0,), time.monotonic() + 5)  # reaches the twin, no refusal
+        self.assertIn("stop", twin.names())
+        with self.assertRaises(SessionRefused) as again:
+            session.call("stop", (1.0,), time.monotonic() + 5)
+        self.assertEqual(again.exception.reason, "stop_already_called")  # still one stop only
+
+    def test_the_standbys_connect_and_stop_are_not_gated(self) -> None:
+        twin = FakeTwin()
+        twin.confirmations = dataclasses.replace(ALL_CONFIRMED)
+        session = open_process_session(self, twin)  # best_effort: a standby child exists
+        attempt = session.standby_stop(time.monotonic() + 5)
+        self.assertTrue(attempt.called)  # connect and stop both reached the standby twin
+        self.assertEqual(twin.names().count("stop"), 1)
+
+    def test_the_ungated_calls_still_work_when_the_gates_do_not_hold(self) -> None:
+        # Read-only calls are not gated: only what reaches the simulation is.
+        twin = FakeTwin()
+        twin.confirmations = dataclasses.replace(ALL_CONFIRMED)
+        session = open_process_session(self, twin)
+        self.assertIsNotNone(session.call("runtime_target", (), time.monotonic() + 5))
 
 
 SPAWN_SMOKE_SCRIPT = '''

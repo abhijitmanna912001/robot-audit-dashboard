@@ -9,6 +9,7 @@ handles these situations, not how a real Cyberwave twin behaves.
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 import tempfile
 import time
@@ -22,6 +23,7 @@ import simulation_supervisor as sv
 from simulation_executor import StopResult
 from simulation_supervisor import (
     TERMINATE_LIMIT_S,
+    ProcessSessionProvider,
     ProcessTwinSession,
     SessionCrashed,
     SessionRefused,
@@ -403,6 +405,29 @@ class StandbyTests(SupervisorCase):
         session.close()
         self.assertTrue(standby.dead and standby.closed)
         self.assertIsNotNone(standby.exitcode)
+
+
+class ProviderHandOverTests(SupervisorCase):
+    def test_the_session_is_handed_over_before_any_child_is_spawned(self) -> None:
+        provider = ProcessSessionProvider(spec_for(self.twin, fresh_session_stop="unsupported"))
+        seen: list[Any] = []
+
+        def on_created(session: Any) -> None:
+            self.assertIsNone(session.main)  # nothing spawned yet
+            seen.append(session)
+
+        with mock.patch.object(ProcessTwinSession, "_spawn", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                provider.start(on_created=on_created)
+        self.assertEqual(len(seen), 1)  # the caller held the session when the interrupt hit
+        seen[0].close()  # safe on a session that never finished starting
+        self.assertEqual(multiprocessing.active_children(), [])
+
+    def test_start_without_a_callback_still_works(self) -> None:
+        provider = ProcessSessionProvider(spec_for(self.twin, fresh_session_stop="unsupported"))
+        session = provider.start()
+        self.addCleanup(session.close)
+        self.assertTrue(session.healthy)
 
 
 if __name__ == "__main__":

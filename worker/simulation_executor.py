@@ -458,7 +458,11 @@ class _Rehearsal:
         """
         deadline, capped = self._work_budget(self.timeouts.dispatch_s)
 
+        acknowledged_once = False
+
         def acknowledged() -> None:
+            nonlocal acknowledged_once
+            acknowledged_once = True
             if returning:
                 self.return_dispatched = True
             else:
@@ -467,7 +471,18 @@ class _Rehearsal:
         try:
             self.session.dispatch_move(joint, value_rad, deadline, acknowledged)
         except SessionRefused:
-            raise _Abort("dispatch_failed", f"{what} was refused by the twin process before it was sent") from None
+            if acknowledged_once:
+                # GO was refused AFTER the acknowledgement. The movement stays
+                # recorded as possibly sent: this code cannot prove it was not.
+                raise _Abort(
+                    "dispatch_failed",
+                    f"{what} was refused by the twin process after it was recorded as possibly "
+                    "sent; it is treated as sent",
+                ) from None
+            raise _Abort(
+                "dispatch_failed",
+                f"{what} was refused by the twin process before any movement was sent",
+            ) from None
         except Exception as exc:
             raise self._abort_for(exc, what, "dispatch_failed", capped) from None
 

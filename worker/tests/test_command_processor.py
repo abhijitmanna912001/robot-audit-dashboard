@@ -18,6 +18,7 @@ import ast
 import functools
 import inspect
 import io
+import os
 import json
 import subprocess
 import sys
@@ -405,6 +406,19 @@ class MainTests(ProcessorTestCase):
         code, out = self.run_main()
         self.assertEqual(code, 2)
         self.assertIn("Nothing was sent", out)
+        self.assertEqual(self.calls.mock_calls, [])
+
+    def test_a_foreign_cyberwave_endpoint_refuses_before_the_lock_and_the_claim(self) -> None:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CYBERWAVE_")}
+        env["CYBERWAVE_MQTT_HOST"] = "mqtt.evil.example"
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(worker_lock, "WorkerLock") as lock:
+            code, out = self.run_main("--confirm-write")
+        self.assertEqual(code, 4)
+        self.assertIn("CYBERWAVE_MQTT_HOST", out)
+        self.assertNotIn("evil.example", out)
+        self.assertIn("Nothing was written", out)
+        lock.assert_not_called()
         self.assertEqual(self.calls.mock_calls, [])
 
     def test_a_held_lock_refuses_before_the_claim(self) -> None:

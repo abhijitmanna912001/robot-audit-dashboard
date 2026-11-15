@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -232,6 +233,98 @@ def load_cyberwave_settings(*, require_asset_identifier: bool = True) -> Cyberwa
         robot_asset_identifier=identifier,
         environment_id=_optional(ENVIRONMENT_ID_VAR),
     )
+
+
+# --- Cyberwave endpoints ---------------------------------------------------
+#
+# The SDK reads these variables from the process environment on its own
+# (cyberwave/config.py:134-164, client.py:330-331, resources.py:4328), so a
+# stray value would send the API key and traffic to another host. The worker
+# refuses to start unless every one of them is unset or official. The official
+# values are the SDK's own defaults (cyberwave/config.py:15-18).
+OFFICIAL_BASE_URL = "https://api.cyberwave.com"
+OFFICIAL_BASE_HOST = "api.cyberwave.com"
+OFFICIAL_MQTT_HOST = "mqtt.cyberwave.com"
+OFFICIAL_MQTT_PORT = 8883
+OFFICIAL_MQTT_USERNAME = "mqttcyb"
+OFFICIAL_FRONTEND_HOST = "cyberwave.com"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})  # the SDK's own parser, config.py:33
+
+# Set means redirect or replace a credential: refused whenever present.
+_MUST_BE_UNSET = ("CYBERWAVE_MQTT_PASSWORD", "CYBERWAVE_MQTT_TLS_CA_CERT")
+
+
+@dataclass(frozen=True)
+class CyberwaveEndpoints:
+    """The only endpoints the worker's Cyberwave client may use. All official."""
+
+    base_url: str = OFFICIAL_BASE_URL
+    mqtt_host: str = OFFICIAL_MQTT_HOST
+    mqtt_port: int = OFFICIAL_MQTT_PORT
+    mqtt_username: str = OFFICIAL_MQTT_USERNAME
+    mqtt_use_tls: bool = True
+
+
+def _is_official_url(value: str, host: str, *, allow_root_slash: bool = True) -> bool:
+    """True only for ``https://<host>`` with no userinfo, port, path, query or fragment."""
+    try:
+        parts = urlsplit(value)
+        port = parts.port  # raises on a malformed port
+    except ValueError:
+        return False
+    path_ok = parts.path == "" or (allow_root_slash and parts.path == "/")
+    return (
+        parts.scheme == "https"
+        and parts.hostname == host
+        and parts.netloc == host  # no userinfo, no port
+        and port is None
+        and path_ok
+        and not parts.query
+        and not parts.fragment
+    )
+
+
+def load_cyberwave_endpoints() -> CyberwaveEndpoints:
+    """The official Cyberwave endpoints, or ``ConfigError`` if any variable differs.
+
+    Reads the ``WorkerConfig`` snapshot (real environment over ``worker/.env``),
+    which includes everything the SDK itself would see in ``os.environ``.
+    Each variable must be unset or exactly the official value; the error names
+    the variable and never its value. Nothing is created or written.
+    """
+    cfg = load_config()
+    wrong: list[str] = []
+
+    def check(name: str, ok: bool) -> None:
+        if not ok:
+            wrong.append(name)
+
+    value = cfg.get("CYBERWAVE_BASE_URL")
+    check("CYBERWAVE_BASE_URL", value is None or _is_official_url(value, OFFICIAL_BASE_HOST))
+    value = cfg.get("CYBERWAVE_MQTT_HOST")
+    check("CYBERWAVE_MQTT_HOST", value is None or value == OFFICIAL_MQTT_HOST)
+    value = cfg.get("CYBERWAVE_MQTT_PORT")
+    check("CYBERWAVE_MQTT_PORT", value is None or value == str(OFFICIAL_MQTT_PORT))
+    value = cfg.get("CYBERWAVE_MQTT_USERNAME")
+    check("CYBERWAVE_MQTT_USERNAME", value is None or value == OFFICIAL_MQTT_USERNAME)
+    value = cfg.get("CYBERWAVE_MQTT_USE_TLS")
+    check("CYBERWAVE_MQTT_USE_TLS", value is None or value.lower() in _TRUE_VALUES)
+    value = cfg.get("CYBERWAVE_FRONTEND_URL")
+    check(
+        "CYBERWAVE_FRONTEND_URL",
+        value is None or _is_official_url(value, OFFICIAL_FRONTEND_HOST),
+    )
+    for name in _MUST_BE_UNSET:
+        check(name, cfg.get(name) is None)
+
+    if wrong:
+        raise ConfigError(
+            "Refusing to start: not the official Cyberwave endpoint, or must be unset: "
+            + ", ".join(wrong)
+            + ". Remove them from the environment and from "
+            + f"{ENV_FILE}. Nothing was written."
+        )
+    return CyberwaveEndpoints()
 
 
 def load_supabase_settings() -> SupabaseSettings:

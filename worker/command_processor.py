@@ -105,7 +105,7 @@ import audit_store
 import critic_client
 import worker_lock
 from audit_store import AuditStoreError, StateConflictError, WriteError
-from config import redact
+from config import ConfigError, load_cyberwave_endpoints, redact
 from dry_run import run_dry_run
 from critic_gate import (
     CATEGORY_APPROVED,
@@ -976,6 +976,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.confirm_write:
         print("Refusing to run without --confirm-write. Nothing was sent.")
         return 2
+
+    # The SDK reads CYBERWAVE_* endpoint variables on its own; a stray host would
+    # receive the API key. Refuse before the lock, the claim or any write.
+    try:
+        load_cyberwave_endpoints()
+    except ConfigError as exc:
+        print(f"REFUSED: {exc}")
+        return 4
 
     # The single-instance lock comes before the claim. This dry-run path cannot
     # move anything, so a platform without fcntl may still run it; a lock that

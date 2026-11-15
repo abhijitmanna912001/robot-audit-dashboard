@@ -148,8 +148,15 @@ def twin_gate_blockers(twin: Any) -> tuple[str, ...]:
        module. Identity, not equality: an equal copy, or a twin's own all-True
        instance, is refused.
 
-    Only then are the entries of the canonical object itself checked. The
-    executor and the processor both call this, so they enforce one rule.
+    Only then are the entries of the canonical object itself checked. One rule,
+    several callers: the twin child (``simulation_child``: at start-up, and
+    before the main child's ``connect`` and before every movement; ``stop`` and
+    the standby's ``connect`` are deliberately not gated), the processor
+    (``simulation_processor._provider_gate_blockers``, only for a session
+    provider that has no ``gate_blockers`` of its own) and the test-only
+    ``tests/inprocess_session.py``. The executor does not call it directly: it
+    asks its session (``session.gate_blockers()``), which is backed by this
+    function in the child.
     ``CYBERWAVE_GATES`` is looked up when this runs; production code has no way
     to replace it (that is a reviewed edit of this file).
     """

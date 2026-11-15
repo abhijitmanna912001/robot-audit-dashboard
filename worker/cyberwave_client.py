@@ -17,6 +17,13 @@ design, all taken from the SDK source:
   (``client.py:942-1036``). This wrapper never calls it. The twin is fetched by
   its id with ``client.twins.get_raw()``, which for a UUID is one
   ``GET /api/v1/twins/{uuid}`` and has no create path (``resources.py:2950-2970``).
+* The SDK reads ``CYBERWAVE_BASE_URL`` and ``CYBERWAVE_MQTT_*`` from the process
+  environment itself (``config.py:134-164``), and sends the API key to those
+  hosts. ``connect`` therefore refuses to build a client unless every such
+  variable is unset or official (``config.load_cyberwave_endpoints``), passes the
+  endpoints explicitly, and checks the built client's config. Passing the default
+  base URL explicitly is NOT enough on its own: ``config.py:134`` still reads
+  ``CYBERWAVE_BASE_URL`` when the argument equals the default.
 """
 
 from __future__ import annotations
@@ -25,7 +32,13 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from config import CyberwaveSettings, CyberwaveTwinSettings, canonical_uuid
+from config import (
+    ConfigError,
+    CyberwaveSettings,
+    CyberwaveTwinSettings,
+    canonical_uuid,
+    load_cyberwave_endpoints,
+)
 
 SIMULATION_MODE = "simulation"
 SIMULATION_SOURCE_TYPE = "sim"  # cyberwave.constants.SOURCE_TYPE_SIM
@@ -77,11 +90,22 @@ class SimulatedRobot:
 
     def connect(self) -> None:
         """Build the SDK client in simulation mode. Makes no network call."""
+        # Before the SDK is even imported: a stray endpoint variable stops here.
+        try:
+            endpoints = load_cyberwave_endpoints()
+        except ConfigError as exc:
+            raise RobotConnectionError(str(exc)) from None
+
         from cyberwave import Cyberwave
 
         try:
             client = Cyberwave(
                 api_key=self._settings.api_key,
+                base_url=endpoints.base_url,
+                mqtt_host=endpoints.mqtt_host,
+                mqtt_port=endpoints.mqtt_port,
+                mqtt_username=endpoints.mqtt_username,
+                mqtt_use_tls=endpoints.mqtt_use_tls,
                 # None is valid: the SDK signature is Optional[str] = None, and
                 # a single-workspace token needs no workspace id.
                 workspace_id=self._settings.workspace_id,
@@ -101,6 +125,19 @@ class SimulatedRobot:
             raise RobotConnectionError(
                 "Refusing to continue: client is not in simulation mode "
                 f"(runtime_mode={runtime_mode!r}, source_type={source_type!r})."
+            )
+
+        # The SDK may still have read the environment (see the module docstring):
+        # what it actually built must be the official endpoints.
+        built = client.config
+        if (
+            getattr(built, "base_url", None) != endpoints.base_url
+            or getattr(built, "mqtt_host", None) != endpoints.mqtt_host
+            or getattr(built, "mqtt_port", None) != endpoints.mqtt_port
+        ):
+            client.disconnect()
+            raise RobotConnectionError(
+                "Refusing to continue: the client is not using the official Cyberwave endpoints."
             )
         self._client = client
 

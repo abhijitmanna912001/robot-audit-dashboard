@@ -361,3 +361,98 @@ class ConfigObjectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+OFFICIAL_ENDPOINT_ENV = {
+    "CYBERWAVE_BASE_URL": "https://api.cyberwave.com",
+    "CYBERWAVE_MQTT_HOST": "mqtt.cyberwave.com",
+    "CYBERWAVE_MQTT_PORT": "8883",
+    "CYBERWAVE_MQTT_USERNAME": "mqttcyb",
+    "CYBERWAVE_MQTT_USE_TLS": "true",
+    "CYBERWAVE_FRONTEND_URL": "https://cyberwave.com",
+}
+
+FOREIGN_ENDPOINT_VALUES = {
+    "CYBERWAVE_BASE_URL": (
+        "https://evil.example",
+        "http://api.cyberwave.com",
+        "https://api.cyberwave.com.evil.example",
+        "https://api.cyberwave.com@evil.example",
+        "https://api.cyberwave.com:8443",
+        "https://api.cyberwave.com/v2",
+        "https://api.cyberwave.com?x=1",
+        "api.cyberwave.com",
+        "https://API.cyberwave.com.",
+    ),
+    "CYBERWAVE_MQTT_HOST": ("mqtt.evil.example", "mqtt.cyberwave.com.evil.example", "localhost"),
+    "CYBERWAVE_MQTT_PORT": ("1883", "8884", "abc"),
+    "CYBERWAVE_MQTT_USERNAME": ("someone",),
+    "CYBERWAVE_MQTT_USE_TLS": ("false", "0", "no"),
+    "CYBERWAVE_MQTT_PASSWORD": ("anything",),
+    "CYBERWAVE_MQTT_TLS_CA_CERT": ("/tmp/ca.pem",),
+    "CYBERWAVE_FRONTEND_URL": ("https://evil.example", "http://cyberwave.com"),
+}
+
+
+def endpoints_with(env: dict[str, str], file_values: dict[str, str] | None = None) -> config.CyberwaveEndpoints:
+    with (
+        mock.patch.object(config, "dotenv_values", return_value=file_values or {}),
+        mock.patch.dict(os.environ, env, clear=True),
+    ):
+        return config.load_cyberwave_endpoints()
+
+
+class CyberwaveEndpointTests(unittest.TestCase):
+    def test_nothing_set_gives_the_sdk_defaults(self) -> None:
+        endpoints = endpoints_with({"PATH": "/bin"})
+        self.assertEqual(endpoints, config.CyberwaveEndpoints())
+        self.assertEqual(endpoints.base_url, "https://api.cyberwave.com")
+        self.assertEqual(endpoints.mqtt_host, "mqtt.cyberwave.com")
+        self.assertEqual(endpoints.mqtt_port, 8883)
+        self.assertEqual(endpoints.mqtt_username, "mqttcyb")
+        self.assertIs(endpoints.mqtt_use_tls, True)
+
+    def test_official_values_set_explicitly_are_accepted(self) -> None:
+        self.assertEqual(endpoints_with(OFFICIAL_ENDPOINT_ENV), config.CyberwaveEndpoints())
+        self.assertEqual(
+            endpoints_with({"CYBERWAVE_BASE_URL": "https://api.cyberwave.com/"}),
+            config.CyberwaveEndpoints(),
+        )
+
+    def test_blank_values_count_as_unset(self) -> None:
+        self.assertEqual(endpoints_with({"CYBERWAVE_BASE_URL": "  "}), config.CyberwaveEndpoints())
+
+    def test_every_foreign_value_is_refused_by_name_without_echoing_it(self) -> None:
+        for name, values in FOREIGN_ENDPOINT_VALUES.items():
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(config.ConfigError) as caught:
+                        endpoints_with({name: value})
+                    self.assertIn(name, str(caught.exception))
+                    if len(value) > 4:  # short values like "no" occur in ordinary words
+                        self.assertNotIn(value, str(caught.exception))
+
+    def test_a_foreign_value_in_the_env_file_is_refused_too(self) -> None:
+        with self.assertRaises(config.ConfigError) as caught:
+            endpoints_with({}, file_values={"CYBERWAVE_BASE_URL": "https://evil.example"})
+        self.assertIn("CYBERWAVE_BASE_URL", str(caught.exception))
+
+    def test_the_real_environment_overrides_a_foreign_file_value(self) -> None:
+        # Same precedence as every other setting: the real value is the one checked.
+        env = {"CYBERWAVE_BASE_URL": "https://api.cyberwave.com"}
+        file_values = {"CYBERWAVE_BASE_URL": "https://evil.example"}
+        self.assertEqual(endpoints_with(env, file_values), config.CyberwaveEndpoints())
+
+    def test_all_offenders_are_listed_at_once(self) -> None:
+        with self.assertRaises(config.ConfigError) as caught:
+            endpoints_with({"CYBERWAVE_BASE_URL": "https://x.example", "CYBERWAVE_MQTT_HOST": "x.example"})
+        for name in ("CYBERWAVE_BASE_URL", "CYBERWAVE_MQTT_HOST"):
+            self.assertIn(name, str(caught.exception))
+
+    def test_the_official_constants_match_the_sdk_defaults(self) -> None:
+        import cyberwave.config as sdk_config  # only reads module constants, no client
+
+        self.assertEqual(config.OFFICIAL_BASE_URL, sdk_config.DEFAULT_BASE_URL)
+        self.assertEqual(config.OFFICIAL_MQTT_HOST, sdk_config.DEFAULT_MQTT_HOST)
+        self.assertEqual(config.OFFICIAL_MQTT_PORT, sdk_config.DEFAULT_MQTT_PORT)
+        self.assertEqual(config.OFFICIAL_MQTT_USERNAME, sdk_config.DEFAULT_MQTT_USERNAME)

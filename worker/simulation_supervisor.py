@@ -684,5 +684,17 @@ class ProcessSessionProvider:
         """Before any child exists: the parent's canonical gates only."""
         return canonical_gate_blockers()
 
-    def start(self) -> ProcessTwinSession:
-        return ProcessTwinSession(self.spec, on_record=self._on_record).start()
+    def start(
+        self, on_created: Callable[[ProcessTwinSession], Any] | None = None
+    ) -> ProcessTwinSession:
+        """Create the session, hand it to ``on_created``, then start it.
+
+        ``on_created`` runs BEFORE any child is spawned. The caller records the
+        session there, so an interrupt anywhere from the first spawn to the
+        return of this method still finds a session it can close (``close()``
+        is safe on a session that never finished starting).
+        """
+        session = ProcessTwinSession(self.spec, on_record=self._on_record)
+        if on_created is not None:
+            on_created(session)
+        return session.start()
