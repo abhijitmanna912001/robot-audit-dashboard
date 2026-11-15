@@ -206,8 +206,8 @@ test("executionOutcome: every headline, stamp, tone and fact", () => {
     tone: "broke",
     facts: ["simulation confirmed stopped", "Detail: no reply"],
   });
-  const notNeeded = fail("not_needed", "session_crashed");
-  assert.equal(notNeeded?.headline, "Simulation failed: Simulation session crashed");
+  const notNeeded = fail("not_needed", "worker_lost");
+  assert.equal(notNeeded?.headline, "Simulation failed: Worker lost; outcome not recorded");
   assert.equal(notNeeded?.tone, "broke");
   assert.deepEqual(notNeeded?.facts, ["no stop was needed", "Detail: no reply"]);
   assert.equal(fail("confirmed", "telemetry_invalid")?.headline, "Simulation failed: Telemetry invalid");
@@ -261,7 +261,7 @@ test("summarize, stamp, facts and stage details agree for simulations", () => {
 test("eventTitle", () => {
   assert.equal(eventTitle(ev("execution_started", SIM)), "Simulation started");
   assert.equal(eventTitle(ev("execution_completed", SIM)), "Simulated move completed");
-  assert.equal(eventTitle(ev("execution_failed", { ...SIM, error: { kind: "interrupted_write" } })), "Interrupted while recording");
+  assert.equal(eventTitle(ev("execution_failed", { ...SIM, error: { kind: "worker_lost" } })), "Worker lost; outcome not recorded");
   assert.equal(eventTitle(ev("execution_failed", { ...SIM, error: { kind: "weird_kind" } })), "Weird kind");
   // The planner/critic table is not used for simulations: "timeout" is just sentence-cased.
   assert.equal(eventTitle(ev("execution_failed", { ...SIM, error: { kind: "timeout" } })), "Timeout");
@@ -313,16 +313,34 @@ test("latestSimulation: terminal beats started, malformed is not simulated", () 
 
 test("simulationKindLabel: known, unknown, empty and non-string kinds", () => {
   const known: Record<string, string> = {
-    overall_timeout: "Simulation timed out",
-    connection_failed: "Could not connect to the simulation",
+    approval_invalid: "First-movement approval invalid",
+    rehearsal_restriction: "Blocked by a rehearsal restriction",
     gate_unconfirmed: "Movement blocked by a safety gate",
+    limits_revalidation_failed: "Joint limits failed the re-check",
+    event_write_failed: "Could not record an audit event",
+    status_update_failed: "Could not update the command status",
+    connection_failed: "Could not connect to the simulation",
+    not_simulation: "Refused: not a simulation",
+    telemetry_unavailable: "Telemetry unavailable",
+    telemetry_invalid: "Telemetry invalid",
+    dispatch_failed: "Move dispatch failed",
+    target_timeout: "Target not reached in time",
+    target_not_verified: "Target position not verified",
+    unexpected_joint_motion: "Unexpected joint motion",
+    return_timeout: "Return to start timed out",
+    restore_not_verified: "Return to start not verified",
+    overall_timeout: "Simulation timed out",
     interrupted: "Interrupted",
-    interrupted_write: "Interrupted while recording",
-    session_crashed: "Simulation session crashed",
+    internal_error: "Internal worker error",
+    worker_lost: "Worker lost; outcome not recorded",
   };
+  assert.equal(Object.keys(known).length, 20);
   for (const [k, v] of Object.entries(known)) assert.equal(simulationKindLabel(k), v);
   assert.equal(simulationKindLabel("  overall_timeout  "), "Simulation timed out");
-  assert.equal(simulationKindLabel("telemetry_invalid"), "Telemetry invalid");
+  // removed kinds (a stage, and a kind the worker never writes) fall back to sentence case
+  assert.equal(simulationKindLabel("interrupted_write"), "Interrupted write");
+  assert.equal(simulationKindLabel("session_crashed"), "Session crashed");
+  assert.equal(simulationKindLabel("some_new_kind"), "Some new kind");
   assert.equal(simulationKindLabel("SOME__ODD_Kind"), "Some odd kind");
   assert.equal(simulationKindLabel("timeout"), "Timeout"); // not the critic label
   assert.equal(simulationKindLabel("toString"), "Tostring"); // no prototype lookups
