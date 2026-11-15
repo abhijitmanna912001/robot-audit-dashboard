@@ -50,6 +50,7 @@ from typing import Any
 __all__ = [
     "ERROR_KINDS",
     "JOINT_NAMES",
+    "MANUAL_VERIFICATION_NOTICE",
     "MAX_ERROR_KIND_LENGTH",
     "MAX_TEXT_LENGTH",
     "MODE_SIMULATION",
@@ -87,6 +88,11 @@ STOP_UNCONFIRMED = "unconfirmed"
 STOP_NOT_NEEDED = "not_needed"
 STOP_VALUES = frozenset({STOP_CONFIRMED, STOP_UNCONFIRMED, STOP_NOT_NEEDED})
 
+# Stated in a recorded failure (and printed) whenever a movement may have been
+# sent and no reliable stop was established. Used by simulation_processor.py and
+# reconcile_executing.py.
+MANUAL_VERIFICATION_NOTICE = "Physical outcome unknown; manual verification required."
+
 # The only error kinds the worker writes. ``build_execution_failed`` refuses any
 # other kind; ``validate_execution_failed`` checks the snake_case form.
 ERROR_KINDS = frozenset(
@@ -108,7 +114,8 @@ ERROR_KINDS = frozenset(
         "return_timeout",  # the arm did not return in time
         "restore_not_verified",  # the restored reading did not hold up
         "overall_timeout",  # the total execution deadline passed
-        "interrupted",  # KeyboardInterrupt (Ctrl-C) or SystemExit during the run
+        "interrupted",  # KeyboardInterrupt (Ctrl-C), SystemExit or SIGTERM during the run
+        "worker_lost",  # recorded later by reconcile_executing.py: no terminal event
         "internal_error",  # anything else, including an unexpected BaseException
     }
 )

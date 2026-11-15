@@ -37,8 +37,12 @@ Facts that must not be lost:
 - No physical robot movement has been tested, and no Cyberwave simulation has been started.
 - Capabilities reported by the Cyberwave API have been read, not physically verified.
 - The validator is not a complete physical safety envelope.
-- Two scripts write to Supabase: the one-time smoke test and `command_processor.py`. Both
-  need `--confirm-write`, and `command_processor.py` also calls the critic. The smoke test
+- Three scripts can write to Supabase: the one-time smoke test and `command_processor.py`,
+  which both need `--confirm-write` (`command_processor.py` also calls the critic), and
+  the manual `reconcile_executing.py`, which writes only with `--apply
+  --confirm-worker-stopped` for a stale-rule candidate (none can qualify today) and has not
+  been run against the database. (The blocked
+  `simulation_processor.py` would also write once unblocked.) The smoke test
   has not been executed. `command_processor.py` has run live once, for a planner failure
   only; its successful-plan path has run only in tests, against mocks, an in-memory fake
   client and `httpx.MockTransport`.
@@ -67,6 +71,7 @@ Facts that must not be lost:
 | `simulation_gates.py` | The live-simulation gates (all unconfirmed), the first-rehearsal restriction, and the re-check against `shared/so101-limits.json` |
 | `simulation_executor.py` | The bounded move, verify, return, verify sequence against a twin interface. No Cyberwave implementation of that interface exists |
 | `simulation_processor.py` | Simulation-only entry point: decision pipeline, then the audited simulation lifecycle. Needs `--simulation` and `--confirm-write`. **Blocked** |
+| `reconcile_executing.py` | Manual script: records ONE simulation command left `executing` with no terminal event as `execution_failed` (`worker_lost`, `stop: "unconfirmed"`). Dry run by default; writes only with `--apply --confirm-worker-stopped` and only for a candidate under the stale-command rule, which no command can meet today (no finite maximum runtime). Never retries or sends anything |
 | `read_joint_telemetry.py` | Manual script: read-only joint read that reports whether the telemetry is verified (today: it is not). Needs `--confirm-connect` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
@@ -595,6 +600,7 @@ the dashboard, open the command and read its timeline and status.
 | `failed_update` | ... `execution_failed`; status `approved` or `executing` | Set the status only, to `failed`, from the status it has now. Do **not** write `execution_failed` again. |
 | `execution_completed_write` | ... `execution_started`, maybe `execution_completed`; status `executing` | The dry run succeeded. If `execution_completed` is there, set `executing -> completed` only. If not, decide by hand; do not rerun the dry run. |
 | `completed_update` | ... `execution_completed`; status `executing` | Set `executing -> completed` only. Do **not** write `execution_completed` again and do not rerun the dry run. |
+| `simulation_processor.py` interrupted (Ctrl-C, or SIGTERM to the worker process) during the claim, planner, validator or critic | the claim (`claimed_by`, `claimed_at` set), maybe some of `plan_generated`, `validator_result`, `critic_result`; status `received`, or the decided status if that update went through (an `approved` command can also be left with no execution event if the interruption came just after that update) | Nothing was connected or sent: not moved. `reconcile_executing.py` does **not** handle this (it reconciles only `executing`), and extending it needs a separately reviewed design. Recover by hand with the decision-phase rows above (`event_write`, `validator_event_write` / `critic_event_write`, `status_update`): read the timeline first, never write an event that may already be there, and decide by hand between the intended status and `failed`. A stranded `approved` command can be set `approved -> failed` by hand. Never run the command again by hand. |
 
 Setting the status by hand, after reading the timeline (replace the id):
 
@@ -940,13 +946,17 @@ Nothing is retried, ever: not a movement, not an event, not a status update.
 | `execution_completed` could not be written | stage `execution_completed_write`. Status stays `executing`. The readings are in the message | restored and verified |
 | `executing -> completed` did not apply | stage `completed_update`. Not retried, event not written again, simulation not run again | restored and verified |
 | `approved -> executing` matched no row | stage `executing_update`. `execution_failed` attempted once, status left alone | not moved |
+| SIGTERM delivered to the worker process itself, during the simulation lifecycle | the handler (installed only around the processing part of `main`, after the flag and gate checks) turns the first SIGTERM into `SystemExit(143)` in the main thread, which takes the Ctrl-C / `SystemExit` rows below (kind `interrupted`). Later SIGTERMs are ignored, so they cannot abandon the stop attempt or interrupt the failure recording. Exit code 143 | as for the failure point |
+| SIGTERM to the worker process during the claim, planner, validator or critic | `SystemExit(143)` ends the run there, like a Ctrl-C. Nothing was connected or sent and no execution event is written; the command can be left claimed and `received` (or decided) for manual recovery | not moved |
+| SIGTERM to the whole process group (`kill -TERM -<pgid>`) or systemd control group (default `KillMode=control-group`) | it also reaches the twin child processes, which do not handle SIGTERM, so a child can die before the parent sends the stop. What the parent records follows the rows above and below for wherever its own SIGTERM, or the child's death, is noticed first (it can also land in an audit write: `interrupted_write`). A stop through a dead child cannot be confirmed, so the stop stays `unconfirmed` and, if a movement may have been sent, manual verification is required | **uncertain** |
+| Windows forced termination (`taskkill /F`, `TerminateProcess`) | no Python handler runs: same as the worker process being killed (last row) | **unknown** |
 | Ctrl-C / `SystemExit` before `execution_started` | `execution_failed` (`interrupted`, `not_needed`), `approved -> failed`, then the interruption continues | not moved |
 | Ctrl-C / `SystemExit` during the rehearsal | stop at most once if a movement may have been sent (a second Ctrl-C abandons it: `unconfirmed`); twin processes closed; `execution_failed` (`interrupted`); `executing -> failed` only if it was written; then the interruption continues with a note of what was recorded | as for the failure point |
 | Any other unexpected `BaseException` | the same, with kind `internal_error` | as above |
 | An interruption DURING an audit write | stage `interrupted_write`. That write's outcome is unknown: nothing further is written, no further status change | as above |
 | An interruption OUTSIDE an audit call while recording (building the `execution_failed` or completion payload, or between a confirmed write and its status change) | stage `interrupted_recording`, chained from the interruption. The message names the exact lifecycle step and the last confirmed durable state (events confirmed written, last status confirmed). Nothing further is written, nothing retried, no status changed; a payload that was only built is never reported as written | as above |
 | A twin process cannot be confirmed stopped | stage `session_cleanup`, after the outcome was recorded. Stop the local process first | as above |
-| The worker process itself is killed | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves | **unknown** |
+| The worker process itself is killed (SIGKILL, power loss, a crash) | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves. `reconcile_executing.py` (below) can record it only once the stale-command rule can qualify, which it cannot today | **unknown: treat as possibly moved** |
 
 The manual steps are the same as under "Manual recovery" above, with one difference: for a
 simulation failure, read `movement_dispatched`, `stop` and the last reading first. If a
@@ -955,9 +965,118 @@ look at the twin in Cyberwave before doing anything else. The recorded detail an
 output say so.
 
 Error kinds are a fixed list (`simulation_payloads.ERROR_KINDS`; `interrupted` is for
-Ctrl-C and `SystemExit`). Details are fixed text plus at most an exception class name, at
-most 200 characters. No SDK error text, URL, header, credential or key is written to an
-event or printed.
+Ctrl-C, `SystemExit` and SIGTERM). Details are fixed text plus at most an exception class
+name, at most 200 characters. No SDK error text, URL, header, credential or key is written
+to an event or printed.
+
+### An `executing` command without a terminal event (possibly moved)
+
+**Rule: a command whose status is `executing` and whose timeline has no
+`execution_completed` or `execution_failed` must be treated as possibly moved.** A movement
+may have been sent and nothing confirmed a stop. Look at the twin in Cyberwave before
+anything else, and never run the command again.
+
+Such a command is not recovered automatically, and its age is not evidence that the worker
+has stopped. The database cannot show it: there is no lease, heartbeat or process id,
+`claimed_by` is a shared label (`rehearsal-worker`), and a slow or blocked run looks the
+same as a dead one. `reconcile_executing.py` therefore works on ONE command named by a
+person, and writes only after that person attests that the worker process which ran it,
+and its twin child processes, are no longer running on any machine that could run it:
+
+```
+.venv\Scripts\python.exe reconcile_executing.py --list
+.venv\Scripts\python.exe reconcile_executing.py --command-id <uuid>
+.venv\Scripts\python.exe reconcile_executing.py --command-id <uuid> --apply --confirm-worker-stopped
+```
+
+#### Eligibility: the stale-command rule
+
+A command is a reconciliation candidate only when ALL three hold:
+
+1. its status is `executing`;
+2. it has no terminal event (`execution_completed` or `execution_failed`);
+3. its timestamp is **strictly older** than the maximum possible worker runtime from that
+   timestamp plus `STALE_SAFETY_MARGIN_S`:
+   - the timestamp is `created_at` of its one simulation `execution_started` event (set by
+     the database) when that is a valid ISO 8601 timestamp with a time zone, measured
+     against the phases after that row was created;
+   - otherwise `claimed_at` (set by the worker), measured against the whole lifecycle from
+     the claim;
+   - a missing or invalid timestamp (no time zone, not ISO 8601), or one later than the
+     current time, never qualifies.
+
+The maximum runtime is the sum of `LIFECYCLE_PHASES` in `reconcile_executing.py`. If any
+phase relevant to the chosen timestamp has no finite upper bound, there is no maximum and
+**no command qualifies**. A qualifying command is still not proven stopped: `--apply` and
+`--confirm-worker-stopped` stay mandatory, and age never replaces the attestation.
+
+**Today there is no finite maximum, so the script writes nothing.** The phases and their
+bounds in the code:
+
+| Phase | Bound | Basis |
+|---|---|---|
+| claim update; `plan_generated`, `validator_result`, `critic_result` inserts; `received -> approved`; `execution_started` insert | **none** | Supabase request: the PostgREST client's default 120 s timeout applies to each connect, read, write and pool wait separately, so a request has no total limit; DNS resolution is not covered. (PostgREST retries only GET/HEAD; no insert or update is retried) |
+| planner, safety validator, simulation pre-checks | **none** | pure computation, no configured timeout |
+| critic request | 10 s | `critic_client.TOTAL_DEADLINE_SECONDS` |
+| *after `execution_started` exists:* its insert response, `approved -> executing` | **none** | Supabase request (as above) |
+| twin session start | 18 s | `CHILD_START_LIMIT_S` 15 + `TERMINATE_LIMIT_S` 1 + `CLEANUP_LIMIT_S` 2 (cleanup of a failed start); `process.start()` itself has no deadline |
+| rehearsal, stop and child terminations | 78 s | `Timeouts.total_s` 75 + `TERMINATE_LIMIT_S` 1 (end of the recovery window) + 1 s per child (main, standby) |
+| twin session close | 2 s | `CLEANUP_LIMIT_S` |
+| building the outcome record | **none** | pure computation |
+| terminal event insert, terminal status update | **none** | Supabase request (as above) |
+
+Bounded phases sum to 98 s from `execution_started` and 108 s from the claim, but the
+unbounded phases mean there is no maximum. Something like a total wall-clock deadline on
+every Supabase request would have to bound those phases first, in a separately reviewed
+change. A suspended or stopped process (laptop sleep, `SIGSTOP`, a paused VM) has no bound
+at all, which is why age is never proof.
+
+`STALE_SAFETY_MARGIN_S = 300.0` s is a **proposed** value, to be agreed with Abhijit. It
+absorbs differences between three clocks: the worker machine (`claimed_at`), the database
+(`created_at`) and the operator's machine (the current time). 300 s tolerates a combined
+difference of up to about 4 minutes plus one minute of slack. Once the phases are bounded,
+the threshold would be 98 + 300 = 398 s from `execution_started` (408 s from the claim) if
+nothing else changes.
+
+#### What the script does
+
+`--list` is read-only and informational: it shows every `executing` command (oldest first,
+at most 50 rows; the footer states the limit but not whether more exist) with the
+assessment the script would make. It does not establish that any worker has stopped, and
+an assessment of `record_failure` in the list does not authorize reconciliation: a command
+in the list may still be running. Without `--apply`, `--command-id` is a dry run: it reads
+the command and its timeline and prints the timestamp source, the timestamp, its age, the
+maximum runtime (or why there is none), the margin, the effective threshold, and whether
+and why the command qualifies. `--apply` without `--confirm-worker-stopped` is refused
+before anything is read.
+
+| State | With `--apply --confirm-worker-stopped` |
+|---|---|
+| a candidate (rules 1 to 3 hold) | ONE `execution_failed` `{"dryRun": false, "mode": "simulation", "error": {"kind": "worker_lost", "detail": "Physical outcome unknown; manual verification required. ..."}, "stop": "unconfirmed"}`, then the conditional `executing -> failed` (exit 0) |
+| `executing`, one simulation `execution_started`, no terminal event, rule 3 does not hold | nothing: `not_eligible` (exit 5) |
+| `completed`, `failed`, `rejected` | nothing (exit 0) |
+| `executing`, one simulation `execution_started`, and exactly one `execution_failed` that is this script's own record (kind `worker_lost`, `stop: "unconfirmed"`, no reading, valid simulation payload), for example after an earlier reconciliation's status update failed, and the same stale rule holds | ONLY the conditional `executing -> failed` (exit 0). No event is ever written. If the stale rule does not hold: nothing, `not_eligible` (exit 5) |
+| `executing` with any other `execution_failed` (another kind, another stop, a reading, a malformed payload), or duplicated or conflicting terminal events | nothing; needs a person (exit 4). Set `executing -> failed` by hand as for stage `failed_update`; never write `execution_failed` again |
+| `executing` with `execution_completed`, no or several `execution_started`, a dry-run command, or a status other than `executing` | nothing; needs a person (exit 4). It never records a success |
+
+Each write is attempted once and nothing is retried, re-dispatched or sent to a twin: the
+script imports no Cyberwave, twin, executor or supervisor module. After a failed write
+(exit 1), run it again without `--apply` to read the timeline. Once the `worker_lost`
+`execution_failed` is there, a later run (stale rule and both flags again) can only make the
+conditional status change, so repeated runs never write a second event.
+
+**Limit: one operator at a time.** Two reconciliations of the same command at the same
+moment could both see no terminal event and both insert one (no database constraint
+prevents it, and the schema is not changed for this). Run one reconciliation at a time.
+
+The `execution_failed` message, which the dashboard shows as the timeline title, is
+"Simulation failed: worker lost. Command possibly moved. Manual verification required."
+The dashboard in this branch does not show `error.detail` or `stop` for simulation events.
+The simulation display merged on `main` (not yet integrated here) shows `stop:
+"unconfirmed"` as "Simulation failed: arm state uncertain" and has no label for
+`worker_lost` yet (it falls back to "Worker lost").
+
+`worker_lost` is an error kind written only by `reconcile_executing.py`.
 
 ## Safety rules for this code
 

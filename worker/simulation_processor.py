@@ -41,6 +41,31 @@ exercised only by offline tests with a fake twin:
    and the CLI output say that the physical outcome is unknown and manual
    verification is required.
 
+SIGTERM. ``main`` installs a handler only around the processing part of the run
+(``_production_twin()`` and ``process_one_simulation_command``), after the flag
+and gate checks, and restores the previous handler when that part ends. While it
+is installed, the FIRST SIGTERM delivered to THIS process raises
+``SystemExit(143)`` in the main thread; later ones are ignored. What that means
+depends on where the run is:
+
+* during the claim, planner, validator or critic (``decide_one_command``): the
+  ``SystemExit`` ends the run like a Ctrl-C there. Nothing has been connected or
+  sent; no execution event is written, and the command can be left claimed and
+  ``received`` (or decided) for manual recovery;
+* during the simulation lifecycle: the interruption path below (kind
+  ``interrupted``). A later SIGTERM cannot abandon the stop attempt or interrupt
+  the failure recording.
+
+Limits. This holds only for a SIGTERM delivered to the worker process itself. A
+SIGTERM sent to the whole process group (``kill -TERM -<pgid>``) or to a systemd
+control group (the default ``KillMode=control-group``) also reaches the twin
+child processes, which do not handle SIGTERM: a child can die before the parent
+sends the stop. A stop through a dead child cannot be confirmed, so the stop is
+``unconfirmed`` and, if a movement may have been sent, manual verification is
+required. On Windows, forced termination
+(``taskkill /F``, ``TerminateProcess``) runs no Python handler at all, like
+SIGKILL anywhere: nothing is recorded. Ctrl-C still interrupts as before.
+
 Interruption (Ctrl-C, ``SystemExit``, any other ``BaseException``): outside an
 audit write, exactly one ``execution_failed`` (kind ``interrupted``, or
 ``internal_error`` for an unexpected ``BaseException``) is attempted, then the
@@ -50,7 +75,9 @@ audit write leaves that write's outcome unknown: nothing further is written and
 ``SimulationProcessingError`` (stage ``interrupted_write``) asks for manual
 recovery. If this process is killed outright, nothing can be recorded: the
 command stays as it was (for example ``executing``) for manual recovery, and the
-twin children end themselves (their watchdog sees the parent gone).
+twin children end themselves (their watchdog sees the parent gone). Such a
+command must be treated as possibly moved; ``reconcile_executing.py`` can record
+it by hand once its stale-command rule can qualify (see that module).
 
 Every payload is checked by ``simulation_payloads.validate_simulation_event``
 before the write. The event is always written before its status change, each
@@ -72,7 +99,9 @@ run, and it processes at most one command per run (no loop, no polling).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import sys
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -118,6 +147,7 @@ from simulation_gates import (
     twin_gate_blockers,
 )
 from simulation_payloads import (
+    MANUAL_VERIFICATION_NOTICE,
     MAX_TEXT_LENGTH,
     STOP_CONFIRMED,
     STOP_NOT_NEEDED,
@@ -132,6 +162,8 @@ from simulation_payloads import (
 from simulation_supervisor import SupervisionError, canonical_gate_blockers, merge_blockers
 
 __all__ = [
+    "MANUAL_VERIFICATION_NOTICE",
+    "SIGTERM_EXIT_CODE",
     "SIMULATION_COMPLETED_MESSAGE",
     "SIMULATION_FAILED_MESSAGE",
     "SIMULATION_STARTED_MESSAGE",
@@ -155,9 +187,8 @@ STAGE_SESSION_CLEANUP = "session_cleanup"  # a twin child could not be confirmed
 # or after an event was written but before its status change).
 STAGE_INTERRUPTED_RECORDING = "interrupted_recording"
 
-# Stated in the recorded failure and the CLI output whenever a movement may have
-# been sent and no reliable stop was established.
-MANUAL_VERIFICATION_NOTICE = "Physical outcome unknown; manual verification required."
+# SIGTERM ends a run as SystemExit with the conventional 128 + 15 exit code.
+SIGTERM_EXIT_CODE = 143
 
 
 class SimulationBlockedError(Exception):
@@ -1061,6 +1092,33 @@ def _report(result: SimulationResult) -> str:
     return line + " Simulation only: no physical hardware."
 
 
+@contextlib.contextmanager
+def _sigterm_as_system_exit() -> Any:
+    """While active, the first SIGTERM to this process raises ``SystemExit(SIGTERM_EXIT_CODE)``.
+
+    Python runs signal handlers in the main thread between bytecodes, so the
+    exit request surfaces where a Ctrl-C would. Later SIGTERMs are ignored: the
+    run is already ending, and a second interruption would abandon the stop
+    attempt or interrupt the execution_failed write. The previous handler is
+    always restored. It cannot protect the twin child processes from a SIGTERM
+    sent to the whole process group (see the module docstring).
+    """
+    received = False
+
+    def handler(_signum: int, _frame: Any) -> None:
+        nonlocal received
+        if received:
+            return
+        received = True
+        raise SystemExit(SIGTERM_EXIT_CODE)
+
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Process ONE command through the simulation-only SO-101 rehearsal "
@@ -1100,8 +1158,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     try:
-        twin = _production_twin()
-        result = process_one_simulation_command(args.worker_id, twin=twin)
+        with _sigterm_as_system_exit():
+            twin = _production_twin()
+            result = process_one_simulation_command(args.worker_id, twin=twin)
     except (KeyboardInterrupt, SystemExit) as exc:
         # The outcome was recorded first (see the notes); the interruption then
         # ends the program exactly as it would have.
