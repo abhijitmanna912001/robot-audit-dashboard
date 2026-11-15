@@ -19,6 +19,14 @@
 --                                       -> failed needs it). A planner failure
 --                                       (received -> failed) has no execution events
 --                                       and is NOT reported.
+--   failed_after_approval_no_failed_event
+--                                       status 'failed', the command reached approved
+--                                       (see below), and there is no execution_failed
+--                                       event, whether or not execution_started exists.
+--                                       Unlike the check above it also catches a run that
+--                                       failed before 'executing'. A planner failure
+--                                       (received -> failed) has no validator pass and no
+--                                       critic approve, so it is NOT reported.
 --   status_contradicts_event            completed + execution_failed, or failed +
 --                                       execution_completed.
 --   terminal_event_on_never_executed    an execution_completed or execution_failed event
@@ -43,6 +51,13 @@
 -- What data cannot show: whether a terminal event was written while the command was
 -- 'executing'. A completed command legitimately has its event and the status
 -- 'completed', so that rule is checked by the test scripts, not by existing rows.
+
+-- How "reached approved" is decided. There is no status history table: commands holds only the
+-- CURRENT status and audit_events has no status-change event, so the past cannot be read back.
+-- It is inferred from events instead. The worker moves a command to approved only after a
+-- validator_result with outcome 'pass' AND a critic_result with outcome 'approve', so a command
+-- with both events (payload outcome) reached approved. This is an inference, not a record: it
+-- can only be wrong for rows that did not go through the worker's normal path.
 
 with terminal as (
   select command_id,
@@ -76,6 +91,24 @@ join started s on s.command_id = c.id
 left join terminal t on t.command_id = c.id
 where c.status = 'failed'
   and coalesce(t.has_failed, false) = false
+
+union all
+
+select 'failed_after_approval_no_failed_event',
+       c.id,
+       'status failed, validator pass and critic approve recorded, no execution_failed'
+         || case when exists (select 1 from started s where s.command_id = c.id)
+                 then ' (execution_started recorded)' else ' (no execution_started)' end
+from public.commands c
+left join terminal t on t.command_id = c.id
+where c.status = 'failed'
+  and coalesce(t.has_failed, false) = false
+  and exists (select 1 from public.audit_events e
+               where e.command_id = c.id and e.event_type = 'validator_result'
+                 and e.payload ->> 'outcome' = 'pass')
+  and exists (select 1 from public.audit_events e
+               where e.command_id = c.id and e.event_type = 'critic_result'
+                 and e.payload ->> 'outcome' = 'approve')
 
 union all
 
