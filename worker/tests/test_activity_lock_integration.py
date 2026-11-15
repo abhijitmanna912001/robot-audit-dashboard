@@ -9,6 +9,7 @@ after the child is gone. Offline: no database, no network, no Cyberwave.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import os
 import signal
@@ -25,7 +26,8 @@ from unittest import mock
 import reconcile_executing as rc
 import worker_lock
 from tests import net_guard
-from tests.fake_twin_child import pid_alive
+from tests.fake_twin import FakeTwin
+from tests.fake_twin_child import pid_alive, spec_for
 from tests.test_reconcile_executing import stranded_client
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
@@ -141,6 +143,104 @@ class KilledParentLeavesAChildTests(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("Read only", out.getvalue())
         self.assertEqual(len(net_guard.BLOCKED_ATTEMPTS), before)
+
+
+# A stand-in worker parent whose twin child is slow to START: the child blocks while
+# spawn re-imports this script (as ``__mp_main__``), before ``child_main`` and so
+# before it has taken its lock or built anything. The parent holds its own shared lock,
+# as a real worker does, and reports the child's pid.
+SLOW_START_PARENT = textwrap.dedent(
+    """
+    import multiprocessing, os, sys, time
+    GATE = {gate!r}
+    if __name__ == "__mp_main__":
+        end = time.monotonic() + 60
+        while not os.path.exists(GATE) and time.monotonic() < end:
+            time.sleep(0.02)
+    sys.path.insert(0, {worker_dir!r})
+    import simulation_child, worker_lock
+
+    if __name__ == "__main__":
+        lock_path = {lock_path!r}
+        worker_lock.ActivityLock(lock_path, exclusive=False).acquire()
+        wire = {wire!r}
+        ctx = multiprocessing.get_context("spawn")
+        parent_end, child_end = ctx.Pipe()
+        child = ctx.Process(target=simulation_child.child_main, args=(child_end, wire, "main", 60.0))
+        child.start()
+        print("child", child.pid, flush=True)
+        time.sleep(120)
+    """
+)
+
+
+@unittest.skipUnless(POSIX, "needs fcntl (macOS or Linux)")
+class ParentDiesWhileChildStartsTests(unittest.TestCase):
+    """The window: the parent is killed after the child exists but before it has its lock."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = Path(tmp.name)
+        self.activity_path = self.folder / "worker.activity.lock"
+        self.gate = self.folder / "gate"
+        self.marker = self.folder / "built"
+        wire = dataclasses.replace(
+            spec_for(FakeTwin(), build_marker=str(self.marker)), activity_lock_path=str(self.activity_path)
+        ).to_wire()
+        self.parent = subprocess.Popen(
+            [sys.executable, "-c", SLOW_START_PARENT.format(
+                gate=str(self.gate), worker_dir=str(WORKER_DIR), lock_path=str(self.activity_path), wire=wire)],
+            stdout=subprocess.PIPE, text=True, cwd=self.folder,
+        )
+        self.child_pid: int | None = None
+        self.addCleanup(self.cleanup_processes)
+        line = self.parent.stdout.readline().split()
+        self.assertEqual(line[:1], ["child"], "the parent script did not start the child")
+        self.child_pid = int(line[1])
+
+    def cleanup_processes(self) -> None:
+        self.gate.write_text("")  # never leave a child waiting at the gate
+        if self.child_pid is not None:
+            try:
+                os.kill(self.child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.parent.kill()
+        self.parent.wait(timeout=10)
+        self.parent.stdout.close()
+
+    def kill_parent_before_the_child_has_its_lock(self) -> None:
+        self.assertTrue(pid_alive(self.child_pid))
+        self.assertFalse(self.gate.exists())  # the child is still blocked in start-up
+        self.parent.send_signal(signal.SIGKILL)
+        self.parent.wait(timeout=10)
+        self.assertTrue(pid_alive(self.child_pid), "the child must outlive its parent here")
+
+    def test_control_a_booting_child_with_a_living_parent_builds_its_twin(self) -> None:
+        # So the "no marker" assertion below is not vacuous: this script and wire do build.
+        self.assertFalse(self.marker.exists())
+        self.gate.write_text("")
+        self.assertTrue(wait_until(self.marker.exists), "the control child never built its twin")
+        with self.assertRaises(worker_lock.LockHeld):  # parent and child both hold shared
+            worker_lock.ActivityLock(self.activity_path, exclusive=True).acquire()
+
+    def test_reconcile_wins_the_race_and_the_booting_child_never_builds_a_twin(self) -> None:
+        self.kill_parent_before_the_child_has_its_lock()
+        # Parent dead, child lockless: the exclusive lock IS available. That is the window.
+        with worker_lock.ActivityLock(self.activity_path, exclusive=True):
+            self.gate.write_text("")  # the child now runs child_main and asks for its lock
+            self.assertTrue(wait_until(lambda: not pid_alive(self.child_pid)), "the child did not end")
+            self.assertFalse(self.marker.exists(), "a refused child must not build its twin")
+
+    def test_without_reconcile_the_booting_child_takes_the_lock_and_ends_with_its_parent(self) -> None:
+        self.kill_parent_before_the_child_has_its_lock()
+        self.gate.write_text("")
+        # The child takes the shared lock, sees its parent gone and ends itself.
+        self.assertTrue(wait_until(lambda: not pid_alive(self.child_pid)), "the child did not end")
+        # (The fake twin may or may not have been built before the watchdog fired: not asserted.)
+        with worker_lock.ActivityLock(self.activity_path, exclusive=True):
+            pass  # its lock went with it
 
 
 if __name__ == "__main__":

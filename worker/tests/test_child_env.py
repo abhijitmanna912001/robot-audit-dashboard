@@ -15,6 +15,7 @@ from unittest import mock
 
 import child_env
 import config
+from tests import config_probe_child
 from simulation_supervisor import ProcessTwinSession, TwinSpec, _SPAWN, _is_plain
 
 from tests.fake_twin import FakeTwin
@@ -75,14 +76,48 @@ class RealChildEnvironmentTests(unittest.TestCase):
         self.assertEqual(seen.get("CYBERWAVE_TWIN_ID"), KEEP["CYBERWAVE_TWIN_ID"])
         self.assertIn("PATH", seen)
 
-    def test_a_secret_that_only_lives_in_the_dotenv_file_never_reaches_the_child(self) -> None:
+    def test_the_loader_can_read_the_dotenv_file_in_the_parent(self) -> None:
+        # The control for the child tests: in the parent the loader DOES return what
+        # only the file holds, so a child that cannot get it is the guard's doing.
+        file_values = {"SUPABASE_URL": "https://file.invalid", "SUPABASE_SECRET_KEY": "only-in-file"}
         with (
-            mock.patch.object(config, "dotenv_values", return_value={"SUPABASE_SECRET_KEY": "only-in-file"}),
+            mock.patch.object(config, "dotenv_values", return_value=file_values),
             mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True),
         ):
-            config.load_supabase_settings.__call__  # the loader exists
+            settings = config.load_supabase_settings()
             seen = child_environment_of_a_real_spawn()
-        self.assertNotIn("SUPABASE_SECRET_KEY", seen)
+        self.assertEqual(settings.secret_key, "only-in-file")
+        self.assertNotIn("SUPABASE_SECRET_KEY", seen)  # and it never reaches the child's environment
+
+    def test_the_config_loaders_refuse_inside_a_real_spawned_child(self) -> None:
+        # The child imports config itself and calls the loaders. Its dotenv_values is a
+        # stub holding fake secrets (the real .env is never read), and the real child
+        # scrub is applied exactly as in production.
+        parent_conn, child_conn = _SPAWN.Pipe(duplex=False)
+        process = _SPAWN.Process(target=config_probe_child.main, args=(child_conn,), daemon=True)
+        with mock.patch.dict(os.environ, FAKE_ENV), child_env.child_environment():
+            process.start()
+        child_conn.close()
+        try:
+            self.assertTrue(parent_conn.poll(60), "the child did not report")
+            outcome = parent_conn.recv()
+        finally:
+            parent_conn.close()
+            process.join(10)
+            if process.is_alive():
+                process.kill()
+                process.join(5)
+        self.assertTrue(outcome["is_child"])
+        for name in ("load_config", "load_supabase_settings", "load_critic_settings"):
+            with self.subTest(loader=name):
+                kind, message = outcome[name]
+                self.assertEqual(kind, "ConfigError")
+                self.assertIn("not available in a child process", message)
+                for secret in ("only-in-the-file", "critic-only-in-the-file", *FAKE_ENV.values()):
+                    self.assertNotIn(secret, message)
+        self.assertEqual(outcome["file_reads"], 0)  # the loader never reached the file
+        self.assertEqual(outcome["redact"], "x only-in-the-file y")  # no config in the child: nothing to redact
+
 
     def test_a_real_session_still_starts_and_stops_with_fake_secrets_exported(self) -> None:
         with mock.patch.dict(os.environ, FAKE_ENV):

@@ -44,6 +44,7 @@ from typing import Any, Callable
 import child_env
 import simulation_child
 import simulation_gates
+import worker_lock
 from simulation_gates import LiveSimulationGates, live_simulation_blockers
 
 __all__ = [
@@ -344,6 +345,13 @@ class ProcessTwinSession:
         """Spawn the children and wait for READY. Cleans up after any failure."""
         if self._started or self.main is not None:
             raise RuntimeError("a session can be started only once")
+        # Before any child exists: this process must itself hold the shared activity
+        # lock on the file the children will lock. Otherwise a reconcile run could
+        # take it exclusively while this parent is alive and about to spawn.
+        if not worker_lock.holds_shared_activity_lock(self.spec.activity_lock_path):
+            raise SessionStartError(
+                "this process does not hold the shared activity lock: no twin process was started"
+            )
         deadline = time.monotonic() + self._start_limit_s
         try:
             self.main = self._spawn("main")

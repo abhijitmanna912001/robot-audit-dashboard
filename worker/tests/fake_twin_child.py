@@ -36,6 +36,7 @@ import simulation_gates
 from sim_telemetry import RawTelemetry
 from simulation_executor import StopResult
 from simulation_gates import LiveSimulationGates
+import worker_lock
 from simulation_supervisor import ProcessTwinSession, TwinSpec
 from tests.fake_twin import FakeTwin
 
@@ -74,7 +75,15 @@ def decode(value: Any) -> Any:
 
 
 def build(config: dict[str, Any], notify: Any) -> FakeTwin:
-    """Build the fake twin in the child. No twin method is called here."""
+    """Build the fake twin in the child. No twin method is called here.
+
+    ``build_marker`` (test only): a file path that is created the moment a twin is
+    built, so a test can prove that a child which was refused its lock built nothing.
+    """
+    marker = config.get("build_marker")
+    if marker:
+        with open(marker, "w", encoding="utf-8"):
+            pass
     canonical = config.get("canonical")
     if canonical is not None:
         # Test-only, in this child process only: the counterpart of use_canonical_gates.
@@ -131,15 +140,27 @@ def _gate_fields(gates: Any) -> dict[str, bool]:
 
 
 _ACTIVITY_DIR: list[str] = []
+_HELD_BY_THIS_PROCESS: dict[str, Any] = {}
+
+
+def hold_shared_activity_lock(path: str) -> str:
+    """Make THIS process hold the shared activity lock on ``path`` (once, until it exits).
+
+    What a real parent does before it starts a session; ``ProcessTwinSession.start``
+    refuses otherwise. Shared locks coexist, so tests may share one path.
+    """
+    if path not in _HELD_BY_THIS_PROCESS:
+        _HELD_BY_THIS_PROCESS[path] = worker_lock.ActivityLock(path, exclusive=False).acquire()
+    return path
 
 
 def test_activity_lock_path() -> str:
-    """A per-process temporary activity lock file for specs (shared locks coexist)."""
+    """A per-process temporary activity lock file for specs, already held shared."""
     if not _ACTIVITY_DIR:
         folder = tempfile.mkdtemp(prefix="activity-lock-")
         _ACTIVITY_DIR.append(folder)
         atexit.register(shutil.rmtree, folder, ignore_errors=True)
-    return os.path.join(_ACTIVITY_DIR[0], "worker.activity.lock")
+    return hold_shared_activity_lock(os.path.join(_ACTIVITY_DIR[0], "worker.activity.lock"))
 
 
 test_activity_lock_path.__test__ = False  # type: ignore[attr-defined]  # not a pytest test
@@ -221,7 +242,8 @@ def middle_parent_main(
 
     session = ProcessTwinSession(
         TwinSpec(adapter="fake", config=config, test_mode=True,
-                 activity_lock_path=activity_lock_path or test_activity_lock_path()),
+                 activity_lock_path=hold_shared_activity_lock(activity_lock_path)
+                 if activity_lock_path else test_activity_lock_path()),
         on_record=on_record
     ).start()
     holder["pid"] = session.main.ready["pid"]

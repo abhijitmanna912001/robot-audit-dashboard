@@ -1014,6 +1014,10 @@ label) and not a command's age (a run can be slow, blocked or suspended).
   non-blocking, so there is no deadlock. If either is held the process prints a clear
   message (the reconcile one names the activity lock), writes and claims nothing, and
   exits 6; if a lock file cannot be opened or locked it exits 7.
+- **The parent must hold it too.** `ProcessTwinSession.start()` refuses, before spawning any
+  child, unless THIS process holds the shared activity lock on the file the children will
+  lock (`SessionStartError`, nothing started). A spec without a lock path refuses the same
+  way. So no session can start while a reconcile run could take the exclusive lock.
 - **A child that cannot take its lock builds nothing.** No `fcntl`, no path in the spec, a
   symlink, an unopenable file, or an exclusive holder (a reconcile run): the child sends
   `not_built` (the exception class name only, never a path) and exits 73 before any
@@ -1036,6 +1040,12 @@ label) and not a command's age (a run can be slow, blocked or suspended).
 - **No `fcntl` (Windows).** There is no lock, so `simulation_processor.py`,
   `command_processor.py` and `reconcile_executing.py` all refuse (exit 7, nothing claimed,
   read or written), and a child without `fcntl` builds no twin.
+- **Intentionally unlocked.** These scripts take neither lock because they never claim a
+  command and never move or stop a twin: `supabase_smoke_test.py` (one `--confirm-write` test
+  row, refuses a second run), `supabase_read_check.py` (zero-row SELECTs),
+  `read_joint_telemetry.py` (a read-only joint read), `discover_cyberwave_assets.py`
+  (read-only lookup) and `test_cyberwave_connection.py` (connection check). If one of them
+  ever claims a command or sends a movement, it must take both locks first.
 - **Limits.** One machine only: a worker or child on another machine is invisible, which is
   why `--confirm-worker-stopped` stays mandatory. An `executing` command without a terminal
   event is still "possibly moved". `tests/test_activity_lock_integration.py` shows the
