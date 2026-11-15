@@ -985,14 +985,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED: {exc}")
         return 4
 
-    # The single-instance lock comes before the claim. This dry-run path cannot
-    # move anything, so a platform without fcntl may still run it; a lock that
-    # another process holds, or cannot be opened, refuses.
+    # The single-instance lock comes before the claim and fails closed: no
+    # fcntl (Windows), a lock another process holds, or a lock file that cannot
+    # be opened all refuse, with nothing claimed or written. This dry-run path
+    # spawns no twin child, so it takes no activity lock.
     lock = worker_lock.WorkerLock(worker_lock.resolve_path(args.lock_file))
     try:
         lock.acquire()
-    except worker_lock.LockUnsupported:
-        pass
     except worker_lock.LockError as exc:
         print(f"REFUSED: {exc}. Nothing was claimed or written.")
         return exc.exit_code

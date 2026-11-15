@@ -21,8 +21,8 @@ Import isolation. What the child imports, and when:
    ``simulation_gates`` in EVERY mode, which loads ``plan_hasher``,
    ``plan_snapshot``, ``safety_validator`` and ``simulation_payloads``.
 
-This is the only simulation module allowed to use ``os``, and only
-``os._exit``, only in ``_exit_now`` (a test checks both).
+This is the only simulation module allowed to use ``os``: ``os._exit`` only in
+``_exit_now``, and the file calls of ``take_activity_lock`` (a test checks both).
 
 What the child guarantees:
 
@@ -36,6 +36,11 @@ What the child guarantees:
   (nothing sent yet) -> the parent records that a movement may now be sent ->
   ``go`` -> ``move_joint``. At most two movements per session, each nonce once,
   never after a stop.
+* **No twin without the activity lock.** The first thing after ignoring SIGINT is
+  a shared, non-blocking ``flock`` on ``spec["activity_lock_path"]`` (the child's
+  own open file). If it cannot be taken the child reports ``not_built`` and exits
+  (73) before any factory runs. The parent holds the same lock shared, and the
+  reconcile script takes it exclusively, so it can prove no child is alive.
 * **No commands without a parent.** If the parent closes the pipe or dies, the
   child exits at once without another twin call. A watchdog thread waits on the
   parent's process sentinel and on a deadline (re-armed by the parent with the
@@ -61,7 +66,15 @@ import time
 from multiprocessing.connection import wait
 from typing import Any
 
-__all__ = ["ADAPTER_KEYS", "CALL_METHODS", "GATED_CALL_METHODS", "MAX_MOVES", "child_main"]
+try:  # POSIX only; without it the child refuses to build a twin (see take_activity_lock)
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by patching ``fcntl`` to None
+    fcntl = None  # type: ignore[assignment]
+
+__all__ = [
+    "ADAPTER_KEYS", "CALL_METHODS", "GATED_CALL_METHODS", "MAX_MOVES", "child_main",
+    "take_activity_lock",
+]
 
 ADAPTER_PRODUCTION = "production"
 ADAPTER_FAKE = "fake"
@@ -139,6 +152,37 @@ class _Refused(Exception):
     """The adapter key, the mode or the factory was not acceptable."""
 
 
+class ActivityLockRefused(Exception):
+    """The child could not take its shared activity lock; it must not build a twin."""
+
+
+# The descriptor lives as long as this process and is never closed: the kernel
+# drops the lock when the process dies, however it dies.
+_activity_fd: int | None = None
+
+
+def take_activity_lock(path: Any) -> None:
+    """Take the SHARED, non-blocking activity lock on this child's own open file.
+
+    Standard library only (the child must not import ``worker_lock``, which loads
+    ``config``). Raises ``ActivityLockRefused`` for every failure: no ``fcntl``,
+    no path, a symlink, an unopenable file, or an exclusive holder (reconcile).
+    """
+    global _activity_fd
+    if fcntl is None or type(path) is not str or not path:
+        raise ActivityLockRefused("no activity lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        raise ActivityLockRefused("activity lock file") from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise ActivityLockRefused("activity lock held") from None
+    _activity_fd = fd
+
+
 def _send(conn: Any, message: tuple[Any, ...]) -> None:
     try:
         conn.send(message)
@@ -160,6 +204,13 @@ def _build_twin(adapter: Any, config: Any, test_mode: bool, guard: bool, notify:
 def child_main(conn: Any, spec: dict[str, Any], role: str, start_limit_s: float) -> None:
     """Entry point of a supervised twin child. Only ``simulation_supervisor`` starts it."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Before the watchdog, the guard, the factory or any twin: no lock, no twin.
+    try:
+        take_activity_lock(spec.get("activity_lock_path") if type(spec) is dict else None)
+    except BaseException as exc:
+        _send(conn, ("not_built", type(exc).__name__))
+        _exit_now(EXIT_NOT_BUILT)
+        return
     watchdog = _Watchdog(float(start_limit_s))
     threading.Thread(target=watchdog.run, name="twin-child-watchdog", daemon=True).start()
 

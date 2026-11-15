@@ -87,8 +87,9 @@ SIMULATION_MODULES = (
     "simulation_child",
 )
 # The ONE narrow exception to the import-isolation policy: the child entry module
-# may import ``os``, only to call ``os._exit`` inside ``_exit_now`` (its watchdog
-# and its closed-pipe exit). Every other simulation module keeps the full list.
+# may import ``os``, only for ``os._exit`` inside ``_exit_now`` (its watchdog and
+# its closed-pipe exit) and the file calls of ``take_activity_lock`` (the child's
+# shared activity lock, taken before any twin exists). Every other simulation module keeps the full list.
 OS_EXIT_MODULE = "simulation_child"
 DECISION_EVENTS = ["plan_generated", "validator_result", "critic_result"]
 TWIN_SUCCESS = [
@@ -286,15 +287,21 @@ class CommandLineTests(SimulationTestCase):
                     seen.append(False)
                 except worker_lock.LockHeld:
                     seen.append(True)
+                try:  # the shared activity lock is held too: an exclusive try fails
+                    worker_lock.ActivityLock(worker_lock.activity_path(path), exclusive=True).acquire()
+                    seen.append(False)
+                except worker_lock.LockHeld:
+                    seen.append(True)
                 raise SimulationBlockedError("probe stops the run here")
 
             with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
                     mock.patch.object(simulation_processor, "_production_twin", side_effect=probe):
                 code, _ = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
             self.assertEqual(code, 3)
-            self.assertEqual(seen, [True])
-            with worker_lock.WorkerLock(path):  # released after main returned
-                pass
+            self.assertEqual(seen, [True, True])
+            with worker_lock.WorkerLock(path), \
+                    worker_lock.ActivityLock(worker_lock.activity_path(path), exclusive=True):
+                pass  # both released after main returned
 
     def test_the_only_options_are_the_two_flags_and_the_worker_id(self) -> None:
         options = {
@@ -1539,7 +1546,7 @@ class IsolationTests(SimulationTestCase):
                 forbidden = self.FORBIDDEN_IMPORTS - ({"os"} if module == OS_EXIT_MODULE else set())
                 self.assertFalse(imports_of(module) & forbidden)
 
-    def test_the_os_exception_is_only_os_exit_in_one_function(self) -> None:
+    def test_the_os_exception_is_only_os_exit_and_the_activity_lock_file_calls(self) -> None:
         tree = source_tree(OS_EXIT_MODULE)
         uses = []
         for function in ast.walk(tree):
@@ -1547,9 +1554,15 @@ class IsolationTests(SimulationTestCase):
                 for node in ast.walk(function):
                     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
                         uses.append((function.name, node.attr))
-        self.assertEqual(sorted(set(uses)), [("_exit_now", "_exit")])
+        self.assertEqual(
+            sorted(set(uses)),
+            [("_exit_now", "_exit"), ("take_activity_lock", "O_CLOEXEC"),
+             ("take_activity_lock", "O_CREAT"), ("take_activity_lock", "O_NOFOLLOW"),
+             ("take_activity_lock", "O_RDWR"), ("take_activity_lock", "close"),
+             ("take_activity_lock", "open")],
+        )
         all_os = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "os"]
-        self.assertEqual(len(all_os), 1)  # the one os._exit call, nothing else
+        self.assertEqual(len(all_os), len(uses))  # no os name outside those calls
         self.assertEqual(imports_of(OS_EXIT_MODULE) & self.FORBIDDEN_IMPORTS, {"os"})
         # The child module imports only the standard library at module level:
         # spawn imports it in the child before the network guard can be installed.

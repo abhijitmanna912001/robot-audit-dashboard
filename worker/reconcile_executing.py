@@ -13,10 +13,12 @@ Not by the database (there is no lease, heartbeat or process id in
 be slow, blocked or suspended). By the operating system: this script takes the
 SAME exclusive lock as the worker (``worker_lock.py``) before it reads anything
 and holds it for its whole run. If it gets the lock, no worker or other
-reconcile run is running on this machine. If the lock is held it refuses and
-touches nothing. The lock does not see other machines, and twin children can
-outlive their parent by a moment, so ``--confirm-worker-stopped`` stays
-mandatory: it is the operator's statement about those two things.
+reconcile run is running on this machine. It then takes the ACTIVITY lock
+(``worker.activity.lock``) exclusively; every worker parent and every twin child
+holds it shared for its whole life, so getting it proves no parent and no child
+is alive on this machine. If either lock is held it refuses and touches nothing.
+The locks do not see other machines, so ``--confirm-worker-stopped`` stays
+mandatory: it is the operator's statement about those.
 
 What it lists and changes
 -------------------------
@@ -126,9 +128,9 @@ POSSIBLY_MOVED = (
     "moved: look at the twin in Cyberwave before anything else."
 )
 ATTESTATION = (
-    "--confirm-worker-stopped means: you checked that no worker runs on any OTHER machine "
-    "that could run this command, and that no twin child process of the worker that ran it "
-    "is still alive. The lock proves only that no worker runs on THIS machine."
+    "--confirm-worker-stopped means: you checked that no worker or twin child process runs "
+    "on any OTHER machine that could have run this command. The locks prove only that no "
+    "worker and no twin child process is alive on THIS machine."
 )
 
 
@@ -171,11 +173,19 @@ class ReconcileResult:
 # --------------------------------------------------------------------------
 
 
-def _require_lock(lock: object) -> None:
-    """The lock is the proof that no worker runs here: no lock, no reads, no writes."""
+def _require_lock(lock: object, activity_lock: object) -> None:
+    """The locks are the proof that no worker or child runs here: no locks, no reads, no writes."""
     if not isinstance(lock, worker_lock.WorkerLock) or not lock.held:
         raise ReconcileRefused(
             "the worker lock is not held. Nothing was read or written."
+        )
+    if (
+        not isinstance(activity_lock, worker_lock.ActivityLock)
+        or not activity_lock.held
+        or not activity_lock.exclusive
+    ):
+        raise ReconcileRefused(
+            "the activity lock is not held exclusively. Nothing was read or written."
         )
 
 
@@ -361,13 +371,15 @@ def reconcile_command(
     command_id: str,
     *,
     lock: worker_lock.WorkerLock,
+    activity_lock: worker_lock.ActivityLock,
     apply: bool = False,
     worker_stopped_confirmed: bool = False,
     client: Any | None = None,
 ) -> ReconcileResult:
     """Assess ONE command; with ``apply`` and the attestation, make what the assessment says.
 
-    ``lock`` must be the held worker lock. Every write is attempted at most once.
+    ``lock`` must be the held worker lock and ``activity_lock`` the activity lock held
+    exclusively. Every write is attempted at most once.
     A failed write stops the run: nothing after it is attempted.
     """
     if apply is not False and apply is not True:
@@ -376,7 +388,7 @@ def reconcile_command(
         raise ReconcileRefused(
             "--apply needs --confirm-worker-stopped. Nothing was read or written. " + ATTESTATION
         )
-    _require_lock(lock)
+    _require_lock(lock, activity_lock)
     command_id = _require_uuid(command_id)
     db = _get_client(client)
     found = _read_assessment(command_id, db)
@@ -473,13 +485,14 @@ def _read_rows(db: Any, status: str, what: str) -> tuple[list[dict[str, Any]], b
 
 
 def list_commands(
-    *, lock: worker_lock.WorkerLock, client: Any | None = None
+    *, lock: worker_lock.WorkerLock, activity_lock: worker_lock.ActivityLock,
+    client: Any | None = None,
 ) -> tuple[list[Assessment], bool]:
     """Read-only: ``executing`` commands and claimed ``received`` commands, assessed.
 
     Returns the assessments and whether either list was cut at LIST_LIMIT.
     """
-    _require_lock(lock)
+    _require_lock(lock, activity_lock)
     db = _get_client(client)
     found: list[Assessment] = []
     truncated = False
@@ -563,7 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="List commands stranded in 'executing' (read only by default). With "
         "--command-id, show what would be done for ONE command; with --apply and "
-        "--confirm-worker-stopped, do it. Holds the worker lock for the whole run. Never "
+        "--confirm-worker-stopped, do it. Holds the worker lock and the activity lock "
+        "(exclusively) for the whole run. Never "
         "claims, retries or sends any movement."
     )
     parser.add_argument("--command-id", help="the ONE command to examine or reconcile (UUID)")
@@ -593,30 +607,44 @@ def main(argv: list[str] | None = None) -> int:
     except worker_lock.LockError as exc:
         print(f"REFUSED: {exc}. Nothing was read or written.")
         return exc.exit_code
+    # Then the activity lock, EXCLUSIVELY: it is held shared by every worker
+    # parent and twin child, so getting it proves none is alive on this machine.
+    activity = worker_lock.ActivityLock(worker_lock.activity_path(lock.path), exclusive=True)
     try:
-        return _run_locked(args, lock)
+        activity.acquire()
+    except worker_lock.LockError as exc:
+        lock.unlock()
+        print(f"REFUSED: {exc}. Nothing was read or written.")
+        return exc.exit_code
+    try:
+        return _run_locked(args, lock, activity)
     finally:
+        activity.unlock()
         lock.unlock()
 
 
-def _run_locked(args: argparse.Namespace, lock: worker_lock.WorkerLock) -> int:
+def _run_locked(
+    args: argparse.Namespace, lock: worker_lock.WorkerLock, activity: worker_lock.ActivityLock
+) -> int:
     try:
         if not args.command_id:
-            found, truncated = list_commands(lock=lock)
+            found, truncated = list_commands(lock=lock, activity_lock=activity)
             if not found:
                 print("No 'executing' commands and no claimed 'received' commands. "
                       "Nothing was written.")
             for item in found:
                 print("\n".join(_describe_assessment(item)))
             print(
-                "Read only: nothing was written. The worker lock is held, so no worker is "
-                "running on THIS machine; that says nothing about other machines."
+                "Read only: nothing was written. The worker lock and the activity lock are held, "
+                "so no worker and no twin child process is running on THIS machine; that says "
+                "nothing about other machines."
                 + (f" The list was cut at {LIST_LIMIT} rows per status." if truncated else "")
             )
             return 0
         result = reconcile_command(
             args.command_id,
             lock=lock,
+            activity_lock=activity,
             apply=args.apply,
             worker_stopped_confirmed=args.confirm_worker_stopped,
         )

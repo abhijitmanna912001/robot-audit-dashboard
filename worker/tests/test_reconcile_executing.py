@@ -46,7 +46,7 @@ from simulation_payloads import (
 )
 from tests import net_guard
 from tests.test_audit_store import FakeClient, cmd
-from worker_lock import LockHeld, WorkerLock
+from worker_lock import ActivityLock, LockHeld, WorkerLock
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 COMMAND_ID = "6f9619ff-8b86-4d11-b42d-00c04fc964ff"
@@ -126,16 +126,19 @@ class ReconcileTestCase(unittest.TestCase):
         else:  # pragma: no cover - the lock tests are POSIX only
             self.skipTest("needs fcntl (macOS or Linux)")
         self.addCleanup(self.lock.unlock)
+        self.activity_path = worker_lock.activity_path(self.lock_path)
+        self.activity = ActivityLock(self.activity_path, exclusive=True).acquire()
+        self.addCleanup(self.activity.unlock)
 
     def assert_network_untouched(self) -> None:
         self.assertEqual(len(net_guard.BLOCKED_ATTEMPTS), self.blocked_before)
 
     def dry(self, client: FakeClient) -> rc.ReconcileResult:
-        return reconcile_command(COMMAND_ID, lock=self.lock, client=client)
+        return reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=self.activity, client=client)
 
     def apply(self, client: FakeClient) -> rc.ReconcileResult:
         return reconcile_command(
-            COMMAND_ID, lock=self.lock, apply=True, worker_stopped_confirmed=True, client=client
+            COMMAND_ID, lock=self.lock, activity_lock=self.activity, apply=True, worker_stopped_confirmed=True, client=client
         )
 
     def writes(self, client: FakeClient) -> list[str]:
@@ -158,16 +161,50 @@ class LockRequiredTests(ReconcileTestCase):
         client = stranded_client()
         self.lock.unlock()
         for call in (
-            lambda: reconcile_command(COMMAND_ID, lock=self.lock, client=client),
-            lambda: reconcile_command(COMMAND_ID, lock=self.lock, apply=True,
+            lambda: reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=self.activity, client=client),
+            lambda: reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=self.activity, apply=True,
                                       worker_stopped_confirmed=True, client=client),
-            lambda: list_commands(lock=self.lock, client=client),
-            lambda: list_commands(lock=None, client=client),  # type: ignore[arg-type]
-            lambda: reconcile_command(COMMAND_ID, lock="held", client=client),  # type: ignore[arg-type]
+            lambda: list_commands(lock=self.lock, activity_lock=self.activity, client=client),
+            lambda: list_commands(lock=None, activity_lock=self.activity, client=client),  # type: ignore[arg-type]
+            lambda: reconcile_command(COMMAND_ID, lock="held", activity_lock=self.activity, client=client),  # type: ignore[arg-type]
         ):
             with self.assertRaises(ReconcileRefused):
                 call()
         self.assertEqual(client.calls, [])
+
+    def test_an_activity_lock_that_is_not_held_exclusively_refuses_before_any_call(self) -> None:
+        client = stranded_client()
+        shared = ActivityLock(self.activity_path, exclusive=False)
+        for activity in (None, "held", shared):  # shared is not even acquired
+            with self.subTest(activity=activity):
+                for call in (
+                    lambda: reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=activity,  # type: ignore[arg-type]
+                                              client=client),
+                    lambda: list_commands(lock=self.lock, activity_lock=activity,  # type: ignore[arg-type]
+                                          client=client),
+                ):
+                    with self.assertRaises(ReconcileRefused):
+                        call()
+        self.assertEqual(client.calls, [])
+
+    def test_main_refuses_when_a_worker_or_child_holds_the_activity_lock(self) -> None:
+        self.lock.unlock()
+        self.activity.unlock()
+        client = stranded_client()
+        for argv in ([], ["--command-id", COMMAND_ID]):
+            with self.subTest(argv=argv):
+                out = io.StringIO()
+                with ActivityLock(self.activity_path, exclusive=False), \
+                        mock.patch.object(rc, "_get_client", return_value=client) as factory, \
+                        redirect_stdout(out):
+                    code = rc.main([*argv, "--lock-file", str(self.lock_path)])
+                self.assertEqual(code, worker_lock.EXIT_LOCK_HELD)
+                self.assertIn("activity lock", out.getvalue())
+                self.assertIn("Nothing was read or written", out.getvalue())
+                factory.assert_not_called()
+                self.assertEqual(client.calls, [])
+                with WorkerLock(self.lock_path):  # the worker lock was released again
+                    pass
 
     def test_main_refuses_when_another_process_holds_the_lock(self) -> None:
         client = stranded_client()
@@ -186,6 +223,7 @@ class LockRequiredTests(ReconcileTestCase):
 
     def test_main_holds_the_lock_for_the_whole_run_and_releases_it_after(self) -> None:
         self.lock.unlock()
+        self.activity.unlock()
         client = stranded_client()
         seen: list[str] = []
         real = rc.list_commands
@@ -196,18 +234,24 @@ class LockRequiredTests(ReconcileTestCase):
                 seen.append("free")
             except LockHeld:
                 seen.append("held")
+            try:
+                ActivityLock(self.activity_path, exclusive=False).acquire()
+                seen.append("activity free")
+            except LockHeld:
+                seen.append("activity held")
             return real(**kwargs)
 
         with mock.patch.object(rc, "_get_client", return_value=client), \
                 mock.patch.object(rc, "list_commands", side_effect=spy), \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(rc.main(["--lock-file", str(self.lock_path)]), 0)
-        self.assertEqual(seen, ["held"])
-        with WorkerLock(self.lock_path):  # released afterwards
-            pass
+        self.assertEqual(seen, ["held", "activity held"])
+        with WorkerLock(self.lock_path), ActivityLock(self.activity_path, exclusive=True):
+            pass  # both released afterwards
 
     def test_main_without_fcntl_refuses_and_touches_nothing(self) -> None:
         self.lock.unlock()
+        self.activity.unlock()
         client = stranded_client()
         out = io.StringIO()
         with mock.patch.object(worker_lock, "fcntl", None), \
@@ -309,7 +353,7 @@ class ListTests(ReconcileTestCase):
             cmd("3c9e1f00-0000-4000-8000-000000000002", "2026-11-14T09:02:00+00:00", status="completed"),
         ]
         before = copy.deepcopy(client.tables)
-        found, truncated = list_commands(lock=self.lock, client=client)
+        found, truncated = list_commands(lock=self.lock, activity_lock=self.activity, client=client)
         self.assertFalse(truncated)
         self.assertEqual({(a.command_id, a.action) for a in found},
                          {(COMMAND_ID, ACTION_RECORD_FAILURE), (OTHER_ID, ACTION_CLAIMED_RECEIVED)})
@@ -322,7 +366,7 @@ class ListTests(ReconcileTestCase):
                 status="completed" if False else "executing")
             for i in range(rc.LIST_LIMIT + 1)
         ])
-        found, truncated = list_commands(lock=self.lock, client=client)
+        found, truncated = list_commands(lock=self.lock, activity_lock=self.activity, client=client)
         self.assertTrue(truncated)
         self.assertEqual(len(found), rc.LIST_LIMIT)
 
@@ -330,7 +374,7 @@ class ListTests(ReconcileTestCase):
         client = stranded_client()
         client.fail("commands", "select", RuntimeError("down"))
         with self.assertRaises(rc.ReconcileError):
-            list_commands(lock=self.lock, client=client)
+            list_commands(lock=self.lock, activity_lock=self.activity, client=client)
         self.assertEqual(self.writes(client), [])
 
 
@@ -350,13 +394,13 @@ class ApplyTests(ReconcileTestCase):
     def test_apply_without_the_attestation_is_refused_before_anything_is_read(self) -> None:
         client = stranded_client()
         with self.assertRaises(ReconcileRefused):
-            reconcile_command(COMMAND_ID, lock=self.lock, apply=True, client=client)
+            reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=self.activity, apply=True, client=client)
         self.assertEqual(client.calls, [])
 
     def test_the_attestation_without_apply_writes_nothing(self) -> None:
         client = stranded_client()
         result = reconcile_command(
-            COMMAND_ID, lock=self.lock, worker_stopped_confirmed=True, client=client
+            COMMAND_ID, lock=self.lock, activity_lock=self.activity, worker_stopped_confirmed=True, client=client
         )
         self.assertFalse(result.applied)
         self.assertEqual(self.writes(client), [])
@@ -408,7 +452,7 @@ class ApplyTests(ReconcileTestCase):
         for bad in ("", "not-a-uuid", "1; drop table commands", None, 42):
             with self.subTest(bad=bad):
                 with self.assertRaises(ReconcileRefused):
-                    reconcile_command(bad, lock=self.lock, client=client)  # type: ignore[arg-type]
+                    reconcile_command(bad, lock=self.lock, activity_lock=self.activity, client=client)  # type: ignore[arg-type]
         self.assertEqual(client.calls, [])
 
     def test_a_received_command_is_never_changed_even_with_both_flags(self) -> None:
@@ -509,7 +553,7 @@ class StatusOnlyTests(ReconcileTestCase):
         self.assertEqual(self.dry(client).assessment.action, ACTION_FINISH_STATUS)
         self.assertEqual(self.writes(client), [])
         with self.assertRaises(ReconcileRefused):
-            reconcile_command(COMMAND_ID, lock=self.lock, apply=True, client=client)
+            reconcile_command(COMMAND_ID, lock=self.lock, activity_lock=self.activity, apply=True, client=client)
         self.assertEqual(self.writes(client), [])
 
 
@@ -610,7 +654,8 @@ class IdempotencyTests(ReconcileTestCase):
 
 class CommandLineTests(ReconcileTestCase):
     def run_main(self, argv: list[str], client: Any) -> tuple[int, str]:
-        self.lock.unlock()  # main takes the lock itself
+        self.lock.unlock()  # main takes both locks itself
+        self.activity.unlock()
         out = io.StringIO()
         with mock.patch.object(rc, "_get_client", return_value=client), redirect_stdout(out):
             code = rc.main([*argv, "--lock-file", str(self.lock_path)])

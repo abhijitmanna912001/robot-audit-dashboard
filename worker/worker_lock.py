@@ -26,13 +26,15 @@ Limits (be honest about them)
 -----------------------------
 * It covers ONE machine. It cannot see a worker on another machine, and flock on
   a network file system is not reliable. Keep the lock file on a local disk.
-* Twin child processes do not hold the lock: the descriptor is not inheritable
-  and the children are started with ``spawn``. When the parent dies the lock is
-  released at once, while a child ends itself when its watchdog notices the dead
-  parent (it polls every 0.05 s). A child stuck in a native call could outlive
-  that by longer. This is why an ``executing`` command without a terminal event
-  is always "possibly moved", and why the reconcile script still needs the
-  operator's attestation.
+* Twin child processes do not hold THIS lock: the descriptor is not inheritable
+  and the children are started with ``spawn``. When the parent dies this lock is
+  released at once, while a child may live on (one stuck in a native call can
+  outlive its watchdog). That is what the ACTIVITY lock (``ActivityLock``) is
+  for: the parent and every child hold it shared for their whole lives and the
+  reconcile script takes it exclusively, which proves no parent and no child is
+  alive on this machine. An ``executing`` command without a terminal event is
+  still "possibly moved", and the reconcile script still needs the operator's
+  attestation (other machines).
 * Without ``fcntl`` (Windows) there is no lock. The simulation path refuses to
   run; see ``LockUnsupported``.
 """
@@ -61,7 +63,9 @@ __all__ = [
     "LockHeld",
     "LockUnavailable",
     "LockUnsupported",
+    "ActivityLock",
     "WorkerLock",
+    "activity_path",
     "add_lock_argument",
     "resolve_path",
 ]
@@ -100,6 +104,12 @@ def resolve_path(cli_value: str | None = None) -> Path:
     """The lock file: ``--lock-file`` wins, then ``WORKER_LOCK_FILE``, then the default."""
     raw = cli_value or load_config().get(ENV_LOCK_FILE) or DEFAULT_LOCK_PATH
     return Path(raw).expanduser()
+
+
+def activity_path(lock_path: Path | str) -> Path:
+    """The activity lock next to the worker lock: ``worker.lock`` -> ``worker.activity.lock``."""
+    path = Path(lock_path)
+    return path.with_name(f"{path.stem}.activity{path.suffix or '.lock'}")
 
 
 def add_lock_argument(parser: argparse.ArgumentParser) -> None:
@@ -176,6 +186,68 @@ class WorkerLock:
             os.close(fd)  # closing the descriptor releases the flock
 
     def __enter__(self) -> "WorkerLock":
+        return self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.unlock()
+
+
+class ActivityLock:
+    """The activity lock: SHARED for the parent and every twin child, EXCLUSIVE for reconcile.
+
+    Same file rules as ``WorkerLock``, non-blocking. Nothing is written into the
+    file (many holders share it). Each holder opens the file itself, so each
+    holds its own open file description; the kernel drops it when that process
+    dies, however it dies.
+    """
+
+    def __init__(self, path: Path | str, *, exclusive: bool) -> None:
+        self.path = Path(path)
+        self.exclusive = exclusive
+        self._fd: int | None = None
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def acquire(self) -> "ActivityLock":
+        if self._fd is not None:
+            raise LockUnavailable("this process already holds the activity lock")
+        if fcntl is None:
+            raise LockUnsupported(
+                "this platform has no fcntl: the activity lock needs macOS or Linux"
+            )
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(
+                self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+            )
+        except OSError as exc:
+            raise LockUnavailable(
+                f"could not open the activity lock file {self.path} ({type(exc).__name__})"
+            ) from None
+        mode = fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if isinstance(exc, BlockingIOError):
+                raise LockHeld(
+                    f"a worker or twin child process still holds the activity lock "
+                    f"{self.path} on this machine"
+                ) from None
+            raise LockUnavailable(
+                f"could not lock {self.path} ({type(exc).__name__})"
+            ) from None
+        self._fd = fd
+        return self
+
+    def unlock(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
+
+    def __enter__(self) -> "ActivityLock":
         return self.acquire()
 
     def __exit__(self, *_exc: object) -> None:

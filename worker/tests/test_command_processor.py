@@ -431,12 +431,15 @@ class MainTests(ProcessorTestCase):
         self.assertIn("Nothing was claimed or written", out)
         self.assertEqual(self.calls.mock_calls, [])  # no claim, no event, no status
 
-    def test_the_dry_run_path_still_runs_where_there_is_no_fcntl(self) -> None:
-        # It cannot move anything, so only the simulation path needs the lock.
+    def test_without_fcntl_it_fails_closed_and_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(worker_lock, "fcntl", None):
-            code, _ = self.run_main("--confirm-write", "--lock-file", str(Path(tmp) / "worker.lock"))
-        self.assertEqual(code, 0)
+            code, out = self.run_main("--confirm-write", "--lock-file", str(Path(tmp) / "worker.lock"))
+        self.assertEqual(code, worker_lock.EXIT_LOCK_UNAVAILABLE)
+        self.assertIn("REFUSED", out)
+        self.assertIn("no fcntl", out)
+        self.assertIn("Nothing was claimed or written", out)
+        self.assertEqual(self.calls.mock_calls, [])  # no claim, no event, no status
 
     def test_the_lock_is_released_after_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
