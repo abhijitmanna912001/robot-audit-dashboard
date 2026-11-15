@@ -52,6 +52,7 @@ Facts that must not be lost:
 | File | Purpose |
 |---|---|
 | `config.py` | Loads settings from `worker/.env` or the environment. Never prints values |
+| `child_env.py` | Scrubs `SUPABASE_`, `CRITIC_`, `WORKER_` and the Cyberwave key from the environment while a twin child is spawned, and holds the secret-detection rules |
 | `schemas.py` | Typed shapes mirroring `db/001_init.sql` (statuses, event types, rows) |
 | `cyberwave_client.py` | `SimulatedRobot`: connect in simulation mode, read joints. No movement |
 | `supabase_client.py` | `AuditStore`: insert into `commands` and `audit_events` (used by the smoke test) |
@@ -133,6 +134,13 @@ values:
 In the worker, `SUPABASE_SECRET_KEY` replaces the older name `SUPABASE_SERVICE_ROLE_KEY`.
 The Next.js app has its own environment file and still uses its own variable names.
 
+**Precedence and the twin child.**
+- A real environment variable wins over `worker/.env`, even if its value is empty.
+- An empty value counts as missing.
+- Nothing from `worker/.env` is ever written into `os.environ`. `config.load_config()` reads the file into a config object, at call time.
+- The twin child process never receives `SUPABASE_*`, `CRITIC_*`, `WORKER_*` or `CYBERWAVE_API_KEY` through its environment. They are removed from `os.environ` around `Process.start()` (`child_env.py`), even if the shell exported them.
+- A future production adapter must receive the Cyberwave API key over the private parent-child pipe. Never through the environment, and never through `TwinSpec.config` (which refuses credential-looking keys and values).
+
 `ROBOT_ASSET_IDENTIFIER` replaces `ROBOT_ASSET_SLUG`. The old name is not read as a
 fallback: if it is set and the new one is not, the worker stops with an error asking for
 the rename.
@@ -202,7 +210,7 @@ Blocked, raising `NetworkBlocked` before anything leaves the process:
 The only local exception is `socket.socketpair()`, which asyncio needs to create an event
 loop. Tests also cannot load the real critic settings
 (`critic_client.load_critic_settings` is blocked), and `worker/.env` is never read
-(`load_dotenv` is a no-op).
+(`dotenv_values` is stubbed to return nothing).
 
 `NetworkBlocked` derives from `BaseException`, so the worker's fail-closed
 `except Exception` handlers cannot hide a blocked request as an ordinary critic error:

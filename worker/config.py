@@ -1,18 +1,34 @@
 """Environment-based configuration for the worker.
 
-Values are loaded from ``worker/.env`` (via python-dotenv) or from the real
-process environment, which takes precedence. Nothing here prints or logs a
-secret value: error messages name the missing variable only.
+Values come from ``worker/.env`` (read with ``dotenv_values``) and from the real
+process environment. Precedence: a variable that is PRESENT in the real
+environment wins over the file, even when its value is empty (an empty value is
+then treated as missing, exactly as ``load_dotenv(override=False)`` behaved). A
+file key without ``=`` counts as absent.
+
+The file is read into a ``WorkerConfig`` object and nothing from it is ever
+written to ``os.environ``: a spawned twin child inherits ``os.environ`` and must
+not be able to read credentials that only live in the file. Every caller reads
+the config object (``load_config``), at call time and never at import time, so a
+spawn child that re-imports the main module does not read the file.
+
+Nothing here prints or logs a secret value: error messages name the missing
+variable only.
 """
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
+
+from child_env import ENV_LOCK, SECRET_ENV_VARS  # noqa: F401  (SECRET_ENV_VARS is re-exported)
 
 WORKER_DIR = Path(__file__).resolve().parent
 ENV_FILE = WORKER_DIR / ".env"
@@ -35,8 +51,8 @@ LEGACY_ROBOT_ASSET_VAR = "ROBOT_ASSET_SLUG"
 ENVIRONMENT_ID_VAR = "CYBERWAVE_ENVIRONMENT_ID"
 TWIN_ID_VAR = "CYBERWAVE_TWIN_ID"
 
-# Variables whose values must never appear in output. See ``redact``.
-SECRET_ENV_VARS = ("CYBERWAVE_API_KEY", "SUPABASE_SECRET_KEY", "CRITIC_SHARED_SECRET")
+# SECRET_ENV_VARS (imported above from child_env) lists the variables whose
+# values must never appear in output (see ``redact``) or reach a twin child.
 
 
 class ConfigError(Exception):
@@ -85,15 +101,39 @@ class CriticSettings:
     shared_secret: str = field(repr=False)
 
 
-def _load_env_file() -> None:
-    # override=False: a variable already set in the shell wins over the file.
-    load_dotenv(ENV_FILE, override=False)
+class WorkerConfig:
+    """A read-only snapshot of the worker's settings. Never touches os.environ."""
+
+    def __init__(self, values: Mapping[str, str]) -> None:
+        self._values: Mapping[str, str] = MappingProxyType(dict(values))
+
+    def get(self, name: str) -> str | None:
+        """The stripped value of ``name``, or None when absent or blank."""
+        return (self._values.get(name) or "").strip() or None
+
+    def __repr__(self) -> str:  # never show values
+        return f"WorkerConfig({len(self._values)} settings)"
+
+
+def load_config() -> WorkerConfig:
+    """Read ``worker/.env`` and the real environment into a new ``WorkerConfig``.
+
+    Real environment wins over the file (see the module docstring). Refuses to
+    run inside a ``multiprocessing`` child, so a twin child cannot use this
+    loader to read the file.
+    """
+    if multiprocessing.parent_process() is not None:
+        raise ConfigError("Configuration is not available in a child process.")
+    file_values = {k: v for k, v in dotenv_values(ENV_FILE).items() if v is not None}
+    with ENV_LOCK:  # never see a half-scrubbed environment (see child_env)
+        real = dict(os.environ)
+    return WorkerConfig({**file_values, **real})
 
 
 def _require(*names: str) -> dict[str, str]:
     """Return the named variables, or raise listing every one that is missing."""
-    _load_env_file()
-    values = {name: (os.getenv(name) or "").strip() for name in names}
+    cfg = load_config()
+    values = {name: cfg.get(name) or "" for name in names}
     missing = [name for name, value in values.items() if not value]
     if missing:
         raise ConfigError(
@@ -105,8 +145,7 @@ def _require(*names: str) -> dict[str, str]:
 
 
 def _optional(name: str) -> str | None:
-    _load_env_file()
-    return (os.getenv(name) or "").strip() or None
+    return load_config().get(name)
 
 
 def canonical_uuid(value: object) -> str | None:
@@ -216,8 +255,12 @@ def redact(text: object) -> str:
     library echoes a credential back.
     """
     result = str(text)
+    try:
+        cfg = load_config()
+    except ConfigError:
+        return result
     for name in SECRET_ENV_VARS:
-        value = (os.getenv(name) or "").strip()
+        value = cfg.get(name)
         if value:
             result = result.replace(value, "***")
     return result

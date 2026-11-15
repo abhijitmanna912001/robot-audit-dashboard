@@ -38,7 +38,7 @@ HTTP keeps working.
 
 Worker configuration is also isolated: ``critic_client.load_critic_settings``
 raises ``NetworkBlocked`` (a test must inject settings or a fake critic), and
-``config.load_dotenv`` is a no-op, so ``worker/.env`` is never read by tests.
+``config.dotenv_values`` returns nothing, so ``worker/.env`` is never read by tests.
 
 ``NetworkBlocked`` derives from BaseException, NOT Exception, on purpose: the
 worker's fail-closed ``except Exception`` handlers cannot swallow it and turn a
@@ -246,11 +246,11 @@ def _isolate_worker_configuration() -> None:
     import config
     import critic_client
 
-    def no_dotenv(*_args: Any, **_kwargs: Any) -> bool:
-        return False  # worker/.env is never read in tests
+    def no_dotenv(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}  # worker/.env is never read in tests
 
-    config.load_dotenv = no_dotenv  # type: ignore[assignment]
-    dotenv.load_dotenv = no_dotenv  # type: ignore[assignment]
+    config.dotenv_values = no_dotenv  # type: ignore[assignment]
+    dotenv.dotenv_values = no_dotenv  # type: ignore[assignment]
 
     def refuse_settings(*_args: Any, **_kwargs: Any) -> Any:
         _refuse("critic_client.load_critic_settings (inject settings or a fake critic)")
