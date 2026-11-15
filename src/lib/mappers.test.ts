@@ -14,9 +14,18 @@ const evRow = {
 test("toCommand maps snake_case and keeps nulls", () => {
   assert.deepEqual(toCommand(cmdRow), {
     id: "c1", text: "go", status: "received", planId: null, claimedBy: null,
-    claimedAt: null, createdAt: cmdRow.created_at, updatedAt: cmdRow.updated_at,
+    claimedAt: null, submittedBy: null, createdAt: cmdRow.created_at, updatedAt: cmdRow.updated_at,
   });
   assert.equal(toCommand({ ...cmdRow, plan_id: "p1" })?.planId, "p1");
+});
+
+test("toCommand reads submitted_by as a display name, else null", () => {
+  assert.equal(toCommand({ ...cmdRow, submitted_by: "Abhijit" })?.submittedBy, "Abhijit");
+  assert.equal(toCommand({ ...cmdRow, submitted_by: "  Garvit  " })?.submittedBy, "Garvit");
+  assert.equal(toCommand({ ...cmdRow, submitted_by: "n".repeat(60) })?.submittedBy, "n".repeat(40));
+  for (const bad of [undefined, null, "", "   ", 7, {}, []]) {
+    assert.equal(toCommand({ ...cmdRow, submitted_by: bad })?.submittedBy, null);
+  }
 });
 
 test("toCommand rejects unknown status and non-objects", () => {

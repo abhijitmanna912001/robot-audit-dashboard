@@ -17,6 +17,7 @@ export type CommandRow = {
   plan_id: string | null;
   claimed_by: string | null;
   claimed_at: string | null;
+  submitted_by?: string | null; // pending db/004; absent on older rows
   created_at: string;
   updated_at: string;
 };
@@ -32,6 +33,14 @@ export type AuditEventRow = {
 
 const isStr = (v: unknown): v is string => typeof v === "string";
 const strOrNull = (v: unknown): string | null => (isStr(v) ? v : null);
+
+// A display name from the public column: a non-blank string, trimmed and capped. Anything else is null.
+const MAX_NAME = 40;
+function displayName(v: unknown): string | null {
+  if (!isStr(v)) return null;
+  const t = v.trim().slice(0, MAX_NAME);
+  return t === "" ? null : t;
+}
 
 export function toCommand(row: unknown): Command | null {
   if (typeof row !== "object" || row === null) return null;
@@ -53,6 +62,7 @@ export function toCommand(row: unknown): Command | null {
     planId: strOrNull(r.plan_id),
     claimedBy: strOrNull(r.claimed_by),
     claimedAt: strOrNull(r.claimed_at),
+    submittedBy: displayName(r.submitted_by),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

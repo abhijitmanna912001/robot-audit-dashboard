@@ -20,7 +20,7 @@ export function CaseFile({
   events,
   highlightIds,
 }: {
-  command: Pick<Command, "id" | "text" | "status" | "createdAt">;
+  command: Pick<Command, "id" | "text" | "status" | "createdAt"> & { submittedBy?: string | null };
   events: AuditEvent[];
   highlightIds?: ReadonlySet<string>;
 }) {
@@ -55,6 +55,7 @@ export function CaseFile({
           <p className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-xs leading-4 text-muted-foreground">
             <span title={command.id}>Run / {command.id.slice(0, 8)}</span>
             <LocalTime iso={command.createdAt} showDate />
+            {command.submittedBy && <span>Submitted by {command.submittedBy}</span>}
           </p>
         </header>
       }

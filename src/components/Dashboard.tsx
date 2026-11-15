@@ -17,6 +17,7 @@ import type { ConnectionStatus } from "./ConnectionIndicator";
 import { FilterTabs, TestSwitch } from "./FilterTabs";
 import { HowItWorks } from "./HowItWorks";
 import { TopBar } from "./Header";
+import type { Access } from "@/lib/access";
 import { isTestCommand } from "./test-commands";
 
 export function Dashboard({
@@ -24,11 +25,13 @@ export function Dashboard({
   initialEvents,
   initialSelectedId,
   initialError,
+  access,
 }: {
   initialCommands: Command[];
   initialEvents: AuditEvent[];
   initialSelectedId: string | null;
   initialError: boolean;
+  access: Access;
 }) {
   const [commands, setCommands] = useState(initialCommands);
   const [events, setEvents] = useState(initialEvents);
@@ -177,7 +180,7 @@ export function Dashboard({
 
   return (
     <div className="flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">
-      <TopBar status={status} counts={counts} />
+      <TopBar status={status} counts={counts} access={access} />
       {loadError && (
         <div className="mx-auto w-full max-w-[1440px] shrink-0 px-4 pt-4 sm:px-8">
           <p role="alert" className="rounded-ui-md border border-destructive bg-status-rejected px-4 py-3 text-sm text-destructive">
@@ -189,7 +192,7 @@ export function Dashboard({
           list in a left rail spanning both rows, the bar above the case file on the right. */}
       <div className="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 flex-col gap-5 px-4 py-5 sm:px-8 lg:grid lg:grid-cols-[320px_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)] lg:gap-x-6 lg:gap-y-4 lg:py-4">
         <div className="min-w-0 lg:col-start-2 lg:row-start-1">
-          <CommandInput onSubmitted={handleSubmitted} />
+          <CommandInput onSubmitted={handleSubmitted} access={access} />
         </div>
         <section aria-label="Commands" className="flex min-w-0 flex-col gap-3 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:min-h-0 lg:border-r lg:border-border lg:pr-4">
           <div className="flex shrink-0 flex-col gap-2">

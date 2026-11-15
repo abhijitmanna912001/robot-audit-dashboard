@@ -17,6 +17,7 @@ export type Command = {
   planId: string | null; // null until the worker generates a plan
   claimedBy: string | null; // worker instance id
   claimedAt: string | null; // ISO 8601
+  submittedBy: string | null; // operator display name (never an email); null on older commands
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
 };
