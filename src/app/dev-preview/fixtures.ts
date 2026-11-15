@@ -202,6 +202,14 @@ export const scenarios: Scenario[] = withIds([
     events: [...simPrelude("simfn"), simFail("simfn", "planner_error", "target unreachable before any move", "not_needed")],
   },
   {
+    title: "Simulation failed, worker lost",
+    status: "failed",
+    events: [
+      ...simPrelude("simwl"),
+      simFail("simwl", "worker_lost", "worker stopped responding; outcome not recorded", "unconfirmed"),
+    ],
+  },
+  {
     // mode "simulation" but dryRun is missing or a string: must NOT render as simulated.
     title: "Malformed simulation payload",
     status: "completed",

@@ -34,15 +34,28 @@ const MAX_KIND = 80;
 
 // Human labels for simulation error kinds. Used ONLY for simulation events (isSimulation); planner and
 // critic kinds keep their own table in kind-label.ts.
-// TODO: reconcile this table with the worker's error-kind allowlist when PR #19 merges. Until then the
-// kinds below are the proposed ones, and any other kind falls back to sentence case.
+// Matches the worker's error-kind inventory (20 kinds, verified 2026-11-15)
 const SIM_KIND_LABELS: Readonly<Record<string, string>> = {
-  overall_timeout: "Simulation timed out",
-  connection_failed: "Could not connect to the simulation",
+  approval_invalid: "First-movement approval invalid",
+  rehearsal_restriction: "Blocked by a rehearsal restriction",
   gate_unconfirmed: "Movement blocked by a safety gate",
+  limits_revalidation_failed: "Joint limits failed the re-check",
+  event_write_failed: "Could not record an audit event",
+  status_update_failed: "Could not update the command status",
+  connection_failed: "Could not connect to the simulation",
+  not_simulation: "Refused: not a simulation",
+  telemetry_unavailable: "Telemetry unavailable",
+  telemetry_invalid: "Telemetry invalid",
+  dispatch_failed: "Move dispatch failed",
+  target_timeout: "Target not reached in time",
+  target_not_verified: "Target position not verified",
+  unexpected_joint_motion: "Unexpected joint motion",
+  return_timeout: "Return to start timed out",
+  restore_not_verified: "Return to start not verified",
+  overall_timeout: "Simulation timed out",
   interrupted: "Interrupted",
-  interrupted_write: "Interrupted while recording",
-  session_crashed: "Simulation session crashed",
+  internal_error: "Internal worker error",
+  worker_lost: "Worker lost; outcome not recorded",
 };
 const MAX_KIND_LABEL = 40;
 

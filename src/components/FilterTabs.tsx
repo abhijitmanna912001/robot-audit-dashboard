@@ -21,7 +21,7 @@ export function FilterTabs({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }
           aria-pressed={tab === t.id}
           onClick={() => onTab(t.id)}
           className={cn(
-            "min-h-8 min-w-0 flex-1 truncate rounded-[4px] px-2 text-xs leading-4 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
+            "min-h-8 flex-auto whitespace-nowrap rounded-[4px] px-2 text-xs leading-4 outline-none transition-colors duration-150 focus-visible:ring-3 focus-visible:ring-ring/30",
             tab === t.id
               ? "bg-surface font-medium text-primary shadow-xs"
               : "text-muted-foreground hover:text-foreground active:bg-muted",
