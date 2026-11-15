@@ -615,6 +615,36 @@ are proposed with the worker owner and are to be confirmed.**
 - `stop` records whether the simulation was confirmed stopped after a failure: `confirmed`,
   `unconfirmed`, or `not_needed` (nothing was moving).
 
+**`worker_lost` (written only by manual reconciliation).** `error.kind` `worker_lost` is not a
+failure the worker observed. It records that a simulation command was left `executing` with no
+terminal event (the worker was killed, so nothing could be written) and that a person ran
+`worker/reconcile_executing.py` while holding the worker lock. The event is always
+`{ "dryRun": false, "mode": "simulation", "error": { "kind": "worker_lost", "detail": "Physical
+outcome unknown; manual verification required. ..." }, "stop": "unconfirmed" }`, with no
+`lastTelemetry`, and its `message` is "Simulation failed: worker lost. Command possibly moved.
+Manual verification required.". The command is then set `executing -> failed`. Treat the arm as
+possibly moved. The worker itself never writes this kind. If the terminal event is already
+recorded and only the status update is missing, reconciliation changes the status and writes no
+event.
+
+**Database guards: applied 2026-11-15.** `db/002_terminal_guards.sql` is applied to Supabase and
+`db/002_terminal_guards_test.sql` passed there (19 of 19):
+
+1. `audit_events_one_terminal_execution` (before insert on `audit_events`, for
+   `execution_started`, `execution_completed`, `execution_failed`): takes
+   `pg_advisory_xact_lock` keyed on `command_id`, then rejects the insert if an
+   `execution_completed` or `execution_failed` event already exists for that command. At most one
+   terminal execution event per command, and no execution event after it, even under concurrent
+   writers.
+2. `commands_terminal_status_is_final` (before update on `commands`): rejects any status change
+   when the old status is `completed`, `failed` or `rejected`. Updates that keep the status are
+   still allowed.
+
+Before applying, run `db/002_terminal_guards_check.sql` (read only) to see whether existing rows
+already break these rules. `db/002_terminal_guards_test.sql` (`BEGIN ... ROLLBACK`) proves both
+triggers in the SQL editor. These rules are now enforced by the database;
+the worker lock remains the guard against two writers on one machine.
+
 **Snapshot shape:**
 
 ```json

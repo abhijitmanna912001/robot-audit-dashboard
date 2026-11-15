@@ -13,8 +13,10 @@ import dataclasses
 import inspect
 import io
 import json
+import signal
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -25,6 +27,7 @@ from unittest import mock
 import command_processor
 import simulation_executor
 import simulation_processor
+import worker_lock
 from audit_store import InvalidPayloadError, StateConflictError, WriteError
 from command_processor import (
     STAGE_COMPLETED_UPDATE,
@@ -228,6 +231,52 @@ class CommandLineTests(SimulationTestCase):
         self.assertEqual(code, 3)
         self.assertIn("no Cyberwave simulation adapter is implemented", text)
         self.assertEqual(self.call_names(), [])
+
+    def test_a_held_lock_refuses_before_anything_is_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            with worker_lock.WorkerLock(path), \
+                    mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin") as twin:
+                code, text = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+        self.assertEqual(code, worker_lock.EXIT_LOCK_HELD)
+        self.assertIn("REFUSED", text)
+        self.assertIn("Nothing was claimed, written or sent", text)
+        self.assertEqual(self.call_names(), [])  # no claim, no event, no status
+        twin.assert_not_called()
+
+    def test_without_fcntl_the_simulation_path_refuses_before_anything_is_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            with mock.patch.object(worker_lock, "fcntl", None), \
+                    mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin") as twin:
+                code, text = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+        self.assertEqual(code, worker_lock.EXIT_LOCK_UNAVAILABLE)
+        self.assertIn("no fcntl", text)
+        self.assertEqual(self.call_names(), [])
+        twin.assert_not_called()
+
+    def test_the_lock_is_held_during_the_run_and_released_after(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            seen: list[bool] = []
+
+            def probe(*_a: Any, **_k: Any) -> Any:
+                try:
+                    worker_lock.WorkerLock(path).acquire()
+                    seen.append(False)
+                except worker_lock.LockHeld:
+                    seen.append(True)
+                raise SimulationBlockedError("probe stops the run here")
+
+            with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin", side_effect=probe):
+                code, _ = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+            self.assertEqual(code, 3)
+            self.assertEqual(seen, [True])
+            with worker_lock.WorkerLock(path):  # released after main returned
+                pass
 
     def test_the_only_options_are_the_two_flags_and_the_worker_id(self) -> None:
         options = {
@@ -984,6 +1033,116 @@ class RealStoreTests(SimulationTestCase):
 # --------------------------------------------------------------------------
 # Interruptions and process supervision in the audit lifecycle (A2)
 # --------------------------------------------------------------------------
+
+
+class SigtermTests(SimulationTestCase):
+    """SIGTERM while main() runs: SystemExit(143) through the recorded-failure path (B1).
+
+    ``signal.raise_signal`` delivers a real SIGTERM to this process (also on
+    Windows, where the C runtime raises it in-process), and the handler that
+    ``main`` installed turns it into SystemExit in the main thread.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.original_handler = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, self.original_handler)
+
+    def sigterm_on(self, *twin_calls: str) -> None:
+        """Deliver one SIGTERM at the first occurrence of each named twin call."""
+        pending = list(twin_calls)
+        record = self.twin.recorder
+
+        def recorder(name: str) -> None:
+            record(name)
+            if pending and name == pending[0]:
+                pending.pop(0)
+                signal.raise_signal(signal.SIGTERM)
+
+        self.twin.recorder = recorder
+
+    def run_main_terminated(self) -> tuple[SystemExit, str]:
+        out = io.StringIO()
+        with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                mock.patch.object(simulation_processor, "_production_twin",
+                                  return_value=InProcessProvider(self.twin)), \
+                redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["--simulation", "--confirm-write"])
+        return ctx.exception, out.getvalue()
+
+    def failed_event(self) -> dict[str, Any]:
+        failed = self.event("execution_failed")  # exactly one write attempt
+        validate_execution_failed(failed)
+        return failed
+
+    def test_sigterm_after_go_is_recorded_through_the_failure_lifecycle(self) -> None:
+        self.sigterm_on("move_joint")  # the first movement call, i.e. after GO
+        raised, text = self.run_main_terminated()
+        self.assertEqual(raised.code, simulation_processor.SIGTERM_EXIT_CODE)
+        self.assertEqual(raised.code, 143)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "confirmed"))
+        self.assertIn("SystemExit", failed["error"]["detail"])
+        self.assertEqual(len(self.twin.moves()), 1)  # no return movement, nothing re-sent
+        self.assertEqual(self.twin.names().count("stop"), 1)
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+        order = self.order()
+        self.assertLess(order.index("twin:stop"), order.index("execution_failed"))
+        self.assertLess(order.index("execution_failed"), order.index("status:failed"))
+        self.assertNotIn("execution_completed", self.event_types())
+        self.assertIn("status failed", text)  # the outcome note is printed
+        self.assertIn("movement sent yes", text)
+        self.assertIs(signal.getsignal(signal.SIGTERM), self.original_handler)
+
+    def test_sigterm_after_go_without_a_reliable_stop_says_the_outcome_is_unknown(self) -> None:
+        self.twin.stop_result = StopResult(confirmed=False)
+        self.sigterm_on("move_joint")
+        raised, text = self.run_main_terminated()
+        self.assertEqual(raised.code, 143)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "unconfirmed"))
+        self.assertTrue(failed["error"]["detail"].startswith(MANUAL_VERIFICATION_NOTICE))
+        self.assertIn(MANUAL_VERIFICATION_NOTICE, text)
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+
+    def test_a_second_sigterm_cannot_abandon_the_stop_or_the_recording(self) -> None:
+        self.sigterm_on("move_joint", "stop")  # the second one arrives during the stop
+        raised, _ = self.run_main_terminated()
+        self.assertEqual(raised.code, 143)
+        failed = self.failed_event()
+        self.assertEqual(failed["stop"], "confirmed")  # not abandoned as 'unconfirmed'
+        self.assertEqual(self.event_types().count("execution_failed"), 1)
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+
+    def test_sigterm_before_any_movement_is_recorded_as_not_needed(self) -> None:
+        self.sigterm_on("connect")
+        raised, _ = self.run_main_terminated()
+        self.assertEqual(raised.code, 143)
+        failed = self.failed_event()
+        self.assertEqual((failed["error"]["kind"], failed["stop"]), ("interrupted", "not_needed"))
+        self.assert_nothing_sent()
+        self.assertEqual(self.transitions()[-1], ("executing", "failed"))
+
+    def test_the_handler_is_only_active_while_main_runs(self) -> None:
+        with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                mock.patch.object(simulation_processor, "_production_twin",
+                                  return_value=InProcessProvider(self.twin)), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--simulation", "--confirm-write"]), 0)
+        self.assertIs(signal.getsignal(signal.SIGTERM), self.original_handler)
+        # The library entry point installs nothing: only the command line does.
+        seen: list[Any] = []
+        self.reset_calls()
+        self.twin.recorder = lambda name: seen.append(signal.getsignal(signal.SIGTERM))
+        self.run_sim()
+        self.assertTrue(seen)
+        self.assertTrue(all(handler is self.original_handler for handler in seen))
+
+    def test_blocked_runs_install_no_handler(self) -> None:
+        with mock.patch.object(signal, "signal", wraps=signal.signal) as installed, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--simulation", "--confirm-write"]), 3)
+        installed.assert_not_called()
 
 
 class CustomStop(BaseException):

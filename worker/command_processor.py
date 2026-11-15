@@ -103,6 +103,7 @@ from typing import Any, Literal
 
 import audit_store
 import critic_client
+import worker_lock
 from audit_store import AuditStoreError, StateConflictError, WriteError
 from config import redact
 from dry_run import run_dry_run
@@ -969,12 +970,31 @@ def main(argv: list[str] | None = None) -> int:
         help="required: allow the claim, the critic request and the audit/status writes",
     )
     parser.add_argument("--worker-id", default=DEFAULT_WORKER_ID)
+    worker_lock.add_lock_argument(parser)
     args = parser.parse_args(argv)
 
     if not args.confirm_write:
         print("Refusing to run without --confirm-write. Nothing was sent.")
         return 2
 
+    # The single-instance lock comes before the claim. This dry-run path cannot
+    # move anything, so a platform without fcntl may still run it; a lock that
+    # another process holds, or cannot be opened, refuses.
+    lock = worker_lock.WorkerLock(worker_lock.resolve_path(args.lock_file))
+    try:
+        lock.acquire()
+    except worker_lock.LockUnsupported:
+        pass
+    except worker_lock.LockError as exc:
+        print(f"REFUSED: {exc}. Nothing was claimed or written.")
+        return exc.exit_code
+    try:
+        return _run_locked(args)
+    finally:
+        lock.unlock()
+
+
+def _run_locked(args: argparse.Namespace) -> int:
     try:
         result = process_one_command(args.worker_id)
     except CommandProcessingError as exc:

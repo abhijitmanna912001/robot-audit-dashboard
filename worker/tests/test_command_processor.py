@@ -21,6 +21,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -32,6 +33,7 @@ import httpx
 import audit_store
 import command_processor
 import critic_client
+import worker_lock
 from audit_store import InvalidPayloadError, StateConflictError, WriteError
 from config import CriticSettings
 from critic_gate import CriticDecision, CriticRequest, evaluate_critic_response
@@ -404,6 +406,30 @@ class MainTests(ProcessorTestCase):
         self.assertEqual(code, 2)
         self.assertIn("Nothing was sent", out)
         self.assertEqual(self.calls.mock_calls, [])
+
+    def test_a_held_lock_refuses_before_the_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            with worker_lock.WorkerLock(path):
+                code, out = self.run_main("--confirm-write", "--lock-file", path)
+        self.assertEqual(code, worker_lock.EXIT_LOCK_HELD)
+        self.assertIn("REFUSED", out)
+        self.assertIn("Nothing was claimed or written", out)
+        self.assertEqual(self.calls.mock_calls, [])  # no claim, no event, no status
+
+    def test_the_dry_run_path_still_runs_where_there_is_no_fcntl(self) -> None:
+        # It cannot move anything, so only the simulation path needs the lock.
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(worker_lock, "fcntl", None):
+            code, _ = self.run_main("--confirm-write", "--lock-file", str(Path(tmp) / "worker.lock"))
+        self.assertEqual(code, 0)
+
+    def test_the_lock_is_released_after_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            self.assertEqual(self.run_main("--confirm-write", "--lock-file", path)[0], 0)
+            with worker_lock.WorkerLock(path):
+                pass
 
     def test_refuses_with_only_a_worker_id(self) -> None:
         code, _ = self.run_main("--worker-id", "someone")

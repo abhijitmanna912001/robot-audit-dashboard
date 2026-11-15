@@ -37,8 +37,12 @@ Facts that must not be lost:
 - No physical robot movement has been tested, and no Cyberwave simulation has been started.
 - Capabilities reported by the Cyberwave API have been read, not physically verified.
 - The validator is not a complete physical safety envelope.
-- Two scripts write to Supabase: the one-time smoke test and `command_processor.py`. Both
-  need `--confirm-write`, and `command_processor.py` also calls the critic. The smoke test
+- Three scripts can write to Supabase: the one-time smoke test and `command_processor.py`,
+  which both need `--confirm-write` (`command_processor.py` also calls the critic), and
+  the manual `reconcile_executing.py`, which writes only with `--apply
+  --confirm-worker-stopped --command-id <uuid>`, while holding the worker lock, and has not
+  been run against the database. (The blocked
+  `simulation_processor.py` would also write once unblocked.) The smoke test
   has not been executed. `command_processor.py` has run live once, for a planner failure
   only; its successful-plan path has run only in tests, against mocks, an in-memory fake
   client and `httpx.MockTransport`.
@@ -67,6 +71,8 @@ Facts that must not be lost:
 | `simulation_gates.py` | The live-simulation gates (all unconfirmed), the first-rehearsal restriction, and the re-check against `shared/so101-limits.json` |
 | `simulation_executor.py` | The bounded move, verify, return, verify sequence against a twin interface. No Cyberwave implementation of that interface exists |
 | `simulation_processor.py` | Simulation-only entry point: decision pipeline, then the audited simulation lifecycle. Needs `--simulation` and `--confirm-write`. **Blocked** |
+| `worker_lock.py` | The single-instance lock (exclusive `flock`, default `~/.robot-audit/worker.lock`) that the workers and the reconcile script share. macOS and Linux only |
+| `reconcile_executing.py` | Manual script, lists commands stranded in `executing` (read only by default). With `--command-id <uuid> --apply --confirm-worker-stopped` it records ONE command: `execution_failed` (`worker_lost`, `stop: "unconfirmed"`) and `executing -> failed`, or only the status change when a terminal event is already recorded. Holds the worker lock for its whole run. Never claims, retries or sends anything |
 | `read_joint_telemetry.py` | Manual script: read-only joint read that reports whether the telemetry is verified (today: it is not). Needs `--confirm-connect` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
@@ -81,7 +87,9 @@ directory**.
 ## Setup
 
 Python 3.12, virtual environment in `worker/.venv/` (inside `worker/`, not at the repository
-root).
+root). **macOS and Linux only**: the single-instance lock (see "The worker lock") needs
+`fcntl`, so the simulation path and `reconcile_executing.py` refuse to run on Windows, and
+the commands in this file use POSIX paths.
 
 | File | Contents |
 |---|---|
@@ -92,21 +100,20 @@ Runtime only:
 
 ```
 cd worker
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-Development (runtime plus tests), in PowerShell from the repository root:
+Development (runtime plus tests), from the repository root:
 
 ```
 cd worker
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-If PowerShell refuses to run `Activate.ps1` because of the execution policy, skip activation
-and call the interpreter directly: `.venv\Scripts\python.exe -m pip install -r
-requirements-dev.txt`, then `.venv\Scripts\python.exe -m pytest -q`.
+Without activating, call the interpreter directly: `.venv/bin/python -m pip install -r
+requirements-dev.txt`, then `.venv/bin/python -m pytest -q`.
 
 Create `worker/.env` (ignored by Git) with these variables. Names only, never commit
 values:
@@ -167,8 +174,8 @@ pytest-style ones in `tests/test_audit_store.py`; `unittest discover` runs only 
 `unittest.TestCase` classes:
 
 ```
-.venv\Scripts\python.exe -m pytest -q
-.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
+.venv/bin/python -m pytest -q
+.venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
 ### The test suite is network-isolated
@@ -219,7 +226,7 @@ verifying live critic authentication.
 Cyberwave connection test (network calls, read-only, no simulation started):
 
 ```
-.venv\Scripts\python.exe test_cyberwave_connection.py
+.venv/bin/python test_cyberwave_connection.py
 ```
 
 Cyberwave asset discovery (network calls, GET only, creates no twin or environment). Use
@@ -228,21 +235,21 @@ hides the real API error. It looks the SO-101 up by its registry id, which is ke
 script, and reports whether `ROBOT_ASSET_IDENTIFIER` matches what it found:
 
 ```
-.venv\Scripts\python.exe discover_cyberwave_assets.py
+.venv/bin/python discover_cyberwave_assets.py
 ```
 
 Supabase read-only check (network calls, four zero-row SELECTs, writes nothing). Prints
 only True/False results and sanitised errors:
 
 ```
-.venv\Scripts\python.exe supabase_read_check.py
+.venv/bin/python supabase_read_check.py
 ```
 
 Supabase smoke test. A one-time test: it checks for an earlier smoke-test command, then
 writes one command and one audit event. A second run is refused:
 
 ```
-.venv\Scripts\python.exe supabase_smoke_test.py --confirm-write
+.venv/bin/python supabase_smoke_test.py --confirm-write
 ```
 
 The behaviour is explained under "Supabase smoke test" below.
@@ -595,17 +602,18 @@ the dashboard, open the command and read its timeline and status.
 | `failed_update` | ... `execution_failed`; status `approved` or `executing` | Set the status only, to `failed`, from the status it has now. Do **not** write `execution_failed` again. |
 | `execution_completed_write` | ... `execution_started`, maybe `execution_completed`; status `executing` | The dry run succeeded. If `execution_completed` is there, set `executing -> completed` only. If not, decide by hand; do not rerun the dry run. |
 | `completed_update` | ... `execution_completed`; status `executing` | Set `executing -> completed` only. Do **not** write `execution_completed` again and do not rerun the dry run. |
+| `simulation_processor.py` interrupted (Ctrl-C, or SIGTERM to the worker process) during the claim, planner, validator or critic | the claim (`claimed_by`, `claimed_at` set), maybe some of `plan_generated`, `validator_result`, `critic_result`; status `received`, or the decided status if that update went through (an `approved` command can also be left with no execution event if the interruption came just after that update) | Nothing was connected or sent: not moved. `reconcile_executing.py` does **not** handle this (it reconciles only `executing`), and extending it needs a separately reviewed design. Recover by hand with the decision-phase rows above (`event_write`, `validator_event_write` / `critic_event_write`, `status_update`): read the timeline first, never write an event that may already be there, and decide by hand between the intended status and `failed`. A stranded `approved` command can be set `approved -> failed` by hand. Never run the command again by hand. |
 
 Setting the status by hand, after reading the timeline (replace the id):
 
 ```
-.venv\Scripts\python.exe -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='failed')"
+.venv/bin/python -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='failed')"
 ```
 
 After a valid plan, with the status and plan id from the error message:
 
 ```
-.venv\Scripts\python.exe -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='<intended-status>', plan_id='<plan-id>')"
+.venv/bin/python -c "import audit_store; audit_store.set_command_status('<command-id>', expected_status='received', status='<intended-status>', plan_id='<plan-id>')"
 ```
 
 While a command has its `plan_generated` error event but is still `received`, the
@@ -617,7 +625,7 @@ Manual run (claims a real command, writes to Supabase and, for a valid plan, mak
 request to the critic; an approved plan is dry-run and its execution events are written):
 
 ```
-.venv\Scripts\python.exe command_processor.py --confirm-write
+.venv/bin/python command_processor.py --confirm-write
 ```
 
 ## Simulation rehearsal (blocked)
@@ -940,13 +948,17 @@ Nothing is retried, ever: not a movement, not an event, not a status update.
 | `execution_completed` could not be written | stage `execution_completed_write`. Status stays `executing`. The readings are in the message | restored and verified |
 | `executing -> completed` did not apply | stage `completed_update`. Not retried, event not written again, simulation not run again | restored and verified |
 | `approved -> executing` matched no row | stage `executing_update`. `execution_failed` attempted once, status left alone | not moved |
+| SIGTERM delivered to the worker process itself, during the simulation lifecycle | the handler (installed only around the processing part of `main`, after the flag and gate checks) turns the first SIGTERM into `SystemExit(143)` in the main thread, which takes the Ctrl-C / `SystemExit` rows below (kind `interrupted`). Later SIGTERMs are ignored, so they cannot abandon the stop attempt or interrupt the failure recording. Exit code 143 | as for the failure point |
+| SIGTERM to the worker process during the claim, planner, validator or critic | `SystemExit(143)` ends the run there, like a Ctrl-C. Nothing was connected or sent and no execution event is written; the command can be left claimed and `received` (or decided) for manual recovery | not moved |
+| SIGTERM to the whole process group (`kill -TERM -<pgid>`) or systemd control group (default `KillMode=control-group`) | it also reaches the twin child processes, which do not handle SIGTERM, so a child can die before the parent sends the stop. What the parent records follows the rows above and below for wherever its own SIGTERM, or the child's death, is noticed first (it can also land in an audit write: `interrupted_write`). A stop through a dead child cannot be confirmed, so the stop stays `unconfirmed` and, if a movement may have been sent, manual verification is required | **uncertain** |
+| Windows forced termination (`taskkill /F`, `TerminateProcess`) | no Python handler runs: same as the worker process being killed (last row) | **unknown** |
 | Ctrl-C / `SystemExit` before `execution_started` | `execution_failed` (`interrupted`, `not_needed`), `approved -> failed`, then the interruption continues | not moved |
 | Ctrl-C / `SystemExit` during the rehearsal | stop at most once if a movement may have been sent (a second Ctrl-C abandons it: `unconfirmed`); twin processes closed; `execution_failed` (`interrupted`); `executing -> failed` only if it was written; then the interruption continues with a note of what was recorded | as for the failure point |
 | Any other unexpected `BaseException` | the same, with kind `internal_error` | as above |
 | An interruption DURING an audit write | stage `interrupted_write`. That write's outcome is unknown: nothing further is written, no further status change | as above |
 | An interruption OUTSIDE an audit call while recording (building the `execution_failed` or completion payload, or between a confirmed write and its status change) | stage `interrupted_recording`, chained from the interruption. The message names the exact lifecycle step and the last confirmed durable state (events confirmed written, last status confirmed). Nothing further is written, nothing retried, no status changed; a payload that was only built is never reported as written | as above |
 | A twin process cannot be confirmed stopped | stage `session_cleanup`, after the outcome was recorded. Stop the local process first | as above |
-| The worker process itself is killed | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves | **unknown** |
+| The worker process itself is killed (SIGKILL, power loss, a crash) | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves. `reconcile_executing.py` (below) can record it, while holding the worker lock and with the operator's attestation | **unknown: treat as possibly moved** |
 
 The manual steps are the same as under "Manual recovery" above, with one difference: for a
 simulation failure, read `movement_dispatched`, `stop` and the last reading first. If a
@@ -955,9 +967,106 @@ look at the twin in Cyberwave before doing anything else. The recorded detail an
 output say so.
 
 Error kinds are a fixed list (`simulation_payloads.ERROR_KINDS`; `interrupted` is for
-Ctrl-C and `SystemExit`). Details are fixed text plus at most an exception class name, at
-most 200 characters. No SDK error text, URL, header, credential or key is written to an
-event or printed.
+Ctrl-C, `SystemExit` and SIGTERM). Details are fixed text plus at most an exception class
+name, at most 200 characters. No SDK error text, URL, header, credential or key is written
+to an event or printed.
+
+### The worker lock
+
+Every process that may claim a command takes ONE exclusive lock first, and the reconcile
+script takes the same lock. That is how "no worker is running on this machine" is proven:
+not by the database (no lease, heartbeat or process id; `claimed_by` is a shared label) and
+not by a command's age (a run can be slow, blocked or suspended).
+
+- **What it is.** A non-blocking `fcntl.flock(LOCK_EX | LOCK_NB)` on a lock file, default
+  `~/.robot-audit/worker.lock` (outside the repository; directory 0700, file 0600, a symlink
+  is refused). Change it with `--lock-file <path>` or the environment variable
+  `WORKER_LOCK_FILE` (the flag wins). Keep it on a local disk: `flock` on a network file
+  system is not reliable.
+- **Who takes it.** `simulation_processor.py` and `command_processor.py`, after their flag
+  checks and BEFORE the claim, held until the run ends; `reconcile_executing.py` before its
+  first read, held for its whole run (listing included). If the lock is taken, the process
+  prints a clear message, writes and claims nothing, and exits 6. If the lock file cannot
+  be opened or locked it exits 7.
+- **Release.** The kernel releases the lock when the process ends, however it ends
+  (exit, crash, `SIGKILL`). There is no stale lock to clean up and no timeout.
+- **The pid and start time** written into the file are for people only, shown (as
+  "informational, may be stale") when a run is refused. Nothing reads them to decide anything.
+- **No `fcntl` (Windows).** There is no lock. The simulation path refuses to run (exit 7),
+  and so does the reconcile script. `command_processor.py` (the dry run, which cannot move
+  anything) still runs.
+- **If the worker is killed while holding it.** The lock is released at once. The twin
+  child processes do NOT hold it: the descriptor is not inheritable and the children are
+  started with `spawn`. A child ends itself when its watchdog sees the dead parent (it polls
+  every 0.05 s), so there is a short window, normally tens of milliseconds, in which the
+  lock is free and a child still exists; a child stuck inside a native call could outlive
+  it for longer. That is why the rule below stays "possibly moved" and why
+  `--confirm-worker-stopped` stays mandatory.
+- **Limits.** It sees this machine only, not a worker on another machine.
+
+### An `executing` command without a terminal event (possibly moved)
+
+**Rule: a command whose status is `executing` and whose timeline has no
+`execution_completed` or `execution_failed` must be treated as possibly moved.** A movement
+may have been sent and nothing confirmed a stop. Look at the twin in Cyberwave before
+anything else, and never run the command again.
+
+`reconcile_executing.py` deals with such commands. There is no age, runtime, deadline or
+margin in it: eligibility is "the worker lock was obtained" plus the state of the command.
+
+```
+.venv/bin/python reconcile_executing.py                      # list, read only
+.venv/bin/python reconcile_executing.py --command-id <uuid>  # dry run for one command
+.venv/bin/python reconcile_executing.py --command-id <uuid> --apply --confirm-worker-stopped
+```
+
+| Flag | Meaning |
+|---|---|
+| (none) | READ ONLY. Lists `executing` commands and `received` commands that are already claimed, each with an explanation. At most 50 per status; the output says when it was cut |
+| `--command-id <uuid>` | Dry run for that one command: what would be done, nothing written |
+| `--apply` | Do what the dry run reports. Needs `--command-id` and `--confirm-worker-stopped`; without them it is refused before anything is read |
+| `--confirm-worker-stopped` | Your attestation: no worker runs on any OTHER machine that could run the command, and no twin child process of the worker that ran it is still alive. The lock proves only this machine |
+| `--lock-file <path>` | Use another lock file (must be the one the worker uses) |
+
+Candidates and what `--apply` does:
+
+| State of the command | `--apply --confirm-worker-stopped` |
+|---|---|
+| `executing`, one simulation `execution_started`, **no** terminal event | ONE `execution_failed` `{"dryRun": false, "mode": "simulation", "error": {"kind": "worker_lost", "detail": "Physical outcome unknown; manual verification required. ..."}, "stop": "unconfirmed"}` (no reading is invented), then the conditional `executing -> failed` |
+| `executing` and exactly one valid terminal event already recorded (`execution_failed` or `execution_completed`; the status update did not apply) | ONLY the conditional status change to match (`failed` or `completed`). No event is ever written |
+| `received` and already claimed (`claimed_by` set) | listed with an explanation, **never changed**: it was claimed and never decided, nothing was executed. Recover it by hand (Manual recovery) |
+| `completed`, `failed`, `rejected` | nothing |
+| anything else: a dry-run command, no or several `execution_started`, conflicting or duplicate terminal events, a malformed payload, a status other than `executing` | nothing; needs a person (exit 4) |
+
+Idempotent and conservative: the script reads the command twice, right before its first
+write, and writes nothing if the two reads disagree. A terminal event, once written, is never
+written again; a rerun can only make the status change. Every write is attempted once and
+nothing is retried. It never claims a command, dispatches anything or sends anything to a
+twin or a robot: it imports no Cyberwave, twin, executor or supervisor module. After a failed
+write (exit 1) run it again WITHOUT `--apply` to read the timeline.
+
+Exit codes: 0 done or nothing to do; 1 a read or write failed; 2 refused (flags); 4 needs a
+person; 6 the worker lock is held; 7 the lock is unavailable (no `fcntl`, file problem).
+
+The `execution_failed` message, which the dashboard shows as the timeline title, is
+"Simulation failed: worker lost. Command possibly moved. Manual verification required."
+The dashboard in this branch does not show `error.detail` or `stop` for simulation events.
+The simulation display merged on `main` (not yet integrated here) shows `stop:
+"unconfirmed"` as "Simulation failed: arm state uncertain" and has no label for
+`worker_lost` yet (it falls back to "Worker lost").
+
+`worker_lost` is an error kind written only by `reconcile_executing.py`.
+
+#### Database guards (applied 2026-11-15)
+
+`db/002_terminal_guards.sql` adds two triggers as a second line of defence: (a) a second
+(or any later) execution event is rejected once `execution_completed` or `execution_failed`
+exists for the command, serialised per command by `pg_advisory_xact_lock`; (b) a status
+change out of `completed`, `failed` or `rejected` is rejected. It was applied to Supabase
+on 2026-11-15 and its test script passed 19/19. `db/002_terminal_guards_check.sql` (read
+only) shows whether existing rows already break these rules, and
+`db/002_terminal_guards_test.sql` (`BEGIN ... ROLLBACK`) proves the triggers. The worker
+lock remains the guard against two writers on one machine.
 
 ## Safety rules for this code
 
