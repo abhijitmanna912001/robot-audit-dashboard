@@ -188,12 +188,17 @@ class TwinSpec:
     config: Any = field(default_factory=dict)
     test_mode: bool = False
     fresh_session_stop: str = "unsupported"
+    # The activity lock file every child takes (shared) before it builds a twin.
+    # None is accepted here but the child then refuses to build (fail closed).
+    activity_lock_path: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.adapter) is not str or self.adapter not in simulation_child.ADAPTER_KEYS:
             raise ValueError("the twin adapter is not on the allowlist")
         if type(self.test_mode) is not bool:
             raise ValueError("test_mode must be a boolean")
+        if self.activity_lock_path is not None and type(self.activity_lock_path) is not str:
+            raise ValueError("activity_lock_path must be a string or None")
         if self.fresh_session_stop not in FRESH_SESSION_STOP_VALUES:
             raise ValueError("fresh_session_stop must be 'unsupported' or 'best_effort'")
         if type(self.config) is not dict or not _is_plain(self.config):
@@ -208,6 +213,7 @@ class TwinSpec:
             "adapter": self.adapter,
             "config": self.config,
             "test_mode": self.test_mode,
+            "activity_lock_path": self.activity_lock_path,
         }
 
 

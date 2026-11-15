@@ -1188,9 +1188,19 @@ def main(argv: list[str] | None = None) -> int:
     except worker_lock.LockError as exc:
         print(f"REFUSED: {exc}. Nothing was claimed, written or sent.")
         return exc.exit_code
+    # The activity lock, SHARED, for this parent's whole life (every twin child
+    # takes it too; see worker_lock.ActivityLock). Taken after the worker lock.
+    activity = worker_lock.ActivityLock(worker_lock.activity_path(lock.path), exclusive=False)
+    try:
+        activity.acquire()
+    except worker_lock.LockError as exc:
+        lock.unlock()
+        print(f"REFUSED: {exc}. Nothing was claimed, written or sent.")
+        return exc.exit_code
     try:
         return _run_locked(args)
     finally:
+        activity.unlock()
         lock.unlock()
 
 

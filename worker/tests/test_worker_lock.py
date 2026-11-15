@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import worker_lock
-from worker_lock import LockHeld, LockUnsupported, WorkerLock
+from worker_lock import ActivityLock, LockHeld, LockUnsupported, WorkerLock
 
 WORKER_DIR = Path(__file__).resolve().parents[1]
 POSIX = worker_lock.fcntl is not None
@@ -25,6 +25,76 @@ class LockTestCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "sub" / "worker.lock"
+
+
+class ActivityPathTests(unittest.TestCase):
+    def test_the_activity_lock_sits_next_to_the_worker_lock(self) -> None:
+        self.assertEqual(worker_lock.activity_path("/x/worker.lock"), Path("/x/worker.activity.lock"))
+        self.assertEqual(worker_lock.activity_path("/x/foo.lock"), Path("/x/foo.activity.lock"))
+        self.assertEqual(worker_lock.activity_path("/x/foo"), Path("/x/foo.activity.lock"))
+        self.assertNotEqual(worker_lock.activity_path("/x/worker.lock"), Path("/x/worker.lock"))
+
+
+@unittest.skipUnless(POSIX, "needs fcntl (macOS or Linux)")
+class ActivityLockTests(LockTestCase):
+    def test_shared_holders_coexist_and_block_an_exclusive_one(self) -> None:
+        with ActivityLock(self.path, exclusive=False), ActivityLock(self.path, exclusive=False):
+            with self.assertRaises(LockHeld) as ctx:
+                ActivityLock(self.path, exclusive=True).acquire()
+            self.assertEqual(ctx.exception.exit_code, worker_lock.EXIT_LOCK_HELD)
+            self.assertIn("activity lock", str(ctx.exception))
+        with ActivityLock(self.path, exclusive=True):  # all shared holders gone
+            pass
+
+    def test_an_exclusive_holder_blocks_shared_ones(self) -> None:
+        with ActivityLock(self.path, exclusive=True):
+            with self.assertRaises(LockHeld):
+                ActivityLock(self.path, exclusive=False).acquire()
+
+    def test_it_is_a_separate_lock_from_the_worker_lock(self) -> None:
+        with WorkerLock(self.path), ActivityLock(worker_lock.activity_path(self.path), exclusive=True):
+            pass
+
+    def test_a_private_file_and_nothing_is_written_into_it(self) -> None:
+        with ActivityLock(self.path, exclusive=False):
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.path.read_bytes(), b"")
+
+    def test_a_symlink_is_refused(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        target = self.path.parent / "target"
+        target.write_text("")
+        os.symlink(target, self.path)
+        with self.assertRaises(worker_lock.LockUnavailable):
+            ActivityLock(self.path, exclusive=False).acquire()
+
+    def test_the_kernel_releases_it_when_the_holder_is_killed(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        code = textwrap.dedent(
+            f"""
+            import sys, time
+            sys.path.insert(0, {str(WORKER_DIR)!r})
+            import worker_lock
+            worker_lock.ActivityLock({str(self.path)!r}, exclusive=False).acquire()
+            print("held", flush=True)
+            time.sleep(60)
+            """
+        )
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        self.assertEqual(proc.stdout.readline().strip(), "held")
+        with self.assertRaises(LockHeld):
+            ActivityLock(self.path, exclusive=True).acquire()
+        proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=10)
+        with ActivityLock(self.path, exclusive=True):
+            pass
+
+    def test_without_fcntl_it_is_unsupported_and_nothing_is_created(self) -> None:
+        with mock.patch.object(worker_lock, "fcntl", None):
+            with self.assertRaises(LockUnsupported):
+                ActivityLock(self.path, exclusive=False).acquire()
+        self.assertFalse(self.path.parent.exists())
 
 
 @unittest.skipUnless(POSIX, "needs fcntl (macOS or Linux)")

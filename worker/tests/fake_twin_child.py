@@ -21,9 +21,12 @@ behaves.
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import dataclasses
 import os
+import shutil
+import tempfile
 import signal
 import sys
 import time
@@ -127,6 +130,21 @@ def _gate_fields(gates: Any) -> dict[str, bool]:
     return {f.name: getattr(gates, f.name) for f in dataclasses.fields(LiveSimulationGates)}
 
 
+_ACTIVITY_DIR: list[str] = []
+
+
+def test_activity_lock_path() -> str:
+    """A per-process temporary activity lock file for specs (shared locks coexist)."""
+    if not _ACTIVITY_DIR:
+        folder = tempfile.mkdtemp(prefix="activity-lock-")
+        _ACTIVITY_DIR.append(folder)
+        atexit.register(shutil.rmtree, folder, ignore_errors=True)
+    return os.path.join(_ACTIVITY_DIR[0], "worker.activity.lock")
+
+
+test_activity_lock_path.__test__ = False  # type: ignore[attr-defined]  # not a pytest test
+
+
 def spec_for(twin: FakeTwin, *, fresh_session_stop: str = "best_effort", **extra: Any) -> TwinSpec:
     """A test spec that reproduces ``twin`` (and the parent's canonical gates) in a child."""
     canonical = simulation_gates.CYBERWAVE_GATES
@@ -142,7 +160,10 @@ def spec_for(twin: FakeTwin, *, fresh_session_stop: str = "best_effort", **extra
     else:
         config["confirmations"] = "invalid"
     config.update(extra)
-    return TwinSpec(adapter="fake", config=config, test_mode=True, fresh_session_stop=fresh_session_stop)
+    return TwinSpec(
+        adapter="fake", config=config, test_mode=True, fresh_session_stop=fresh_session_stop,
+        activity_lock_path=test_activity_lock_path(),
+    )
 
 
 _MISSING = object()
@@ -178,7 +199,9 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def middle_parent_main(report: Any, config: dict[str, Any], mode: str = "connect") -> None:
+def middle_parent_main(
+    report: Any, config: dict[str, Any], mode: str = "connect", activity_lock_path: str | None = None
+) -> None:
     """A stand-in worker parent, run in its own process by the parent-death tests.
 
     Installs the network guard and starts a supervised session. ``connect``:
@@ -197,7 +220,9 @@ def middle_parent_main(report: Any, config: dict[str, Any], mode: str = "connect
             report.send(("moving", holder["pid"]))
 
     session = ProcessTwinSession(
-        TwinSpec(adapter="fake", config=config, test_mode=True), on_record=on_record
+        TwinSpec(adapter="fake", config=config, test_mode=True,
+                 activity_lock_path=activity_lock_path or test_activity_lock_path()),
+        on_record=on_record
     ).start()
     holder["pid"] = session.main.ready["pid"]
     try:

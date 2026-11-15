@@ -40,7 +40,7 @@ Facts that must not be lost:
 - Three scripts can write to Supabase: the one-time smoke test and `command_processor.py`,
   which both need `--confirm-write` (`command_processor.py` also calls the critic), and
   the manual `reconcile_executing.py`, which writes only with `--apply
-  --confirm-worker-stopped --command-id <uuid>`, while holding the worker lock, and has not
+  --confirm-worker-stopped --command-id <uuid>`, while holding the worker lock and the activity lock, and has not
   been run against the database. (The blocked
   `simulation_processor.py` would also write once unblocked.) The smoke test
   has not been executed. `command_processor.py` has run live once, for a planner failure
@@ -72,8 +72,8 @@ Facts that must not be lost:
 | `simulation_gates.py` | The live-simulation gates (all unconfirmed), the first-rehearsal restriction, and the re-check against `shared/so101-limits.json` |
 | `simulation_executor.py` | The bounded move, verify, return, verify sequence against a twin interface. No Cyberwave implementation of that interface exists |
 | `simulation_processor.py` | Simulation-only entry point: decision pipeline, then the audited simulation lifecycle. Needs `--simulation` and `--confirm-write`. **Blocked** |
-| `worker_lock.py` | The single-instance lock (exclusive `flock`, default `~/.robot-audit/worker.lock`) that the workers and the reconcile script share. macOS and Linux only |
-| `reconcile_executing.py` | Manual script, lists commands stranded in `executing` (read only by default). With `--command-id <uuid> --apply --confirm-worker-stopped` it records ONE command: `execution_failed` (`worker_lost`, `stop: "unconfirmed"`) and `executing -> failed`, or only the status change when a terminal event is already recorded. Holds the worker lock for its whole run. Never claims, retries or sends anything |
+| `worker_lock.py` | The two locks (see "The two locks"): the exclusive worker lock (default `~/.robot-audit/worker.lock`) and the activity lock next to it (`worker.activity.lock`, shared by the worker and its twin children, exclusive for the reconcile script). macOS and Linux only |
+| `reconcile_executing.py` | Manual script, lists commands stranded in `executing` (read only by default). With `--command-id <uuid> --apply --confirm-worker-stopped` it records ONE command: `execution_failed` (`worker_lost`, `stop: "unconfirmed"`) and `executing -> failed`, or only the status change when a terminal event is already recorded. Holds the worker lock and, exclusively, the activity lock for its whole run. Never claims, retries or sends anything |
 | `read_joint_telemetry.py` | Manual script: read-only joint read that reports whether the telemetry is verified (today: it is not). Needs `--confirm-connect` |
 | `supabase_read_check.py` | Manual script: read-only Supabase check, zero-row SELECTs only |
 | `test_cyberwave_connection.py` | Manual script: Cyberwave connection check |
@@ -88,8 +88,8 @@ directory**.
 ## Setup
 
 Python 3.12, virtual environment in `worker/.venv/` (inside `worker/`, not at the repository
-root). **macOS and Linux only**: the single-instance lock (see "The worker lock") needs
-`fcntl`, so the simulation path and `reconcile_executing.py` refuse to run on Windows, and
+root). **macOS and Linux only**: the single-instance lock (see "The two locks") needs
+`fcntl`, so the simulation path, `command_processor.py` and `reconcile_executing.py` refuse to run on Windows, and
 the commands in this file use POSIX paths.
 
 | File | Contents |
@@ -966,7 +966,7 @@ Nothing is retried, ever: not a movement, not an event, not a status update.
 | An interruption DURING an audit write | stage `interrupted_write`. That write's outcome is unknown: nothing further is written, no further status change | as above |
 | An interruption OUTSIDE an audit call while recording (building the `execution_failed` or completion payload, or between a confirmed write and its status change) | stage `interrupted_recording`, chained from the interruption. The message names the exact lifecycle step and the last confirmed durable state (events confirmed written, last status confirmed). Nothing further is written, nothing retried, no status changed; a payload that was only built is never reported as written | as above |
 | A twin process cannot be confirmed stopped | stage `session_cleanup`, after the outcome was recorded. Stop the local process first | as above |
-| The worker process itself is killed (SIGKILL, power loss, a crash) | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves. `reconcile_executing.py` (below) can record it, while holding the worker lock and with the operator's attestation | **unknown: treat as possibly moved** |
+| The worker process itself is killed (SIGKILL, power loss, a crash) | nothing can be recorded. The command stays `executing` with no failure event and needs a person; the twin processes end themselves (one stuck in a native call may not, which the activity lock detects). `reconcile_executing.py` (below) can record it, while holding both locks and with the operator's attestation | **unknown: treat as possibly moved** |
 
 The manual steps are the same as under "Manual recovery" above, with one difference: for a
 simulation failure, read `movement_dispatched`, `stop` and the last reading first. If a
@@ -979,38 +979,68 @@ Ctrl-C, `SystemExit` and SIGTERM). Details are fixed text plus at most an except
 name, at most 200 characters. No SDK error text, URL, header, credential or key is written
 to an event or printed.
 
-### The worker lock
+### The two locks
 
-Every process that may claim a command takes ONE exclusive lock first, and the reconcile
-script takes the same lock. That is how "no worker is running on this machine" is proven:
-not by the database (no lease, heartbeat or process id; `claimed_by` is a shared label) and
-not by a command's age (a run can be slow, blocked or suspended).
+Two `fcntl.flock` files decide whether anything that could move a twin is running on this
+machine. Not the database (no lease, heartbeat or process id; `claimed_by` is a shared
+label) and not a command's age (a run can be slow, blocked or suspended).
 
-- **What it is.** A non-blocking `fcntl.flock(LOCK_EX | LOCK_NB)` on a lock file, default
-  `~/.robot-audit/worker.lock` (outside the repository; directory 0700, file 0600, a symlink
-  is refused). Change it with `--lock-file <path>` or the environment variable
-  `WORKER_LOCK_FILE` (the flag wins). Keep it on a local disk: `flock` on a network file
-  system is not reliable.
-- **Who takes it.** `simulation_processor.py` and `command_processor.py`, after their flag
-  checks and BEFORE the claim, held until the run ends; `reconcile_executing.py` before its
-  first read, held for its whole run (listing included). If the lock is taken, the process
-  prints a clear message, writes and claims nothing, and exits 6. If the lock file cannot
-  be opened or locked it exits 7.
-- **Release.** The kernel releases the lock when the process ends, however it ends
-  (exit, crash, `SIGKILL`). There is no stale lock to clean up and no timeout.
-- **The pid and start time** written into the file are for people only, shown (as
-  "informational, may be stale") when a run is refused. Nothing reads them to decide anything.
-- **No `fcntl` (Windows).** There is no lock. The simulation path refuses to run (exit 7),
-  and so does the reconcile script. `command_processor.py` (the dry run, which cannot move
-  anything) still runs.
-- **If the worker is killed while holding it.** The lock is released at once. The twin
-  child processes do NOT hold it: the descriptor is not inheritable and the children are
-  started with `spawn`. A child ends itself when its watchdog sees the dead parent (it polls
-  every 0.05 s), so there is a short window, normally tens of milliseconds, in which the
-  lock is free and a child still exists; a child stuck inside a native call could outlive
-  it for longer. That is why the rule below stays "possibly moved" and why
-  `--confirm-worker-stopped` stays mandatory.
-- **Limits.** It sees this machine only, not a worker on another machine.
+| | Worker lock | Activity lock |
+|---|---|---|
+| File | `~/.robot-audit/worker.lock` | `worker.activity.lock`, in the same directory |
+| Mode | exclusive, non-blocking | shared (parent and every twin child), exclusive (reconcile), always non-blocking |
+| Held by | the worker (`simulation_processor.py`, `command_processor.py`) and `reconcile_executing.py` | the worker parent, EVERY twin child (each opens the file itself), and `reconcile_executing.py` (exclusive) |
+| Proves (when reconcile gets it) | no other worker or reconcile run is alive | no worker parent and no twin child is alive |
+
+- **Location.** Both files sit outside the repository (directory 0700, file 0600, a
+  symlink is refused). `--lock-file <path>` or `WORKER_LOCK_FILE` (the flag wins) moves the
+  worker lock, and the activity lock follows it: `foo.lock` becomes `foo.activity.lock`.
+  Keep them on a local disk: `flock` on a network file system is not reliable.
+- **Why the activity lock exists.** The twin children do not inherit the worker lock (the
+  descriptor is not inheritable and they are started with `spawn`). If the parent is killed
+  its worker lock is released at once, but a child may still be alive, for example blocked
+  in a native call where its watchdog thread cannot end it, and could still send
+  something. The reconcile script would then act while a child might still move the twin.
+  With the activity lock it cannot: every child holds the shared lock until it dies, so
+  the reconcile script's exclusive, non-blocking request fails while any child lives.
+- **Who takes what.** `simulation_processor.py`: worker lock, then the shared activity lock,
+  after its flag checks and BEFORE the claim, held until the run ends. Each twin child
+  takes the shared activity lock itself, first thing in `child_main` (after ignoring
+  SIGINT), before the watchdog, the network guard, the factory or any twin. The path is
+  part of the twin spec (`activity_lock_path`). `reconcile_executing.py`: worker lock,
+  then the activity lock exclusively, before its first read, held for the whole run
+  (listing included). `command_processor.py` (the dry run) spawns no child, so it takes
+  only the worker lock. The order is always worker lock, then activity lock, both
+  non-blocking, so there is no deadlock. If either is held the process prints a clear
+  message (the reconcile one names the activity lock), writes and claims nothing, and
+  exits 6; if a lock file cannot be opened or locked it exits 7.
+- **A child that cannot take its lock builds nothing.** No `fcntl`, no path in the spec, a
+  symlink, an unopenable file, or an exclusive holder (a reconcile run): the child sends
+  `not_built` (the exception class name only, never a path) and exits 73 before any
+  factory runs, so no twin exists. The parent reports a start-up failure and cleans up.
+- **The window before a child has its lock.** `spawn` boots an interpreter and re-imports
+  the parent's main module before `child_main` runs, tens to hundreds of milliseconds in
+  which that child holds no lock. This is safe for three reasons. The parent keeps its
+  shared lock the whole time, so reconcile cannot get the exclusive lock while the parent
+  lives. If the parent dies in the window and reconcile takes the exclusive lock, the
+  booting child's request then fails and it exits as `not_built` without ever having a
+  twin. If reconcile has not run, the child takes the shared lock and its watchdog ends it
+  (the parent is gone). What stays outside it: code that runs at import time in the
+  re-imported main module (no worker module does anything at import; `preloaded_before_guard`
+  in READY already reports what was loaded).
+- **Release.** The kernel releases each holder's lock when its process ends, however it
+  ends (exit, crash, `SIGKILL`). No stale lock to clean up, no timeout. The activity lock
+  file holds nothing.
+- **The pid and start time** written into the worker lock file are for people only, shown
+  (as "informational, may be stale") when a run is refused. Nothing reads them to decide.
+- **No `fcntl` (Windows).** There is no lock, so `simulation_processor.py`,
+  `command_processor.py` and `reconcile_executing.py` all refuse (exit 7, nothing claimed,
+  read or written), and a child without `fcntl` builds no twin.
+- **Limits.** One machine only: a worker or child on another machine is invisible, which is
+  why `--confirm-worker-stopped` stays mandatory. An `executing` command without a terminal
+  event is still "possibly moved". `tests/test_activity_lock_integration.py` shows the
+  scenario with real processes: kill the parent, the child lives, reconcile refuses; the
+  child ends, reconcile proceeds.
 
 ### An `executing` command without a terminal event (possibly moved)
 
@@ -1033,7 +1063,7 @@ margin in it: eligibility is "the worker lock was obtained" plus the state of th
 | (none) | READ ONLY. Lists `executing` commands and `received` commands that are already claimed, each with an explanation. At most 50 per status; the output says when it was cut |
 | `--command-id <uuid>` | Dry run for that one command: what would be done, nothing written |
 | `--apply` | Do what the dry run reports. Needs `--command-id` and `--confirm-worker-stopped`; without them it is refused before anything is read |
-| `--confirm-worker-stopped` | Your attestation: no worker runs on any OTHER machine that could run the command, and no twin child process of the worker that ran it is still alive. The lock proves only this machine |
+| `--confirm-worker-stopped` | Your attestation: no worker and no twin child process runs on any OTHER machine that could have run the command. The two locks prove only this machine |
 | `--lock-file <path>` | Use another lock file (must be the one the worker uses) |
 
 Candidates and what `--apply` does:
@@ -1054,7 +1084,7 @@ twin or a robot: it imports no Cyberwave, twin, executor or supervisor module. A
 write (exit 1) run it again WITHOUT `--apply` to read the timeline.
 
 Exit codes: 0 done or nothing to do; 1 a read or write failed; 2 refused (flags); 4 needs a
-person; 6 the worker lock is held; 7 the lock is unavailable (no `fcntl`, file problem).
+person; 6 the worker lock or the activity lock is held; 7 a lock is unavailable (no `fcntl`, file problem).
 
 The `execution_failed` message, which the dashboard shows as the timeline title, is
 "Simulation failed: worker lost. Command possibly moved. Manual verification required."
