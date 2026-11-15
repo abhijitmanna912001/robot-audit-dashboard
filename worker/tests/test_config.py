@@ -1,6 +1,6 @@
 """Unit tests for config. Offline: worker/.env is never read.
 
-``load_dotenv`` is replaced with a mock and ``os.environ`` is swapped for a
+``dotenv_values`` is replaced with a mock and ``os.environ`` is swapped for a
 controlled dict, so these tests cannot see or print real credentials. All
 values below are fake.
 """
@@ -27,7 +27,7 @@ BASE_ENV = {"CYBERWAVE_API_KEY": FAKE_API_KEY, "ROBOT_ASSET_IDENTIFIER": FAKE_AS
 def load_with_env(env: dict[str, str], **kwargs: Any) -> config.CyberwaveSettings:
     """Run load_cyberwave_settings against exactly ``env`` and no .env file."""
     with (
-        mock.patch.object(config, "load_dotenv") as fake_load_dotenv,
+        mock.patch.object(config, "dotenv_values", return_value={}) as fake_load_dotenv,
         mock.patch.dict(os.environ, env, clear=True),
     ):
         try:
@@ -129,7 +129,7 @@ TWIN_ID_VARS = ("CYBERWAVE_ENVIRONMENT_ID", "CYBERWAVE_TWIN_ID", "ROBOT_ASSET_ID
 def load_twin_with_env(env: dict[str, str]) -> config.CyberwaveTwinSettings:
     """Run load_cyberwave_twin_settings against exactly ``env`` and no .env file."""
     with (
-        mock.patch.object(config, "load_dotenv") as fake_load_dotenv,
+        mock.patch.object(config, "dotenv_values", return_value={}) as fake_load_dotenv,
         mock.patch.dict(os.environ, env, clear=True),
     ):
         try:
@@ -279,6 +279,84 @@ class LegacyRobotAssetSlugTests(unittest.TestCase):
     def test_blank_old_name_is_ignored(self) -> None:
         settings = load_with_env({**BASE_ENV, "ROBOT_ASSET_SLUG": "   "})
         self.assertEqual(settings.robot_asset_identifier, FAKE_ASSET_UUID)
+
+
+FAKE_SECRET = "fake-supabase-secret-only-in-the-file"
+
+
+def load_config_with(file_values: dict[str, Any], env: dict[str, str]) -> config.WorkerConfig:
+    with (
+        mock.patch.object(config, "dotenv_values", return_value=file_values),
+        mock.patch.dict(os.environ, env, clear=True),
+    ):
+        return config.load_config()
+
+
+class ConfigObjectTests(unittest.TestCase):
+    """The file goes into a config object, never into os.environ."""
+
+    def test_loading_never_writes_to_os_environ(self) -> None:
+        file_values = {"SUPABASE_SECRET_KEY": FAKE_SECRET, "SUPABASE_URL": "https://example.invalid"}
+        with (
+            mock.patch.object(config, "dotenv_values", return_value=file_values),
+            mock.patch.dict(os.environ, {"PATH": "/bin"}, clear=True),
+        ):
+            before = dict(os.environ)
+            cfg = config.load_config()
+            settings = config.load_supabase_settings()
+            config.redact("x")
+            self.assertEqual(dict(os.environ), before)
+            self.assertNotIn("SUPABASE_SECRET_KEY", os.environ)
+        self.assertEqual(cfg.get("SUPABASE_SECRET_KEY"), FAKE_SECRET)
+        self.assertEqual(settings.secret_key, FAKE_SECRET)
+
+    def test_real_environment_wins_over_the_file(self) -> None:
+        cfg = load_config_with({"A": "from-file", "B": "file-only"}, {"A": "from-env"})
+        self.assertEqual(cfg.get("A"), "from-env")
+        self.assertEqual(cfg.get("B"), "file-only")
+
+    def test_an_empty_real_variable_beats_the_file_and_counts_as_missing(self) -> None:
+        cfg = load_config_with({"A": "from-file"}, {"A": ""})
+        self.assertIsNone(cfg.get("A"))
+
+    def test_file_key_without_a_value_is_absent_and_values_are_stripped(self) -> None:
+        cfg = load_config_with({"A": None, "B": "  padded  "}, {})
+        self.assertIsNone(cfg.get("A"))
+        self.assertEqual(cfg.get("B"), "padded")
+
+    def test_redact_masks_a_secret_that_only_exists_in_the_file(self) -> None:
+        with (
+            mock.patch.object(config, "dotenv_values", return_value={"SUPABASE_SECRET_KEY": FAKE_SECRET}),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertEqual(config.redact(f"boom {FAKE_SECRET}"), "boom ***")
+
+    def test_repr_shows_no_values(self) -> None:
+        self.assertNotIn(FAKE_SECRET, repr(load_config_with({"K": FAKE_SECRET}, {})))
+
+    def test_the_loader_refuses_inside_a_multiprocessing_child(self) -> None:
+        with mock.patch.object(config.multiprocessing, "parent_process", return_value=object()):
+            with self.assertRaises(config.ConfigError):
+                load_config_with({}, {})
+
+    def test_importing_config_reads_nothing(self) -> None:
+        """N1: a spawn child re-imports the main module. Import must not read .env."""
+        import subprocess
+        import sys
+
+        code = (
+            "import dotenv, os\n"
+            "def boom(*a, **k): raise SystemExit('dotenv read at import')\n"
+            "dotenv.dotenv_values = boom\n"
+            "dotenv.load_dotenv = boom\n"
+            "import config, worker_lock, simulation_supervisor\n"
+            "print('ok')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(config.WORKER_DIR)!r})\n" + code],
+            capture_output=True, text=True, timeout=60, env={"PATH": os.environ.get("PATH", "")},
+        )
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "ok"), result.stderr[-300:])
 
 
 if __name__ == "__main__":

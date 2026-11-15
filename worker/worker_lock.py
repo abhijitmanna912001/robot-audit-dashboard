@@ -45,6 +45,8 @@ import re
 import time
 from pathlib import Path
 
+from config import load_config
+
 try:  # POSIX only. Its absence is handled, never ignored.
     import fcntl
 except ImportError:  # pragma: no cover - exercised by patching ``fcntl`` to None
@@ -96,7 +98,7 @@ class LockUnsupported(LockUnavailable):
 
 def resolve_path(cli_value: str | None = None) -> Path:
     """The lock file: ``--lock-file`` wins, then ``WORKER_LOCK_FILE``, then the default."""
-    raw = cli_value or os.environ.get(ENV_LOCK_FILE) or DEFAULT_LOCK_PATH
+    raw = cli_value or load_config().get(ENV_LOCK_FILE) or DEFAULT_LOCK_PATH
     return Path(raw).expanduser()
 
 

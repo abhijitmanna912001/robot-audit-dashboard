@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from multiprocessing.connection import wait
 from typing import Any, Callable
 
+import child_env
 import simulation_child
 import simulation_gates
 from simulation_gates import LiveSimulationGates, live_simulation_blockers
@@ -152,14 +153,26 @@ def merge_blockers(*groups: tuple[str, ...] | list[str]) -> tuple[str, ...]:
 
 
 def _is_plain(value: Any, depth: int = 0) -> bool:
+    """Plain data only, and nothing that looks like a credential.
+
+    A twin child gets its configuration through ``TwinSpec.config``. Credentials
+    must never travel there, so keys that name a secret and values shaped like
+    one are refused (rules in ``child_env``). The offending key or value is
+    never echoed.
+    """
     if depth > 8:
         return False
+    if type(value) is str:
+        return not child_env.looks_secret_value(value)
     if type(value) in _PLAIN_SCALARS:
         return True
     if type(value) in (list, tuple):
         return all(_is_plain(item, depth + 1) for item in value)
     if type(value) is dict:
-        return all(type(k) is str and _is_plain(v, depth + 1) for k, v in value.items())
+        return all(
+            type(k) is str and not child_env.looks_secret_key(k) and _is_plain(v, depth + 1)
+            for k, v in value.items()
+        )
     return False
 
 
@@ -347,7 +360,10 @@ class ProcessTwinSession:
             daemon=True,
         )
         try:
-            process.start()
+            # Spawn copies os.environ while start() runs: hide the worker's
+            # credentials for exactly that call (see child_env).
+            with child_env.child_environment():
+                process.start()
         except BaseException:
             parent_conn.close()
             child_conn.close()
