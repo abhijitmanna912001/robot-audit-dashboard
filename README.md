@@ -69,6 +69,27 @@ npm test
 
 Worker (Python 3.10+): see `worker/README.md`.
 
+## Operator sign-in
+
+Only invited operators can submit commands: email magic link (Supabase Auth, cookie session via `@supabase/ssr`), an allowlist in the server-only `OPERATORS` variable, and a rate limit. Each command records the operator's display name (`submitted_by`) and Auth user id (`submitted_by_id`). **Emails are never stored or shown**: `commands` and `audit_events` are publicly readable.
+
+Manual setup (nothing here is automated):
+
+1. **Supabase, Authentication, Providers:** enable **Email** (magic link on). Leave "Confirm email" on.
+2. **Turn off public sign-ups:** Authentication, Sign In / Providers, disable "Allow new users to sign up".
+3. **URL configuration:** set the **Site URL** to the production domain. Add these **Redirect URLs**: `http://localhost:3000/auth/callback`, `https://<production-domain>/auth/callback`, and for Vercel previews `https://*-<your-vercel-slug>.vercel.app/auth/callback`.
+4. **Invite the operators:** Authentication, Users, "Invite user", one per operator (the only way accounts exist once sign-ups are off).
+5. **Run the migration before deploying:** in the SQL editor run `db/004_command_submitted_by_check.sql`, then `db/004_command_submitted_by.sql`, then `db/004_command_submitted_by_test.sql` (rolls back). The route writes the new columns, so deploying first makes every submit fail with a generic 500 (nothing is saved).
+6. **Vercel, Settings, Environment Variables:** add `OPERATORS` (Production, Preview and Development), then redeploy. Never prefix it with `NEXT_PUBLIC_`. Locally, add the same line to your own `.env.local`.
+
+`OPERATORS` maps each allowed email to a display name, comma separated:
+
+```
+OPERATORS=abhijit@example.com=Abhijit,garvit@example.com=Garvit
+```
+
+Emails compare case-insensitively. A display name is 1 to 40 letters, digits, spaces, dots, hyphens or apostrophes. If any entry is malformed or an email repeats, the whole variable is rejected and submitting fails closed with a generic 500. Responses are generic: 401 not signed in, 403 not allowlisted, 429 rate limited.
+
 ## Status and roadmap
 
 - Working end to end: command intake, planning, validation, critic review, dry run, live audit timeline.
@@ -76,7 +97,7 @@ Worker (Python 3.10+): see `worker/README.md`.
 
 ## Known limitations
 
-- The command route has no authentication or rate limit yet.
+- The command route needs a signed-in, allowlisted operator and is rate limited (5 per minute, 50 per day per operator, counted before the insert, so two simultaneous requests can exceed it by one). Reading the dashboard stays public. See "Operator sign-in".
 - The audit log is readable with the public anon key, so commands must not contain secrets.
 - Creating a command and its first event are two inserts, not one transaction.
 - The worker handles one command per run, with no lease for stranded claims (manual recovery is documented).
