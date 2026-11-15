@@ -77,7 +77,8 @@ recovery. If this process is killed outright, nothing can be recorded: the
 command stays as it was (for example ``executing``) for manual recovery, and the
 twin children end themselves (their watchdog sees the parent gone). Such a
 command must be treated as possibly moved; ``reconcile_executing.py`` can record
-it by hand once its stale-command rule can qualify (see that module).
+it by hand while holding the worker lock (``worker_lock.py``), which this entry
+point takes before its first claim and holds until the run ends.
 
 Every payload is checked by ``simulation_payloads.validate_simulation_event``
 before the write. The event is always written before its status change, each
@@ -159,6 +160,7 @@ from simulation_payloads import (
     build_execution_started,
     validate_simulation_event,
 )
+import worker_lock
 from simulation_supervisor import SupervisionError, canonical_gate_blockers, merge_blockers
 
 __all__ = [
@@ -1137,6 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
         help="required: allow the claim, the critic request and the audit/status writes",
     )
     parser.add_argument("--worker-id", default=DEFAULT_WORKER_ID)
+    worker_lock.add_lock_argument(parser)
     args = parser.parse_args(argv)
 
     if not (args.simulation and args.confirm_write):
@@ -1157,6 +1160,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {blocker}")
         return 3
 
+    # The single-instance lock comes before the first claim and is held until
+    # this run ends. Without fcntl there is no lock, so the simulation refuses.
+    lock = worker_lock.WorkerLock(worker_lock.resolve_path(args.lock_file))
+    try:
+        lock.acquire()
+    except worker_lock.LockError as exc:
+        print(f"REFUSED: {exc}. Nothing was claimed, written or sent.")
+        return exc.exit_code
+    try:
+        return _run_locked(args)
+    finally:
+        lock.unlock()
+
+
+def _run_locked(args: argparse.Namespace) -> int:
     try:
         with _sigterm_as_system_exit():
             twin = _production_twin()

@@ -16,6 +16,7 @@ import json
 import signal
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -26,6 +27,7 @@ from unittest import mock
 import command_processor
 import simulation_executor
 import simulation_processor
+import worker_lock
 from audit_store import InvalidPayloadError, StateConflictError, WriteError
 from command_processor import (
     STAGE_COMPLETED_UPDATE,
@@ -229,6 +231,52 @@ class CommandLineTests(SimulationTestCase):
         self.assertEqual(code, 3)
         self.assertIn("no Cyberwave simulation adapter is implemented", text)
         self.assertEqual(self.call_names(), [])
+
+    def test_a_held_lock_refuses_before_anything_is_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            with worker_lock.WorkerLock(path), \
+                    mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin") as twin:
+                code, text = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+        self.assertEqual(code, worker_lock.EXIT_LOCK_HELD)
+        self.assertIn("REFUSED", text)
+        self.assertIn("Nothing was claimed, written or sent", text)
+        self.assertEqual(self.call_names(), [])  # no claim, no event, no status
+        twin.assert_not_called()
+
+    def test_without_fcntl_the_simulation_path_refuses_before_anything_is_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            with mock.patch.object(worker_lock, "fcntl", None), \
+                    mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin") as twin:
+                code, text = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+        self.assertEqual(code, worker_lock.EXIT_LOCK_UNAVAILABLE)
+        self.assertIn("no fcntl", text)
+        self.assertEqual(self.call_names(), [])
+        twin.assert_not_called()
+
+    def test_the_lock_is_held_during_the_run_and_released_after(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "worker.lock")
+            seen: list[bool] = []
+
+            def probe(*_a: Any, **_k: Any) -> Any:
+                try:
+                    worker_lock.WorkerLock(path).acquire()
+                    seen.append(False)
+                except worker_lock.LockHeld:
+                    seen.append(True)
+                raise SimulationBlockedError("probe stops the run here")
+
+            with mock.patch.object(simulation_processor, "live_simulation_blockers", return_value=()), \
+                    mock.patch.object(simulation_processor, "_production_twin", side_effect=probe):
+                code, _ = self.run_main(["--simulation", "--confirm-write", "--lock-file", path])
+            self.assertEqual(code, 3)
+            self.assertEqual(seen, [True])
+            with worker_lock.WorkerLock(path):  # released after main returned
+                pass
 
     def test_the_only_options_are_the_two_flags_and_the_worker_id(self) -> None:
         options = {
