@@ -1,15 +1,21 @@
 "use client";
 
 import { useId, useRef, useState } from "react";
+import Link from "next/link";
 import { Info } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import type { Access } from "@/lib/access";
 import { Textarea } from "@/components/ui/textarea";
 
 const MAX_TEXT_LENGTH = 500; // mirrors the route; the server stays the authority
 const GENERIC = "Could not submit the command. Nothing was saved. Try again.";
 const NETWORK = "Could not reach the server. Try again.";
 const SAVED_AUDIT_FAILED = "Command saved, but its audit event failed. Do not resubmit.";
+
+const SIGNED_OUT = "Sign in to submit commands";
+const NOT_ALLOWED = "Your account is not authorised to submit commands";
+const TOO_MANY = "Too many commands. Wait a moment and try again.";
 
 const FORMAT_HELP =
   "Format: set joint _1 to 0.25 rad; joints _1 to _6; unit rad; separate several with ;";
@@ -31,7 +37,15 @@ async function readJson(res: Response): Promise<Record<string, unknown>> {
   }
 }
 
-export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string) => void }) {
+export function CommandInput({
+  onSubmitted,
+  access,
+}: {
+  onSubmitted: (commandId?: string) => void;
+  access: Access;
+}) {
+  // Display only: the route checks the session, the allowlist and the rate limit itself.
+  const locked = access.state !== "operator";
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -43,7 +57,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
 
   async function handleSubmit(e: { preventDefault: () => void }) {
     e.preventDefault();
-    if (inFlight.current || !text.trim()) return;
+    if (locked || inFlight.current || !text.trim()) return;
     inFlight.current = true;
     setSubmitting(true);
     setNotice(null);
@@ -70,6 +84,15 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
         setText("");
         toast.success("Command submitted");
         onSubmitted(commandId);
+      } else if (res.status === 401) {
+        setNotice({ kind: "error", message: SIGNED_OUT });
+        toast.error(SIGNED_OUT);
+      } else if (res.status === 403) {
+        setNotice({ kind: "error", message: NOT_ALLOWED });
+        toast.error(NOT_ALLOWED);
+      } else if (res.status === 429) {
+        setNotice({ kind: "error", message: TOO_MANY });
+        toast.error(TOO_MANY);
       } else if (res.status === 400) {
         const msg = typeof body.error === "string" ? body.error.slice(0, 200) : GENERIC;
         setNotice({ kind: "error", message: msg });
@@ -125,6 +148,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
               }
             }}
             rows={1}
+            disabled={locked}
             maxLength={MAX_TEXT_LENGTH}
             placeholder="set joint _1 to 0.25 rad"
             aria-describedby={`${helpId} ${countId}`}
@@ -138,7 +162,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
             ⌘ ↵
           </kbd>
         </div>
-        <Button type="submit" disabled={submitting} className="h-10 w-full shrink-0 rounded-ui-sm px-4 transition-colors duration-150 sm:w-auto">
+        <Button type="submit" disabled={submitting || locked} className="h-10 w-full shrink-0 rounded-ui-sm px-4 transition-colors duration-150 sm:w-auto">
           {submitting ? "Submitting..." : "Submit"}
         </Button>
       </div>
@@ -153,6 +177,7 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
                 title={ex}
                 aria-label={`Use example: ${ex}`}
                 // Keep focus in the textarea so the bar does not lose its focus state when a chip is used.
+                disabled={locked}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   setText(ex);
@@ -179,6 +204,17 @@ export function CommandInput({ onSubmitted }: { onSubmitted: (commandId?: string
           </span>
         </div>
       </div>
+      {locked && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {access.state === "signed_out" ? (
+            <Link href="/sign-in" className="text-primary underline underline-offset-4">
+              {SIGNED_OUT}
+            </Link>
+          ) : (
+            NOT_ALLOWED
+          )}
+        </p>
+      )}
       {notice && (
         <p
           role="alert"

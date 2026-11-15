@@ -1,5 +1,7 @@
 import { FlaskConical, ShieldCheck } from "lucide-react";
 import { COMMAND_STATUSES, type CommandStatus } from "@/types/draft";
+import type { Access } from "@/lib/access";
+import { AuthStatus } from "./AuthStatus";
 import { ConnectionIndicator, type ConnectionStatus } from "./ConnectionIndicator";
 
 // Literal class names so Tailwind can see them.
@@ -33,9 +35,11 @@ export function Brand() {
 export function TopBar({
   status,
   counts,
+  access,
 }: {
   status: ConnectionStatus;
   counts: Record<CommandStatus, number>;
+  access: Access;
 }) {
   const shown = COMMAND_STATUSES.filter((s) => counts[s] > 0);
   return (
@@ -51,6 +55,7 @@ export function TopBar({
             <p className="mt-0.5 text-xs text-muted-foreground">No physical robot is connected.</p>
           </div>
           <ConnectionIndicator status={status} />
+          <AuthStatus access={access} />
         </div>
       </div>
       {shown.length > 0 && (

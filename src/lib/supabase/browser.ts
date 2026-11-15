@@ -1,6 +1,9 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-// Browser-safe client: anon key only. Access is limited by RLS policies.
+// THE one browser Supabase client (anon key only; access is limited by RLS). The Realtime
+// subscription and the sign-in link both use it, so there is a single GoTrueClient. It is the
+// @supabase/ssr client so the session and the PKCE verifier live in cookies the server can read.
 // Never import the service-role key here.
 let client: SupabaseClient | undefined;
 
@@ -15,6 +18,6 @@ export function getBrowserClient(): SupabaseClient {
     );
   }
 
-  client = createClient(url, anonKey);
+  client = createBrowserClient(url, anonKey);
   return client;
 }

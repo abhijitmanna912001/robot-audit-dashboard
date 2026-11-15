@@ -2,7 +2,10 @@ import { Suspense } from "react";
 import { Dashboard } from "@/components/Dashboard";
 import { Brand } from "@/components/Header";
 import { fetchSnapshot } from "@/lib/queries";
+import { cookies } from "next/headers";
+import { resolveAccess } from "@/lib/access";
 import { createAnonServerClient } from "@/lib/supabase/anon";
+import { createAuthServerClient } from "@/lib/supabase/auth-server";
 
 type SearchParams = Promise<{ command?: string }>;
 
@@ -18,6 +21,16 @@ async function LoadedDashboard({ searchParams }: { searchParams: SearchParams })
     // Missing env etc. Render empty; the client refetches once subscribed.
   }
 
+  // Display only (the route re-checks). Any failure means signed out; the email never reaches the UI.
+  let access = resolveAccess(null, undefined);
+  try {
+    const auth = createAuthServerClient(await cookies());
+    const { data: session } = await auth.auth.getUser();
+    access = resolveAccess(session.user, process.env.OPERATORS);
+  } catch {
+    /* env missing or Auth unreachable: stays signed out */
+  }
+
   const data = commands.ok ? commands.data : { commands: [], events: [] };
   const selectedId =
     data.commands.find((c) => c.id === command)?.id ?? data.commands[0]?.id ?? null;
@@ -28,6 +41,7 @@ async function LoadedDashboard({ searchParams }: { searchParams: SearchParams })
       initialEvents={data.events}
       initialSelectedId={selectedId}
       initialError={!commands.ok}
+      access={access}
     />
   );
 }

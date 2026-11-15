@@ -76,6 +76,14 @@ The two inserts that create a command are not atomic. See section 9, "Known limi
 
 ## 2. Tables
 
+**Pending application: `db/004_command_submitted_by.sql` (written, not applied)** adds two nullable
+columns to `commands`: `submitted_by text` (operator display name, 1 to 40 characters trimmed) and
+`submitted_by_id uuid` (Supabase Auth user id, no foreign key), a partial index
+`commands_submitter_created_idx (submitted_by_id, created_at)` for the rate limit, and an
+immutability trigger so they cannot change after insert. Older commands keep both null. They are
+publicly readable like everything else in these tables (section 7), which is why an email is never
+stored. 002 and 003 are unaffected (none of their triggers fires on a `commands` insert).
+
 The SQL for both tables, the indexes, triggers, RLS and the Realtime publication lives in
 **`db/001_init.sql`, which is applied and authoritative**. The blocks below are the original
 design record. If they disagree with the file, the file wins. Differences in the applied file:
@@ -482,7 +490,7 @@ Validator rule ids are UPPERCASE. They are separate from the critic's snake_case
 
 | Event | `payload` |
 |---|---|
-| `command_received` | `{ "source": "dashboard" }` |
+| `command_received` | `{ "source": "dashboard", "submitted_by": string, "submitted_by_id": string }`. The two submitter fields are **pending application (db/004)**; older events have only `source`. `submitted_by` is the operator display name and `submitted_by_id` the Supabase Auth user id. Never an email. |
 | `plan_generated` (success) | `{ "plan": <planner output>, "planId": string, "planHash": string }`. No `outcome` and no `error`. |
 | `plan_generated` (planner failure) | `{ "outcome": "error", "error": { "kind": string, "detail": string } }`. No `plan`, `planId` or `planHash`, because no plan exists. |
 | `validator_result` | `{ "outcome": "pass" \| "fail", "planId": string, "validatorVersion": string, "errors": [{ "ruleId", "actionId", "field", "message" }] }` |
@@ -720,8 +728,13 @@ Notes:
 
 Accepted for the simulation-only meetup demo.
 
-- **The command submission route is public.** Anyone who can reach the route handler can submit
-  a command. There is no login and no rate limiting yet.
+- **Command submission needs a signed-in operator (pending deployment with db/004).**
+  `POST /api/commands` checks, in order: a session verified with `supabase.auth.getUser()` (401),
+  the `OPERATORS` allowlist (403), the body (400), then a rate limit of 5 per minute and 50 per day
+  per Auth user id, counted from `commands` (429). A malformed or unset `OPERATORS` fails closed
+  with a generic 500. The rate limit counts and then inserts, which is not atomic, so two
+  simultaneous requests at the boundary can exceed it by one. `submitted_by` and `submitted_by_id`
+  are public through anon SELECT; emails are never stored, logged or shown.
 - **Anon SELECT exposes the audit log.** Anyone with the anon key can read `commands` and
   `audit_events`, including command text and event payloads (section 7). Do not put secrets or
   personal data in them.

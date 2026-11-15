@@ -16,6 +16,7 @@ const caseFileFor = (s: (typeof scenarios)[number]) => (
       text: s.title,
       status: s.status,
       createdAt: s.events[0]?.createdAt ?? "1970-01-01T00:00:00Z",
+      submittedBy: s.submittedBy ?? null,
     }}
     events={s.events}
   />

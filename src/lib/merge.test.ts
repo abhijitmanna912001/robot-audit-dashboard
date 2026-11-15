@@ -5,7 +5,7 @@ import { getMarker } from "./outcome.ts";
 import type { AuditEvent, Command } from "../types/draft.ts";
 
 const cmd = (id: string, created: string, updated = created, status: Command["status"] = "received"): Command => ({
-  id, text: id, status, planId: null, claimedBy: null, claimedAt: null, createdAt: created, updatedAt: updated,
+  id, text: id, status, planId: null, claimedBy: null, claimedAt: null, submittedBy: null, createdAt: created, updatedAt: updated,
 });
 const ev = (id: string, created: string): AuditEvent => ({
   id, commandId: "c", eventType: "plan_generated", message: id, payload: {}, createdAt: created,

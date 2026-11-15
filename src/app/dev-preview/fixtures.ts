@@ -3,7 +3,13 @@
 // deliberately breaks them to show the timeline never crashes on untrusted payloads.
 import type { AuditEvent, CommandStatus } from "@/types/draft";
 
-export type Scenario = { id: string; title: string; status: CommandStatus; events: AuditEvent[] };
+export type Scenario = {
+  id: string;
+  title: string;
+  status: CommandStatus;
+  events: AuditEvent[];
+  submittedBy?: string; // display name; absent like an older command
+};
 
 const PLAN_ID = "9d2e4a10-0000-0000-0000-000000000002";
 const HASH = "sha256:" + "ab".repeat(32);
@@ -113,6 +119,7 @@ export const scenarios: Scenario[] = withIds([
   {
     title: "Approved dry run",
     status: "completed",
+    submittedBy: "Abhijit",
     events: [
       received("ok"),
       planned("ok", 0.5),
