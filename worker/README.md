@@ -1014,6 +1014,10 @@ label) and not a command's age (a run can be slow, blocked or suspended).
   non-blocking, so there is no deadlock. If either is held the process prints a clear
   message (the reconcile one names the activity lock), writes and claims nothing, and
   exits 6; if a lock file cannot be opened or locked it exits 7.
+- **The parent must hold it too.** `ProcessTwinSession.start()` refuses, before spawning any
+  child, unless THIS process holds the shared activity lock on the file the children will
+  lock (`SessionStartError`, nothing started). A spec without a lock path refuses the same
+  way. So no session can start while a reconcile run could take the exclusive lock.
 - **A child that cannot take its lock builds nothing.** No `fcntl`, no path in the spec, a
   symlink, an unopenable file, or an exclusive holder (a reconcile run): the child sends
   `not_built` (the exception class name only, never a path) and exits 73 before any
@@ -1036,6 +1040,12 @@ label) and not a command's age (a run can be slow, blocked or suspended).
 - **No `fcntl` (Windows).** There is no lock, so `simulation_processor.py`,
   `command_processor.py` and `reconcile_executing.py` all refuse (exit 7, nothing claimed,
   read or written), and a child without `fcntl` builds no twin.
+- **Intentionally unlocked.** These scripts take neither lock because they never claim a
+  command and never move or stop a twin: `supabase_smoke_test.py` (one `--confirm-write` test
+  row, refuses a second run), `supabase_read_check.py` (zero-row SELECTs),
+  `read_joint_telemetry.py` (a read-only joint read), `discover_cyberwave_assets.py`
+  (read-only lookup) and `test_cyberwave_connection.py` (connection check). If one of them
+  ever claims a command or sends a movement, it must take both locks first.
 - **Limits.** One machine only: a worker or child on another machine is invisible, which is
   why `--confirm-worker-stopped` stays mandatory. An `executing` command without a terminal
   event is still "possibly moved". `tests/test_activity_lock_integration.py` shows the
@@ -1071,7 +1081,8 @@ Candidates and what `--apply` does:
 | State of the command | `--apply --confirm-worker-stopped` |
 |---|---|
 | `executing`, one simulation `execution_started`, **no** terminal event | ONE `execution_failed` `{"dryRun": false, "mode": "simulation", "error": {"kind": "worker_lost", "detail": "Physical outcome unknown; manual verification required. ..."}, "stop": "unconfirmed"}` (no reading is invented), then the conditional `executing -> failed` |
-| `executing` and exactly one valid terminal event already recorded (`execution_failed` or `execution_completed`; the status update did not apply) | ONLY the conditional status change to match (`failed` or `completed`). No event is ever written |
+| `executing` and exactly one valid terminal event already recorded (`execution_failed` or `execution_completed`; the status update did not apply), whose `created_at` is **strictly later** than the `created_at` of `execution_started` | ONLY the conditional status change to match (`failed` or `completed`). No event is ever written |
+| the same, but the terminal event is earlier than, or has the same `created_at` as, `execution_started`, or either `created_at` is missing, unparseable or has no time zone | nothing; needs a person (exit 4), with the reason shown. The order is never guessed from list position or event id |
 | `received` and already claimed (`claimed_by` set) | listed with an explanation, **never changed**: it was claimed and never decided, nothing was executed. Recover it by hand (Manual recovery) |
 | `completed`, `failed`, `rejected` | nothing |
 | anything else: a dry-run command, no or several `execution_started`, conflicting or duplicate terminal events, a malformed payload, a status other than `executing` | nothing; needs a person (exit 4) |

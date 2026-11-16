@@ -27,6 +27,28 @@ class LockTestCase(unittest.TestCase):
         self.path = Path(tmp.name) / "sub" / "worker.lock"
 
 
+class NoSilentFallbackTests(unittest.TestCase):
+    """Nothing may catch "no fcntl" and carry on without a lock."""
+
+    def test_lock_unsupported_is_named_only_in_worker_lock(self) -> None:
+        for path in sorted(WORKER_DIR.glob("*.py")):
+            if path.name == "worker_lock.py":
+                continue
+            with self.subTest(module=path.name):
+                self.assertNotIn("LockUnsupported", path.read_text("utf-8"))
+
+    def test_every_lock_taker_catches_the_whole_lock_error_family_and_exits(self) -> None:
+        # simulation_processor, command_processor and reconcile_executing each acquire
+        # a lock; every acquire sits in a try whose handler catches LockError (which
+        # includes LockUnsupported) and returns its exit code.
+        for name in ("simulation_processor", "command_processor", "reconcile_executing"):
+            source = (WORKER_DIR / f"{name}.py").read_text("utf-8")
+            with self.subTest(module=name):
+                self.assertIn("except worker_lock.LockError as exc:", source)
+                self.assertIn("return exc.exit_code", source)
+                self.assertNotIn("except Exception", source.split(".acquire()")[1].split("return exc.exit_code")[0])
+
+
 class ActivityPathTests(unittest.TestCase):
     def test_the_activity_lock_sits_next_to_the_worker_lock(self) -> None:
         self.assertEqual(worker_lock.activity_path("/x/worker.lock"), Path("/x/worker.activity.lock"))

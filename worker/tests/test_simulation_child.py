@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import simulation_child
+import simulation_supervisor
 import worker_lock
 from simulation_supervisor import (
     WATCHDOG_MARGIN_S,
@@ -33,7 +34,9 @@ from simulation_supervisor import (
     TwinSpec,
 )
 from tests.fake_twin import ALL_CONFIRMED, HANG, FakeTwin
-from tests.fake_twin_child import middle_parent_main, open_process_session, pid_alive, spec_for
+from tests.fake_twin_child import (
+    hold_shared_activity_lock, middle_parent_main, open_process_session, pid_alive, spec_for,
+)
 from tests.test_simulation_executor import assert_no_child_processes
 from tests.test_simulation_gates import use_canonical_gates
 
@@ -74,9 +77,11 @@ class AdapterAllowlistTests(ChildCase):
                 TwinSpec(adapter="fake", config=bad, test_mode=True)  # type: ignore[arg-type]
 
     def test_the_production_adapter_refuses_inside_the_child(self) -> None:
-        session = ProcessTwinSession(TwinSpec(adapter="production"))
-        with self.assertRaises(SessionStartError) as ctx:
-            session.start()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = hold_shared_activity_lock(str(Path(tmp) / "worker.activity.lock"))
+            session = ProcessTwinSession(TwinSpec(adapter="production", activity_lock_path=path))
+            with self.assertRaises(SessionStartError) as ctx:
+                session.start()
         self.assertIn("was not built", str(ctx.exception))
         self.assertFalse(session.healthy)
 
@@ -89,6 +94,36 @@ class AdapterAllowlistTests(ChildCase):
                 session.start()
 
 
+HELPER_HOLDS_SHARED = """
+import sys
+sys.path.insert(0, {worker_dir!r})
+import worker_lock
+worker_lock.ActivityLock({path!r}, exclusive=False).acquire()
+print("held", flush=True)
+sys.stdin.read()  # holds until the test closes stdin (or kills this process)
+"""
+
+
+def run_child_main(wire: dict, *, then_shutdown: bool = False) -> tuple[object, int | None]:
+    """Spawn the real ``child_main`` directly: its first message and its exit code."""
+    ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=True)
+    process = ctx.Process(target=simulation_child.child_main, args=(child_conn, wire, "main", 30.0), daemon=True)
+    process.start()
+    child_conn.close()
+    try:
+        message = parent_conn.recv() if parent_conn.poll(60) else None
+        if then_shutdown and message is not None and message[0] == "ready":
+            parent_conn.send(("shutdown",))
+        process.join(20)
+        return message, process.exitcode
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+        parent_conn.close()
+
+
 @unittest.skipUnless(worker_lock.fcntl is not None, "needs fcntl (macOS or Linux)")
 class ActivityLockTests(ChildCase):
     """Every child holds the activity lock SHARED before it builds a twin."""
@@ -98,49 +133,95 @@ class ActivityLockTests(ChildCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = str(Path(tmp.name) / "worker.activity.lock")
+        self.marker = str(Path(tmp.name) / "built")
 
     def spec(self, **options: object) -> TwinSpec:
-        return dataclasses.replace(spec_for(FakeTwin()), **{"activity_lock_path": self.path, **options})
+        spec = spec_for(FakeTwin(), build_marker=self.marker)
+        return dataclasses.replace(spec, **{"activity_lock_path": self.path, **options})
 
     def test_a_child_holds_the_shared_lock_for_its_whole_life(self) -> None:
-        session = ProcessTwinSession(self.spec()).start()
+        # The shared lock that start() needs is held by a SECOND process, and that
+        # process lets go once the children are up. Neither this process nor the helper
+        # holds anything when the assertions run, so an exclusive attempt can only fail
+        # because of a child's own lock.
+        helper = subprocess.Popen(
+            [sys.executable, "-c", HELPER_HOLDS_SHARED.format(
+                worker_dir=str(Path(__file__).resolve().parents[1]), path=self.path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(helper.kill)
+        self.assertEqual(helper.stdout.readline().strip(), "held")
+        with mock.patch.object(worker_lock, "holds_shared_activity_lock", return_value=True):
+            session = ProcessTwinSession(self.spec()).start()  # the parent check is the helper's
         try:
-            for _ in range(2):  # main and standby both hold it
-                with self.assertRaises(worker_lock.LockHeld):
-                    worker_lock.ActivityLock(self.path, exclusive=True).acquire()
+            helper.stdin.close()
+            self.assertEqual(helper.wait(timeout=10), 0)  # the helper's lock is gone
+            self.assertFalse(worker_lock.holds_shared_activity_lock(self.path))  # and not ours
+            self.assertEqual(len(session.children), 2)  # main and standby
+            with self.assertRaises(worker_lock.LockHeld):
+                worker_lock.ActivityLock(self.path, exclusive=True).acquire()
             with worker_lock.ActivityLock(self.path, exclusive=False):  # shared coexists
+                pass
+            # Each child holds its own: end the standby, the main child still holds it;
+            # end the main child too and the lock is free.
+            session._terminate(session.standby)
+            with self.assertRaises(worker_lock.LockHeld):
+                worker_lock.ActivityLock(self.path, exclusive=True).acquire()
+            session._terminate(session.main)
+            with worker_lock.ActivityLock(self.path, exclusive=True):
                 pass
         finally:
             session.close()
-        with worker_lock.ActivityLock(self.path, exclusive=True):  # children gone, lock gone
-            pass
 
-    def test_a_child_that_cannot_take_the_lock_builds_no_twin(self) -> None:
-        with worker_lock.ActivityLock(self.path, exclusive=True):  # reconcile is running
-            session = ProcessTwinSession(self.spec())
-            with self.assertRaises(SessionStartError) as ctx:
-                session.start()
-        # The class name is the lock refusal, not a twin build error: it stopped first.
-        self.assertIn("was not built (ActivityLockRefused)", str(ctx.exception))
-        self.assertNotIn(self.path, str(ctx.exception))
-        self.assertFalse(session.healthy)
-
-    def test_a_spec_without_a_path_builds_no_twin(self) -> None:
-        for path in (None, ""):
+    def test_the_session_refuses_before_any_child_when_the_parent_does_not_hold_the_lock(self) -> None:
+        for path in (None, self.path):  # no path, and a path this process does not hold
             with self.subTest(path=path):
                 session = ProcessTwinSession(self.spec(activity_lock_path=path))
-                with self.assertRaises(SessionStartError) as ctx:
+                with mock.patch.object(simulation_supervisor._SPAWN, "Process") as spawn, \
+                        self.assertRaises(SessionStartError) as ctx:
                     session.start()
-                self.assertIn("ActivityLockRefused", str(ctx.exception))
+                spawn.assert_not_called()  # no child was even created
+                self.assertIn("does not hold the shared activity lock", str(ctx.exception))
+                self.assertEqual(session.children, [])
+                self.assertFalse(Path(self.marker).exists())
+        self.assertFalse(Path(self.path).exists())  # nothing was created either
 
-    def test_a_symlink_is_refused(self) -> None:
+    def test_holding_is_per_path_counted_and_shared_only(self) -> None:
+        # Holding is per process and per path: a second lock object on the same path
+        # counts, and the claim ends only when the last one is released.
+        first = worker_lock.ActivityLock(self.path, exclusive=False).acquire()
+        second = worker_lock.ActivityLock(self.path, exclusive=False).acquire()
+        self.assertTrue(worker_lock.holds_shared_activity_lock(self.path))
+        first.unlock()
+        self.assertTrue(worker_lock.holds_shared_activity_lock(self.path))
+        second.unlock()
+        self.assertFalse(worker_lock.holds_shared_activity_lock(self.path))
+        with worker_lock.ActivityLock(self.path, exclusive=True) as exclusive:  # exclusive is not "shared"
+            self.assertFalse(worker_lock.holds_shared_activity_lock(self.path))
+
+    def test_a_child_with_the_lock_free_builds_its_twin_and_holds_the_lock(self) -> None:
+        message, code = run_child_main(self.spec().to_wire(), then_shutdown=True)  # control
+        self.assertEqual(message[0], "ready")
+        self.assertTrue(Path(self.marker).exists())  # so "no marker" below means something
+        self.assertEqual(code, 0)
+
+    def test_reconcile_holds_the_lock_then_a_child_starts_and_builds_nothing(self) -> None:
+        with worker_lock.ActivityLock(self.path, exclusive=True):  # reconcile side
+            message, code = run_child_main(self.spec().to_wire())
+        self.assertEqual(message, ("not_built", "ActivityLockRefused"))  # a class name only
+        self.assertEqual(code, simulation_child.EXIT_NOT_BUILT)
+        self.assertFalse(Path(self.marker).exists())  # the factory never ran
+
+    def test_a_child_without_a_usable_lock_path_builds_nothing(self) -> None:
         target = Path(self.path + ".target")
         target.write_text("")
-        os.symlink(target, self.path)
-        session = ProcessTwinSession(self.spec())
-        with self.assertRaises(SessionStartError) as ctx:
-            session.start()
-        self.assertIn("ActivityLockRefused", str(ctx.exception))
+        os.symlink(target, self.path)  # a symlink is refused
+        for path in (None, "", self.path):
+            with self.subTest(path=path):
+                message, code = run_child_main({**self.spec().to_wire(), "activity_lock_path": path})
+                self.assertEqual(message, ("not_built", "ActivityLockRefused"))
+                self.assertEqual(code, simulation_child.EXIT_NOT_BUILT)
+                self.assertFalse(Path(self.marker).exists())
 
     def test_without_fcntl_the_helper_refuses(self) -> None:
         with mock.patch.object(simulation_child, "fcntl", None):
@@ -235,9 +316,11 @@ if __name__ == "__mp_main__":  # this is a spawned child re-importing the main m
 if __name__ == "__main__":
     from simulation_supervisor import ProcessTwinSession, SessionStartError, TwinSpec
 
-    session = ProcessTwinSession(
-        TwinSpec(adapter="production", activity_lock_path=str(Path(__file__).with_name("a.activity.lock")))
-    )
+    import worker_lock
+
+    lock_path = str(Path(__file__).with_name("a.activity.lock"))
+    worker_lock.ActivityLock(lock_path, exclusive=False).acquire()  # the parent's shared lock
+    session = ProcessTwinSession(TwinSpec(adapter="production", activity_lock_path=lock_path))
     try:
         session.start()
         print("RESULT started")

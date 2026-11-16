@@ -35,8 +35,9 @@ Limits (be honest about them)
   alive on this machine. An ``executing`` command without a terminal event is
   still "possibly moved", and the reconcile script still needs the operator's
   attestation (other machines).
-* Without ``fcntl`` (Windows) there is no lock. The simulation path refuses to
-  run; see ``LockUnsupported``.
+* Without ``fcntl`` (Windows) there is no lock. The simulation path, the dry-run
+  ``command_processor.py`` and the reconcile script all refuse to run (see
+  ``LockUnsupported``), and a twin child without ``fcntl`` builds no twin.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ __all__ = [
     "ActivityLock",
     "WorkerLock",
     "activity_path",
+    "holds_shared_activity_lock",
     "add_lock_argument",
     "resolve_path",
 ]
@@ -110,6 +112,22 @@ def activity_path(lock_path: Path | str) -> Path:
     """The activity lock next to the worker lock: ``worker.lock`` -> ``worker.activity.lock``."""
     path = Path(lock_path)
     return path.with_name(f"{path.stem}.activity{path.suffix or '.lock'}")
+
+
+# Shared activity locks THIS process holds: (pid, resolved path) -> count. The pid
+# keeps a forked copy of the table from claiming a lock it does not own.
+_SHARED_HELD: dict[tuple[int, str], int] = {}
+
+
+def _held_key(path: Path) -> tuple[int, str]:
+    return (os.getpid(), os.path.realpath(path))
+
+
+def holds_shared_activity_lock(path: Path | str | None) -> bool:
+    """Whether THIS process holds the shared activity lock on ``path`` right now."""
+    if path is None or not str(path):
+        return False
+    return _SHARED_HELD.get(_held_key(Path(path)), 0) > 0
 
 
 def add_lock_argument(parser: argparse.ArgumentParser) -> None:
@@ -205,6 +223,7 @@ class ActivityLock:
         self.path = Path(path)
         self.exclusive = exclusive
         self._fd: int | None = None
+        self._key: tuple[int, str] | None = None
 
     @property
     def held(self) -> bool:
@@ -240,12 +259,22 @@ class ActivityLock:
                 f"could not lock {self.path} ({type(exc).__name__})"
             ) from None
         self._fd = fd
+        if not self.exclusive:
+            self._key = _held_key(self.path)
+            _SHARED_HELD[self._key] = _SHARED_HELD.get(self._key, 0) + 1
         return self
 
     def unlock(self) -> None:
         fd, self._fd = self._fd, None
         if fd is not None:
             os.close(fd)
+            key, self._key = self._key, None
+            if key is not None:
+                left = _SHARED_HELD.get(key, 0) - 1
+                if left > 0:
+                    _SHARED_HELD[key] = left
+                else:
+                    _SHARED_HELD.pop(key, None)
 
     def __enter__(self) -> "ActivityLock":
         return self.acquire()
