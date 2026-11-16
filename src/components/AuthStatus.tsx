@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LogIn, LogOut } from "lucide-react";
+import { LogIn, LogOut, UserRound } from "lucide-react";
 import type { Access } from "@/lib/access";
 
 // Header slot: who is signed in (display name only, never the email) and the sign-in/out control.
@@ -20,6 +20,10 @@ export function AuthStatus({ access }: { access: Access }) {
       <span className="text-foreground">
         {access.state === "operator" ? access.name : "Signed in, not authorised"}
       </span>
+      <Link href="/account" className={link}>
+        <UserRound aria-hidden="true" className="size-3.5" />
+        Account
+      </Link>
       <form action="/auth/signout" method="post">
         <button type="submit" className={link}>
           <LogOut aria-hidden="true" className="size-3.5" />
