@@ -84,13 +84,83 @@ own package for this registry id, preferring that over the twin's response
 (`get_joints`, `set_joints`, `grip`, `release`). It does not confirm that those methods
 do anything on the platform.
 
-How the worker refers to the asset:
+How the worker refers to the twin and the asset (changed on 2026-11-14):
 
-- `ROBOT_ASSET_IDENTIFIER` (in `worker/.env`) holds the **asset UUID**. The worker passes
-  it to `cw.twin()` unchanged.
+- The worker **looks the existing twin up by its id. It no longer calls `cw.twin()`**, which
+  is what the connection test on 2026-11-13 used (the "Twin init" rows above record that
+  run and are not changed by this).
+- Three settings are required to load the twin, each a canonical UUID:
+  `CYBERWAVE_ENVIRONMENT_ID`, `CYBERWAVE_TWIN_ID` and `ROBOT_ASSET_IDENTIFIER` (the
+  **asset UUID**). The asset UUID is no longer passed to the SDK to find a twin. It is only
+  compared with the twin's own `asset_uuid`.
 - The registry id is kept separately, as `SO101_REGISTRY_ID` in
   `worker/discover_cyberwave_assets.py`, because discovery looks the asset up by registry
-  id.
+  id. A registry id is refused as `ROBOT_ASSET_IDENTIFIER` for twin loading: it is never
+  resolved and never compared with a UUID.
+
+#### Existing-twin lookup
+
+Three kinds of statement are kept apart here: what the SDK source says, what the worker
+does about it, and what the platform has not confirmed.
+
+**A. Read from the installed Cyberwave SDK 0.7.5 source.** Paths are under
+`worker/.venv/Lib/site-packages/cyberwave/`. These are facts about the client code. By the
+labels at the top of this file they are **Unverified (SDK source)**: none of them has been
+exercised against the platform by the lookup path.
+
+| Fact | Where |
+|---|---|
+| `Cyberwave.twin()` is get-or-create. Its docstring reads "Get or create a twin instance". With no matching twin it calls `self.twins.create(...)` | `client.py:942-1036`; the create call is at `client.py:1033-1035` |
+| With no environment configured, `Cyberwave.twin()` calls `get_or_create_quickstart_environment()`, which calls `self.environments.create(...)` when no "Quickstart Environment" exists | `client.py:999`; the create call is at `client.py:936-939` |
+| `client.twins.get_raw(twin_id)` (`TwinManager.get_raw`) is a lookup: it returns `self._resolve_twin(twin_id)` and contains no create call | `resources.py:2950-2961` |
+| For a value that parses as a UUID, `_resolve_twin()` makes one call, `src_app_api_twins_get_twin(twin_id)` | `resources.py:2963-2966`; the UUID test is `_is_uuid()` at `resources.py:196-202` |
+| That call is serialised as `GET /api/v1/twins/{uuid}` | `rest/api/default_api.py:140478` (method), `:140718-140719` (`method='GET'`, path) |
+| The returned record (`TwinSchema`) carries the twin UUID, the asset UUID and the environment UUID | `rest/models/twin_schema.py:32` (`uuid`), `:36` (`asset_uuid`), `:37` (`environment_uuid`) |
+| `client.twins.list(environment_id=...)` (`TwinManager.list`) calls `src_app_api_environments_get_environment_twins`, serialised as `GET /api/v1/environments/{uuid}/twins` | `resources.py:2917-2923`; `rest/api/default_api.py:50195` (method), `:50437-50438` (`method='GET'`, path) |
+
+So the lookup makes network requests, and both are GET. It is not "no Cyberwave calls".
+
+**B. Application safeguards in the worker.** These are checks in our code
+(`config.load_cyberwave_twin_settings` in `worker/config.py`,
+`SimulatedRobot.load_existing_twin` in `worker/cyberwave_client.py`), covered by offline
+tests with a fake SDK (`worker/tests/test_config.py`, `worker/tests/test_cyberwave_client.py`):
+
+- A missing, blank or malformed id stops with an error that names the variable. Only the
+  hyphenated 8-4-4-4-12 UUID form is accepted, so the SDK always takes the direct GET and
+  never its slug lookup.
+- The twin is fetched with `client.twins.get_raw(twin_id)`. The worker refuses unless the
+  record's `uuid` is the configured twin id.
+- **Environment membership, two checks.** The record's `environment_uuid` must be the
+  configured environment id, and the configured environment's own twin list
+  (`client.twins.list(environment_id=...)`) must contain the twin id. Both answers come
+  from the same platform through two different endpoints.
+- **Asset identity.** The record's `asset_uuid` must be the configured asset UUID. A UUID
+  is compared with a UUID only.
+- Any failed call, unreadable field or mismatch refuses and leaves no twin loaded. There is
+  no fallback to an asset-based lookup, to creating a twin or to creating an environment.
+- No module in `worker/` calls `Cyberwave.twin()` or
+  `get_or_create_quickstart_environment()`. A test fails if one is added.
+
+**C. Not verified. Do not rely on any of these.**
+
+- That `GET /api/v1/twins/{uuid}` never creates or changes anything on the server. The
+  client code has no create call on this path; the server's behaviour has not been
+  confirmed by Cyberwave.
+- That an API key cannot reach live physical hardware. The SDK client defaults to
+  `mode="live"` (`client.py:315`), and no key scope or hardware restriction was found in
+  the client source.
+- That simulation mode is a permanent, server-side restriction on live hardware. It is a
+  setting of the client (`client.config.runtime_mode`), checked by the worker before it
+  continues. Nothing shows that the platform enforces it.
+- That `sim.stop()` cancels in-flight SO-101 joint movements. In the source it requests
+  the stop of a simulation run and sets the local status to `stopped` without re-reading
+  it (`managers/simulations.py:212-217`, `:635-653`).
+- That the SDK's joint-state view (`get_joints()`) is measured simulator state. It returns
+  zeros when no update arrived, and a joint command writes its target into the same cache
+  (`twin/capabilities/joints.py:327-341`, `:497-502`). See section 3.
+- That telemetry source metadata proves a real measurement. A message labelled
+  `source_type: "sim"` says what the sender declared. It is not evidence that the positions
+  were measured.
 
 Lookup behaviour (Catalog):
 

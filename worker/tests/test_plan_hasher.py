@@ -10,13 +10,21 @@ from __future__ import annotations
 import hashlib
 import re
 import unittest
+from pathlib import Path
 
 from plan_hasher import HASH_PREFIX, PlanHashError, canonicalize_actions, hash_actions
 
-# Shared Python/TypeScript reference vector, supplied by Abhijit. The TypeScript
-# side must produce the same canonical bytes and the same hash for this input.
-# These three values are a contract: if this test fails, fix the hasher or raise
-# it with Abhijit. Do not edit the expected values to make it pass.
+# The published hash contract ("Hash reference test").
+SCHEMA_DOC = Path(__file__).resolve().parents[2] / "docs" / "schema-draft.md"
+
+# SYNTHETIC TEST VECTOR. Nothing below is a credential, a key or a real plan.
+#
+# Shared Python/TypeScript reference vector, supplied by Abhijit and published in
+# docs/schema-draft.md. The joint names, units and reasons are test data, not
+# the real vocabulary. The TypeScript side must produce the same canonical bytes
+# and the same hash for this input. The input and the canonical form are a
+# contract: if a test fails, fix the hasher or raise it with Abhijit. Do not
+# edit them to make it pass.
 SHARED_VECTOR_ACTIONS: list = [
     {
         "actionId": "a1",
@@ -40,9 +48,13 @@ SHARED_VECTOR_EXPECTED_CANONICAL = (
     '{"actionId":"a2","reason":"y","target":"joint_b","type":"set_joint","unit":"rad",'
     '"value":0.30000000000000004}]'
 )
-SHARED_VECTOR_EXPECTED_HASH = (
-    "sha256:e97478a64c5d373d46d3abf1d1e544643578eb8107159fe5abe96a183464c684"
-)
+# The expected hash is deliberately NOT written out as a hexadecimal literal.
+# It is derived here, without plan_hasher, as the SHA-256 of the synthetic
+# canonical string above (hashlib only). SharedReferenceVectorTests also checks
+# it against the value published in docs/schema-draft.md.
+SHARED_VECTOR_EXPECTED_HASH = "sha256:" + hashlib.sha256(
+    SHARED_VECTOR_EXPECTED_CANONICAL.encode("utf-8")
+).hexdigest()
 
 
 class HashFormatTests(unittest.TestCase):
@@ -164,6 +176,31 @@ class SharedReferenceVectorTests(unittest.TestCase):
         # Ties the two published values together, independently of the hasher.
         digest = hashlib.sha256(SHARED_VECTOR_EXPECTED_CANONICAL.encode("utf-8")).hexdigest()
         self.assertEqual(HASH_PREFIX + digest, SHARED_VECTOR_EXPECTED_HASH)
+
+    def test_the_schema_document_publishes_the_same_vector_and_hash(self) -> None:
+        # The contract value lives in docs/schema-draft.md, not in this file.
+        # Values are compared without being printed on a mismatch.
+        text = SCHEMA_DOC.read_text(encoding="utf-8")
+        canonical = re.search(
+            r"Expected canonical JSON[^\n]*\s*```json\s*(\[.*?\])\s*```", text, re.DOTALL
+        )
+        published = re.search(
+            r"Expected `plan_hash`:\s*```\s*(sha256:[0-9a-f]{64})\s*```", text
+        )
+        self.assertIsNotNone(canonical, "the document has no expected canonical JSON")
+        self.assertIsNotNone(published, "the document has no expected plan_hash")
+        self.assertTrue(
+            canonical.group(1) == SHARED_VECTOR_EXPECTED_CANONICAL,
+            "the canonical JSON in docs/schema-draft.md differs from the test vector",
+        )
+        self.assertTrue(
+            published.group(1) == SHARED_VECTOR_EXPECTED_HASH,
+            "the plan_hash in docs/schema-draft.md is not the SHA-256 of the test vector",
+        )
+        self.assertTrue(
+            published.group(1) == hash_actions(SHARED_VECTOR_ACTIONS),
+            "plan_hasher does not produce the plan_hash published in docs/schema-draft.md",
+        )
 
     def test_reference_vector_number_edge_cases(self) -> None:
         # 1.0 must serialize as 1, and 0.1 + 0.2 must keep all its digits.

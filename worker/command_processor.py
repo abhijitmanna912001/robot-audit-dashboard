@@ -7,6 +7,11 @@ controlled rehearsal. A plan that is not approved ends at ``rejected`` or
 Cyberwave call, no simulation and no movement, and no flag, setting or
 environment variable can change that (see ``dry_run.py``).
 
+The decision part (claim, plan, both checks, the status) is also available on
+its own as ``decide_one_command``, which executes nothing. The separate,
+simulation-only entry point ``simulation_processor.py`` uses it; this module
+and its command line stay dry-run only.
+
 What one call does
 ------------------
 1. ``audit_store.claim_next_command(worker_id)``. No eligible command: stop.
@@ -93,7 +98,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import audit_store
@@ -116,7 +121,9 @@ from planner import PLANNER_ERROR, UNSUPPORTED_COMMAND, PlannerFailure, plan_com
 from safety_validator import ValidationResult, validate_plan
 
 __all__ = [
+    "ApprovedPlan",
     "DEFAULT_WORKER_ID",
+    "Decided",
     "STAGE_CLAIM",
     "STAGE_COMPLETED_UPDATE",
     "STAGE_CRITIC_EVENT_WRITE",
@@ -130,6 +137,7 @@ __all__ = [
     "CommandProcessingError",
     "ProcessResult",
     "decide_final_status",
+    "decide_one_command",
     "planner_failure_message",
     "process_one_command",
 ]
@@ -256,6 +264,31 @@ class CommandProcessingError(Exception):
         self.intended_status = intended_status
 
 
+@dataclass(frozen=True)
+class ApprovedPlan:
+    """An approved plan: the immutable snapshot and the evidence it was approved.
+
+    Exists only when the validator passed, the critic approved exactly this
+    command, plan id and hash, the execution gate agreed, and
+    ``received -> approved`` was written. ``snapshot`` is the object that was
+    validated and sent to the critic; nothing downstream builds another one.
+    """
+
+    snapshot: PlanSnapshot
+    request: CriticRequest
+    decision: CriticDecision
+    validation: ValidationResult
+    events_written: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Decided:
+    """What ``decide_one_command`` did. ``approved`` is set only for an approved plan."""
+
+    result: ProcessResult
+    approved: ApprovedPlan | None = None
+
+
 def planner_failure_message(kind: str) -> str:
     """The event ``message``. Matches the dashboard summary text (src/lib/summary.ts)."""
     if kind == UNSUPPORTED_COMMAND:
@@ -308,9 +341,40 @@ def process_one_command(
     Raises whatever ``claim_next_command`` raises (nothing is processed then),
     and ``CommandProcessingError`` when a write after the claim fails.
     """
+    decided = decide_one_command(worker_id, client=client, critic=critic)
+    if decided.approved is None:
+        return decided.result
+    # Both checks passed, the gate agreed and the status is now 'approved'.
+    # This is the only way into the dry run.
+    end_status, execution, execution_error = _dry_run_lifecycle(
+        decided.approved.snapshot, client, list(decided.approved.events_written)
+    )
+    return replace(
+        decided.result,
+        final_status=end_status,
+        execution=execution,
+        execution_error=execution_error,
+    )
+
+
+def decide_one_command(
+    worker_id: str,
+    *,
+    client: Any | None = None,
+    critic: CriticCall | None = None,
+) -> Decided:
+    """Claim, plan, check and decide at most one command. Executes NOTHING.
+
+    Steps 1 to 4 of the module docstring: the claim, the planner, both checks,
+    their events and the single ``received -> approved | rejected | failed``
+    update. For an approved plan the result carries the ``ApprovedPlan``; what
+    happens next (the dry run here, or the simulation lifecycle in
+    ``simulation_processor.py``) is the caller's job. Same errors as
+    ``process_one_command``.
+    """
     row = audit_store.claim_next_command(worker_id, client=client)
     if row is None:
-        return ProcessResult(outcome="no_command")
+        return Decided(ProcessResult(outcome="no_command"))
 
     command_id = row.get("id")
     if not isinstance(command_id, str) or not command_id.strip():
@@ -327,19 +391,21 @@ def process_one_command(
 
     plan = plan_command(row.get("text"))
     if plan.failure is not None:
-        return _record_planner_failure(command_id, plan.failure, client)
+        return Decided(_record_planner_failure(command_id, plan.failure, client))
 
     try:
         snapshot = PlanSnapshot.create(command_id, new_plan_id(), plan.actions or ())
     except Exception as exc:
         # The planner only emits finite numbers and strings, so this should not
         # happen. A plan that cannot be frozen and hashed is a planner error.
-        return _record_planner_failure(
-            command_id,
-            PlannerFailure(
-                PLANNER_ERROR, f"The plan could not be hashed ({type(exc).__name__})."
-            ),
-            client,
+        return Decided(
+            _record_planner_failure(
+                command_id,
+                PlannerFailure(
+                    PLANNER_ERROR, f"The plan could not be hashed ({type(exc).__name__})."
+                ),
+                client,
+            )
         )
 
     return _check_plan(snapshot, client, critic or critic_client.review_plan)
@@ -485,7 +551,7 @@ def _critic_message(outcome: str) -> str:
     return "Critic unavailable: no verdict"
 
 
-def _check_plan(snapshot: PlanSnapshot, client: Any | None, critic: CriticCall) -> ProcessResult:
+def _check_plan(snapshot: PlanSnapshot, client: Any | None, critic: CriticCall) -> Decided:
     command_id = snapshot.command_id
     plan_id = snapshot.plan_id
 
@@ -610,15 +676,7 @@ def _check_plan(snapshot: PlanSnapshot, client: Any | None, critic: CriticCall) 
             intended_status=final_status,
         ) from None
 
-    end_status, execution, execution_error = final_status, None, None
-    if final_status == "approved":
-        # Both checks passed, the gate agreed and the status is now 'approved'.
-        # This is the only way into the dry run.
-        end_status, execution, execution_error = _dry_run_lifecycle(
-            snapshot, client, events_written
-        )
-
-    return ProcessResult(
+    result = ProcessResult(
         outcome="plan_checked",
         command_id=command_id,
         action_count=snapshot.action_count,
@@ -626,10 +684,20 @@ def _check_plan(snapshot: PlanSnapshot, client: Any | None, critic: CriticCall) 
         plan_hash=snapshot.plan_hash,
         validator_outcome=validator_outcome,
         critic_outcome=critic_outcome,
-        final_status=end_status,
+        final_status=final_status,
         decision_status=final_status,
-        execution=execution,
-        execution_error=execution_error,
+    )
+    if final_status != "approved" or validation is None or request is None:
+        return Decided(result)
+    return Decided(
+        result,
+        ApprovedPlan(
+            snapshot=snapshot,
+            request=request,
+            decision=decision,
+            validation=validation,
+            events_written=tuple(events_written),
+        ),
     )
 
 
