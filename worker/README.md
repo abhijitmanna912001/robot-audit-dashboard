@@ -1081,7 +1081,8 @@ Candidates and what `--apply` does:
 | State of the command | `--apply --confirm-worker-stopped` |
 |---|---|
 | `executing`, one simulation `execution_started`, **no** terminal event | ONE `execution_failed` `{"dryRun": false, "mode": "simulation", "error": {"kind": "worker_lost", "detail": "Physical outcome unknown; manual verification required. ..."}, "stop": "unconfirmed"}` (no reading is invented), then the conditional `executing -> failed` |
-| `executing` and exactly one valid terminal event already recorded (`execution_failed` or `execution_completed`; the status update did not apply) | ONLY the conditional status change to match (`failed` or `completed`). No event is ever written |
+| `executing` and exactly one valid terminal event already recorded (`execution_failed` or `execution_completed`; the status update did not apply), whose `created_at` is **strictly later** than the `created_at` of `execution_started` | ONLY the conditional status change to match (`failed` or `completed`). No event is ever written |
+| the same, but the terminal event is earlier than, or has the same `created_at` as, `execution_started`, or either `created_at` is missing, unparseable or has no time zone | nothing; needs a person (exit 4), with the reason shown. The order is never guessed from list position or event id |
 | `received` and already claimed (`claimed_by` set) | listed with an explanation, **never changed**: it was claimed and never decided, nothing was executed. Recover it by hand (Manual recovery) |
 | `completed`, `failed`, `rejected` | nothing |
 | anything else: a dry-run command, no or several `execution_started`, conflicting or duplicate terminal events, a malformed payload, a status other than `executing` | nothing; needs a person (exit 4) |

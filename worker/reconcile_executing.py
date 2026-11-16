@@ -62,6 +62,7 @@ import argparse
 import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 import audit_store
@@ -255,6 +256,22 @@ def _valid_simulation_event(event_type: str, payload: object) -> bool:
     return True
 
 
+def _event_time(event: Mapping[str, Any]) -> datetime | None:
+    """The event's ``created_at`` as a timezone-aware time, or None if missing or unusable.
+
+    Only this stored field is used to order events: never list position or event id.
+    A time without a zone is ambiguous, so it counts as unusable.
+    """
+    value = event.get("created_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
 def assess(
     command_id: str,
     row: Mapping[str, Any] | None,
@@ -333,6 +350,26 @@ def assess(
                 ACTION_NEEDS_PERSON,
                 f"the {terminal[0]} payload is not a valid simulation payload; set the status "
                 "by hand (see Manual recovery)",
+                mode,
+            )
+        # The status-only path trusts the terminal event only if it provably came AFTER
+        # execution_started, by stored timestamp. Anything else is not guessed at.
+        started_at = _event_time(started[0])
+        terminal_at = _event_time(event)
+        if started_at is None or terminal_at is None:
+            return verdict(
+                ACTION_NEEDS_PERSON,
+                f"cannot tell whether {terminal[0]} came after execution_started: a created_at "
+                "is missing or unreadable. Inspect the timeline by hand (see Manual recovery)",
+                mode,
+            )
+        if terminal_at <= started_at:
+            return verdict(
+                ACTION_NEEDS_PERSON,
+                f"{terminal[0]} is not strictly later than execution_started "
+                + ("(identical timestamps)" if terminal_at == started_at else "(it is earlier)")
+                + ": the order is not trustworthy. Inspect the timeline by hand "
+                "(see Manual recovery)",
                 mode,
             )
         target = _STATUS_FOR_EVENT[terminal[0]]

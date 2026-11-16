@@ -64,7 +64,7 @@ def event(event_type: str, n: int, payload: Any = None, command_id: str = COMMAN
         "event_type": event_type,
         "message": f"{event_type} message",
         "payload": {} if payload is None else payload,
-        "created_at": f"2026-11-14T10:00:{n:02d}+00:00",
+        "created_at": f"2026-11-14T10:{n // 60:02d}:{n % 60:02d}+00:00",
     }
 
 
@@ -100,15 +100,30 @@ def command(status: str = "executing", **row: Any) -> dict[str, Any]:
     return result
 
 
+class OrderedClient(FakeClient):
+    """FakeClient whose inserted audit_events get a created_at later than every fixture event.
+
+    The shared fake stamps every insert with one fixed time, which would put a freshly
+    written terminal event BEFORE the fixture's execution_started. A real database
+    stamps it with the (later) time of the insert.
+    """
+
+    def _execute(self, call: Any) -> Any:
+        response = super()._execute(call)
+        if call.op == "insert" and call.table == "audit_events":
+            self.tables["audit_events"][-1]["created_at"] = "2026-11-14T11:00:00+00:00"
+        return response
+
+
 def stranded_client(status: str = "executing", events: list[dict[str, Any]] | None = None,
                     **row: Any) -> FakeClient:
-    return FakeClient(commands=[command(status, **row)],
+    return OrderedClient(commands=[command(status, **row)],
                       audit_events=timeline() if events is None else events)
 
 
 def same_tables(client: FakeClient) -> FakeClient:
     """A fresh client (no injected failures) over the same stored rows: a later run."""
-    return FakeClient(commands=client.tables["commands"], audit_events=client.tables["audit_events"])
+    return OrderedClient(commands=client.tables["commands"], audit_events=client.tables["audit_events"])
 
 
 class ReconcileTestCase(unittest.TestCase):
@@ -339,7 +354,9 @@ class CandidateSelectionTests(ReconcileTestCase):
                      "SOURCE_EXECUTION_STARTED", "ACTION_NOT_ELIGIBLE", "_utc_now"):
             self.assertFalse(hasattr(rc, name), name)
         source = (WORKER_DIR / "reconcile_executing.py").read_text(encoding="utf-8")
-        for word in ("datetime", "timedelta", "time.time", "monotonic"):
+        # datetime is imported only to compare two stored event timestamps; there is
+        # still no clock read, age or duration.
+        for word in ("timedelta", "time.time", "monotonic", "now(", "utcnow", "today("):
             self.assertNotIn(word, source)
 
 
@@ -522,6 +539,87 @@ class ApplyTests(ReconcileTestCase):
         self.assertIn("changed between two reads", result.error or "")
         self.assertEqual(self.writes(client), [])
         self.assertEqual(len(self.stored_events(client, "execution_failed")), 1)  # only the one that landed
+
+
+class TerminalOrderTests(ReconcileTestCase):
+    """The status-only path needs the terminal event strictly later than execution_started."""
+
+    def ordered(self, started_at: Any, terminal_at: Any, terminal: str = "execution_failed") -> list[dict[str, Any]]:
+        payload = failed_payload() if terminal == "execution_failed" else completed_payload()
+        rows = timeline((terminal, payload))
+        rows[-2]["created_at"] = started_at  # execution_started
+        rows[-1]["created_at"] = terminal_at
+        return rows
+
+    def test_terminal_after_started_is_accepted(self) -> None:
+        for terminal, target in (("execution_failed", "failed"), ("execution_completed", "completed")):
+            with self.subTest(terminal=terminal):
+                rows = self.ordered("2026-11-14T10:00:05.000001+00:00",
+                                    "2026-11-14T10:00:05.000002+00:00", terminal)
+                found = assess(COMMAND_ID, command(), rows)
+                self.assertEqual(found.action, ACTION_FINISH_STATUS)
+                self.assertEqual(found.target_status, target)
+
+    def test_different_utc_offsets_are_compared_as_instants(self) -> None:
+        rows = self.ordered("2026-11-14T12:00:00+02:00", "2026-11-14T10:00:01Z")
+        self.assertEqual(assess(COMMAND_ID, command(), rows).action, ACTION_FINISH_STATUS)
+
+    def test_terminal_before_started_is_refused(self) -> None:
+        # List order says started, then terminal; only the timestamps count.
+        rows = self.ordered("2026-11-14T10:00:09+00:00", "2026-11-14T10:00:08+00:00")
+        found = assess(COMMAND_ID, command(), rows)
+        self.assertEqual(found.action, ACTION_NEEDS_PERSON)
+        self.assertIsNone(found.target_status)
+        self.assertIn("earlier", found.reason)
+
+    def test_identical_timestamps_are_refused(self) -> None:
+        stamp = "2026-11-14T10:00:09.123456+00:00"
+        found = assess(COMMAND_ID, command(), self.ordered(stamp, stamp))
+        self.assertEqual(found.action, ACTION_NEEDS_PERSON)
+        self.assertIn("identical", found.reason)
+
+    def test_missing_or_unparseable_timestamps_are_refused(self) -> None:
+        good = "2026-11-14T10:00:09+00:00"
+        bad_values = {"missing": None, "empty": "", "garbage": "not a time", "a number": 1731578409,
+                      "no time zone": "2026-11-14T10:00:10"}
+        for name, bad in bad_values.items():
+            for where in ("started", "terminal"):
+                with self.subTest(bad=name, where=where):
+                    rows = self.ordered(bad if where == "started" else good,
+                                        bad if where == "terminal" else "2026-11-14T10:00:10+00:00")
+                    if bad is None:
+                        del rows[-2 if where == "started" else -1]["created_at"]
+                    found = assess(COMMAND_ID, command(), rows)
+                    self.assertEqual(found.action, ACTION_NEEDS_PERSON)
+                    self.assertIn("created_at", found.reason)
+
+    def test_the_order_is_not_guessed_from_list_position_or_event_id(self) -> None:
+        rows = self.ordered("2026-11-14T10:00:09+00:00", "2026-11-14T10:00:08+00:00")
+        rows.reverse()  # terminal now listed first; ids unchanged
+        self.assertEqual(assess(COMMAND_ID, command(), rows).action, ACTION_NEEDS_PERSON)
+
+    def test_a_refused_command_writes_nothing_even_with_both_flags(self) -> None:
+        stamp = "2026-11-14T10:00:09+00:00"
+        cases = {
+            "before": self.ordered("2026-11-14T10:00:09+00:00", "2026-11-14T10:00:08+00:00"),
+            "tie": self.ordered(stamp, stamp),
+            "unparseable": self.ordered(stamp, "garbage"),
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                client = stranded_client(events=rows)
+                result = self.apply(client)
+                self.assertEqual(result.assessment.action, ACTION_NEEDS_PERSON)
+                self.assertFalse(result.applied)
+                self.assertEqual(result.events_written, ())
+                self.assertIsNone(result.status_after)
+                self.assertEqual(self.writes(client), [])
+
+    def test_the_no_terminal_path_still_needs_no_timestamp(self) -> None:
+        rows = timeline()
+        for row in rows:
+            row.pop("created_at")
+        self.assertEqual(assess(COMMAND_ID, command(), rows).action, ACTION_RECORD_FAILURE)
 
 
 class StatusOnlyTests(ReconcileTestCase):
