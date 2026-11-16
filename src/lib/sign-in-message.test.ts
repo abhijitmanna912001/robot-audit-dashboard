@@ -1,40 +1,48 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  SIGN_IN_EMAIL_RATE_LIMITED,
   SIGN_IN_FAILED,
-  SIGN_IN_SENT,
+  SIGN_IN_RATE_LIMITED,
+  SIGN_IN_UNAVAILABLE,
   signInMessage,
 } from "./sign-in-message.ts";
 
 const EMAIL = "someone@example.test";
 
-test("over_email_send_rate_limit (429) shows the hour message, without raw text or the email", () => {
-  const msg = signInMessage({
-    code: "over_email_send_rate_limit",
-    status: 429,
-    message: `email rate limit exceeded for ${EMAIL}`,
-  });
-  assert.equal(msg, "Too many sign-in emails were sent recently. Please try again in about an hour.");
-  assert.equal(msg, SIGN_IN_EMAIL_RATE_LIMITED);
-  assert.ok(!msg.includes(EMAIL) && !msg.includes("exceeded"));
+test("wrong password and unknown email (4xx) give the identical generic message", () => {
+  const wrong = signInMessage({ code: "invalid_credentials", status: 400, message: `bad password for ${EMAIL}` });
+  const unknown = signInMessage({ code: "invalid_credentials", status: 400, message: "Invalid login credentials" });
+  assert.equal(wrong, "Email or password is incorrect.");
+  assert.equal(wrong, unknown);
+  assert.equal(wrong, SIGN_IN_FAILED);
+  assert.equal(signInMessage({ code: "user_not_found", status: 422, message: EMAIL }), SIGN_IN_FAILED);
+  assert.ok(!wrong.includes(EMAIL));
 });
 
-test("every other error keeps the generic messages and never leaks raw text or the email", () => {
+test("rate limit (429 or over_request_rate_limit) shows the wait message", () => {
+  const want = "Too many sign-in attempts. Please wait a few minutes and try again.";
+  assert.equal(SIGN_IN_RATE_LIMITED, want);
+  assert.equal(signInMessage({ code: "over_request_rate_limit", status: 429, message: `slow down ${EMAIL}` }), want);
+  assert.equal(signInMessage({ status: 429, message: "x" }), want);
+  assert.equal(signInMessage({ code: "over_request_rate_limit", message: "x" }), want);
+});
+
+test("network and 5xx failures show the try-again message, never raw text", () => {
+  const want = "Could not sign in right now. Please try again in a moment.";
+  assert.equal(SIGN_IN_UNAVAILABLE, want);
   const raw = `boom for ${EMAIL}`;
-  const cases: [unknown, string][] = [
-    [{ code: "over_request_rate_limit", status: 429, message: raw }, SIGN_IN_FAILED], // other 429
-    [{ status: 429, message: raw }, SIGN_IN_FAILED],
-    [{ code: "unexpected_failure", status: 500, message: raw }, SIGN_IN_FAILED],
-    [{ message: raw }, SIGN_IN_FAILED], // network failure, no status
-    [{ code: "otp_disabled", status: 422, message: raw }, SIGN_IN_SENT], // unknown address looks like success
-    [{ code: "email_address_invalid", status: 400, message: raw }, SIGN_IN_SENT],
-    [null, SIGN_IN_SENT],
-    [undefined, SIGN_IN_SENT],
+  const cases: unknown[] = [
+    { message: raw }, // network failure, no status
+    new TypeError(raw),
+    { code: "unexpected_failure", status: 500, message: raw },
+    { status: 503, message: raw },
+    "string error",
+    null,
+    undefined,
   ];
-  for (const [err, want] of cases) {
+  for (const err of cases) {
     const got = signInMessage(err);
-    assert.equal(got, want, JSON.stringify(err));
+    assert.equal(got, want);
     assert.ok(!got.includes(EMAIL) && !got.includes("boom"));
   }
 });

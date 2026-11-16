@@ -29,4 +29,4 @@ export async function proxy(request: NextRequest) {
   return response;
 }
 
-export const config = { matcher: ["/", "/api/commands"] };
+export const config = { matcher: ["/", "/account", "/api/commands"] };

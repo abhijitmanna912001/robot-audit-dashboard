@@ -71,16 +71,17 @@ Worker (Python 3.10+): see `worker/README.md`.
 
 ## Operator sign-in
 
-Only invited operators can submit commands: email magic link (Supabase Auth, cookie session via `@supabase/ssr`), an allowlist in the server-only `OPERATORS` variable, and a rate limit. Each command records the operator's display name (`submitted_by`) and Auth user id (`submitted_by_id`). **Emails are never stored or shown**: `commands` and `audit_events` are publicly readable.
+Only operators can submit commands: email + password sign-in (Supabase Auth, cookie session via `@supabase/ssr`), an allowlist in the server-only `OPERATORS` variable, and a rate limit. Each command records the operator's display name (`submitted_by`) and Auth user id (`submitted_by_id`). **Emails are never stored or shown**: `commands` and `audit_events` are publicly readable.
 
 Manual setup (nothing here is automated):
 
-1. **Supabase, Authentication, Providers:** enable **Email** (magic link on). Leave "Confirm email" on.
-2. **Turn off public sign-ups:** Authentication, Sign In / Providers, disable "Allow new users to sign up".
-3. **URL configuration:** set the **Site URL** to the production domain. Add these **Redirect URLs**: `http://localhost:3000/auth/callback`, `https://<production-domain>/auth/callback`, and for Vercel previews `https://*-<your-vercel-slug>.vercel.app/auth/callback`.
-4. **Invite the operators:** Authentication, Users, "Invite user", one per operator (the only way accounts exist once sign-ups are off).
-5. **Run the migration before deploying:** in the SQL editor run `db/004_command_submitted_by_check.sql`, then `db/004_command_submitted_by.sql`, then `db/004_command_submitted_by_test.sql` (rolls back). The route writes the new columns, so deploying first makes every submit fail with a generic 500 (nothing is saved).
-6. **Vercel, Settings, Environment Variables:** add `OPERATORS` (Production, Preview and Development), then redeploy. Never prefix it with `NEXT_PUBLIC_`. Locally, add the same line to your own `.env.local`.
+1. **Supabase, Authentication, Sign In / Providers:** the **Email** provider stays enabled, with password sign-in. No emails are sent for sign-in (Supabase's built-in email service only sends 2 per hour).
+2. **Keep public sign-ups off:** "Allow new users to sign up" stays disabled.
+3. **Minimum password length:** in the same Auth settings, set it to **12**. This is the real enforcement; the form check is only quick feedback.
+4. **Create the operators:** Authentication, Users, **Create new user**, enter the email and a temporary password, and tick **Auto Confirm User**. This is the only way accounts exist once sign-ups are off.
+5. **Each operator changes the temporary password** at `/account` (header, "Account") after the first sign-in.
+6. **Run the migration before deploying:** in the SQL editor run `db/004_command_submitted_by_check.sql`, then `db/004_command_submitted_by.sql`, then `db/004_command_submitted_by_test.sql` (rolls back). The route writes the new columns, so deploying first makes every submit fail with a generic 500 (nothing is saved).
+7. **Vercel, Settings, Environment Variables:** add `OPERATORS` (Production, Preview and Development), then redeploy. Never prefix it with `NEXT_PUBLIC_`. Locally, add the same line to your own `.env.local`.
 
 `OPERATORS` maps each allowed email to a display name, comma separated:
 

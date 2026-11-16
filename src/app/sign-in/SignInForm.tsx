@@ -1,34 +1,40 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { SIGN_IN_FAILED as FAILED, signInMessage } from "@/lib/sign-in-message";
+import { SIGN_IN_UNAVAILABLE, signInMessage } from "@/lib/sign-in-message";
 import { getBrowserClient } from "@/lib/supabase/browser";
 
-// Email magic link. The answer is the same whether or not the email is allowlisted, so this form
-// never reveals who is an operator. The server route checks the allowlist on every submission.
-export function SignInForm({ failedBefore }: { failedBefore: boolean }) {
+const input =
+  "h-10 rounded-ui-sm border border-input bg-surface px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/30";
+
+// Email + password. Every failure shows one generic message (see signInMessage), so this form never
+// reveals whether an email exists or is an operator. The server route checks the allowlist on every
+// submission.
+export function SignInForm() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(
-    failedBefore ? "That sign-in link did not work. Request a new one." : null,
-  );
+  const [message, setMessage] = useState<string | null>(null);
 
   async function submit(e: { preventDefault: () => void }) {
     e.preventDefault();
     const value = email.trim();
-    if (busy || !value) return;
+    if (busy || !value || !password) return;
     setBusy(true);
+    setMessage(null);
     try {
-      const auth = getBrowserClient();
-      const { error } = await auth.auth.signInWithOtp({
-        email: value,
-        options: { shouldCreateUser: false, emailRedirectTo: `${window.location.origin}/auth/callback` },
-      });
-      // The message depends only on the error code and status, never on its text or the address.
-      setMessage(signInMessage(error));
+      const { error } = await getBrowserClient().auth.signInWithPassword({ email: value, password });
+      if (error) {
+        setMessage(signInMessage(error));
+        return;
+      }
+      router.replace("/");
+      router.refresh();
     } catch {
-      setMessage(FAILED);
+      setMessage(SIGN_IN_UNAVAILABLE); // thrown: the request never completed
     } finally {
       setBusy(false);
     }
@@ -46,13 +52,25 @@ export function SignInForm({ failedBefore }: { failedBefore: boolean }) {
         required
         value={email}
         onChange={(e) => setEmail(e.target.value)}
-        className="h-10 rounded-ui-sm border border-input bg-surface px-3 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/30"
+        className={input}
+      />
+      <label htmlFor="password" className="text-sm font-medium">
+        Password
+      </label>
+      <input
+        id="password"
+        type="password"
+        autoComplete="current-password"
+        required
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        className={input}
       />
       <Button type="submit" disabled={busy} className="h-10 rounded-ui-sm">
-        {busy ? "Sending..." : "Email me a sign-in link"}
+        {busy ? "Signing in..." : "Sign in"}
       </Button>
       {message && (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="alert" className="text-sm text-muted-foreground">
           {message}
         </p>
       )}
