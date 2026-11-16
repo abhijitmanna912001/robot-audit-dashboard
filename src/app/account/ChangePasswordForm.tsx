@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   PW_CHANGED,
@@ -17,6 +19,7 @@ const input =
 // Verifies the current password by signing in with it, then sets the new one. Messages are generic;
 // raw errors are never shown. The email is read from the session and never rendered.
 export function ChangePasswordForm() {
+  const router = useRouter();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -56,7 +59,9 @@ export function ChangePasswordForm() {
       setCurrent("");
       setNext("");
       setConfirm("");
-      setMessage(PW_CHANGED);
+      // The Toaster lives in the root layout, so the toast survives the client navigation.
+      toast.success(PW_CHANGED);
+      router.replace("/");
     } catch {
       setMessage(PW_FAILED);
     } finally {

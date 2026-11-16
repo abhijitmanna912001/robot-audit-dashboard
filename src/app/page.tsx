@@ -3,6 +3,7 @@ import { Dashboard } from "@/components/Dashboard";
 import { Brand } from "@/components/Header";
 import { fetchSnapshot } from "@/lib/queries";
 import { cookies } from "next/headers";
+import { connection } from "next/server";
 import { resolveAccess } from "@/lib/access";
 import { createAnonServerClient } from "@/lib/supabase/anon";
 import { createAuthServerClient } from "@/lib/supabase/auth-server";
@@ -11,6 +12,7 @@ type SearchParams = Promise<{ command?: string }>;
 
 // Reads searchParams and the database, so it must sit inside <Suspense>.
 async function LoadedDashboard({ searchParams }: { searchParams: SearchParams }) {
+  await connection(); // always render per request, never at prerender time
   const { command } = await searchParams;
 
   let commands: Awaited<ReturnType<typeof fetchSnapshot>> = { ok: false };

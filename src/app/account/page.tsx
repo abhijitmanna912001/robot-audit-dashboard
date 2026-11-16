@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { Brand } from "@/components/Header";
 import { createAuthServerClient } from "@/lib/supabase/auth-server";
 import { ChangePasswordForm } from "./ChangePasswordForm";
@@ -11,6 +12,7 @@ export const metadata = { title: "Account" };
 // Signed-in only. Reads cookies (runtime data), so it sits inside <Suspense>. Any failure to
 // identify the user sends the visitor to /sign-in. The email is never shown.
 async function Guarded() {
+  await connection(); // always render per request, never at prerender time
   let signedIn = false;
   try {
     const auth = createAuthServerClient(await cookies());
