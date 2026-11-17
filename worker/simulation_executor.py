@@ -49,10 +49,11 @@ Deadlines (absolute ``time.monotonic()``; ``T0`` is when ``run_rehearsal``
 starts, after the session's children were started and READY):
 
 * overall ``D_total = T0 + total_s``;
-* normal work ``D_work = D_total - recovery_reserve_s``. Every call, movements
-  included, is cut off at ``D_work``, so no movement call can use the recovery
-  reserve; a timeout of a call whose budget was capped by ``D_work`` is
-  ``overall_timeout``;
+* normal work ``D_work = D_total - recovery_reserve_s``. A call (movements
+  included) is issued only if its WHOLE limit fits before ``D_work``; otherwise
+  nothing is sent and the run ends as ``overall_timeout`` with the session still
+  healthy. So no call can use the recovery reserve, and none is handed a sliver of
+  time that cannot cover a round trip (which would terminate a healthy child);
 * termination of a timed-out or crashed child: ``TERMINATE_LIMIT_S`` (inside
   the supervisor call, one absolute deadline per child, never granted twice),
   NOT taken from the stop budget. A child that cannot be confirmed stopped does
@@ -61,8 +62,10 @@ starts, after the session's children were started and READY):
 * recovery starts at ``R0`` (failure handling begins, after any termination).
   The stop deadline is ``min(R0 + stop_s, D_total + TERMINATE_LIMIT_S -
   telemetry_read_s - disconnect_s)``; no stop is attempted once it has passed.
-  The last read and the disconnect keep their own budgets after that, and
-  neither is started once ``D_total + TERMINATE_LIMIT_S`` has passed.
+  The last read and the disconnect keep their own budgets after that. The last
+  read is started only if its whole limit fits before ``D_total +
+  TERMINATE_LIMIT_S - disconnect_s``; the disconnect is not started once ``D_total
+  + TERMINATE_LIMIT_S`` has passed (a late, short disconnect is cleanup only).
 
 On a failure:
 
@@ -342,13 +345,28 @@ class _Rehearsal:
 
     # -- deadlines -----------------------------------------------------------
 
-    def _work_budget(self, limit_s: float) -> tuple[float, bool]:
-        """(absolute deadline of the call, whether ``D_work`` capped it)."""
+    def _work_budget(self, limit_s: float, what: str) -> tuple[float, bool]:
+        """(absolute deadline of the call, whether ``D_work`` capped it).
+
+        A call is started only if its WHOLE limit fits before ``D_work``; otherwise
+        nothing is sent and the run ends as overall_timeout with the session still
+        healthy. A call handed less than its limit may not finish, and the supervisor
+        ends the child of a call that does not finish: a healthy child would be killed,
+        and for the movement dispatch (one deadline for both handshake round trips) a
+        movement could be sent and its reply cut off, leaving no live session to stop it.
+        The check and the deadline use one clock reading, so a started call gets exactly
+        ``limit_s``.
+        """
         now = time.monotonic()
         remaining = self.work_deadline - now
         if remaining <= 0:
             raise _Abort("overall_timeout", "the total execution deadline passed")
-        return now + min(limit_s, remaining), remaining <= limit_s
+        if remaining < limit_s:
+            raise _Abort(
+                "overall_timeout",
+                f"the total execution deadline leaves no time for {what}; it was not started",
+            )
+        return now + limit_s, remaining <= limit_s
 
     def _stop_deadline(self) -> float:
         r0 = self.recovery_start if self.recovery_start is not None else time.monotonic()
@@ -374,7 +392,7 @@ class _Rehearsal:
         return _Abort(kind, f"{what} failed ({type(exc).__name__})")
 
     def _call(self, what: str, method: str, args: Callable[[float], tuple[Any, ...]], limit_s: float, kind: str) -> Any:
-        deadline, capped = self._work_budget(limit_s)
+        deadline, capped = self._work_budget(limit_s, what)
         try:
             return self.session.call(method, args(max(0.0, deadline - time.monotonic())), deadline)
         except Exception as exc:
@@ -412,8 +430,11 @@ class _Rehearsal:
                 if time.monotonic() >= self.work_deadline:
                     raise _Abort("overall_timeout", f"the total execution deadline passed while waiting for the {label}")
                 raise _Abort(timeout_kind, f"the {label} was not reached within its time limit")
+            # The phase deadline only decides whether a poll STARTS (the check above): a
+            # read that starts in time gets its full read limit, so it may end after the
+            # phase deadline. Its reading still counts: the read began before the deadline.
             try:
-                snapshot = self._read(label, min(self.timeouts.telemetry_read_s, remaining), not_before)
+                snapshot = self._read(label, self.timeouts.telemetry_read_s, not_before)
             except TelemetryRejected as exc:
                 # A reading from before the movement is not evidence yet: keep
                 # waiting. Any other refusal means the telemetry cannot be trusted.
@@ -456,7 +477,7 @@ class _Rehearsal:
         BEFORE the child is allowed to call ``move_joint``. A refusal or a crash
         before that acknowledgement means nothing was sent.
         """
-        deadline, capped = self._work_budget(self.timeouts.dispatch_s)
+        deadline, capped = self._work_budget(self.timeouts.dispatch_s, what)
 
         acknowledged_once = False
 
@@ -616,16 +637,23 @@ class _Rehearsal:
         return STOP_UNCONFIRMED  # a fresh session's stop is never a confirmation
 
     def _last_telemetry(self) -> JointSnapshot | None:
-        """One fresh, independent read through the live session. None unless it validates."""
+        """One fresh, independent read through the live session. None unless it validates.
+
+        Like every other call it is issued only with its FULL limit: if ``telemetry_read_s``
+        does not fit before the end of the recovery-read window (``D_total +
+        TERMINATE_LIMIT_S - disconnect_s``) it is not started, so a healthy child is not
+        terminated by a read that cannot finish. Normally it always fits (the stop deadline
+        keeps ``telemetry_read_s`` free); it does not when recovery itself started late.
+        """
         if not getattr(self.session, "healthy", False):
             return None
         now = time.monotonic()
-        deadline = min(now + self.timeouts.telemetry_read_s,
-                       self.deadline + TERMINATE_LIMIT_S - self.timeouts.disconnect_s)
-        if deadline - now <= 0:
+        window_end = self.deadline + TERMINATE_LIMIT_S - self.timeouts.disconnect_s
+        if window_end - now < self.timeouts.telemetry_read_s:
             return None
+        budget = self.timeouts.telemetry_read_s
         try:
-            raw = self.session.call("read_telemetry", (deadline - now,), deadline)
+            raw = self.session.call("read_telemetry", (budget,), now + budget)
             return validate_telemetry(raw, now=_utc_now())
         except (TelemetryRejected, Exception):
             return None

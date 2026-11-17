@@ -27,6 +27,8 @@ from simulation_executor import (
     run_rehearsal,
 )
 from simulation_gates import LiveSimulationGates, load_shared_limits
+from simulation_child import MAX_MOVES
+from simulation_supervisor import SessionRefused, SessionTimeout, SessionUnusable, TwinCallFailed
 from tests.fake_twin import ALL_CONFIRMED, FAST, HANG, START, FakeTwin
 from tests.fake_twin_child import open_process_session
 from tests.inprocess_session import InProcessSession
@@ -736,12 +738,50 @@ class TimeoutTests(ExecutorCase):
         self.assertLess(self.elapsed, FAST.total_s)
 
     def test_overall_timeout_is_handled_and_recovery_still_fits(self) -> None:
-        # Movement phases get 0.15 s in total; recovery keeps its own reserve.
-        tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.15)
+        # DETERMINISTIC (fake clock, fake pause, fake session: no real time, no scheduling).
+        # Work window 0.5 s, recovery keeps its own reserve. A call is issued only if its
+        # whole limit (0.4 s) fits before the work deadline, so the start read and the
+        # dispatch go out (the window is 0.5 s and the fake calls take 0.5 ms each); the
+        # run then ends when the polling reads no longer fit. Real-clock version below.
+        tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.5)
         self.twin.ignore_moves = {1}
-        outcome = self.failure("overall_timeout", timeouts=tight)
-        self.assertLess(self.elapsed, tight.total_s)
+        clock = _FakeClock()
+        session = _ClockedSession(self.twin, clock, lambda method, now, budget: 0.0005)
+        with mock.patch.object(simulation_executor, "time", clock):
+            outcome = run_rehearsal(snapshot(), session, tight)
+        session.close()
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+        self.assertLessEqual(len(outcome.detail), 200)
+        self.assertLess(clock.now - _FakeClock.START, tight.total_s)  # elapsed, in fake time
         self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(self.twin.names().count("stop"), 1)
+        self.assertEqual(outcome.stop, "confirmed")
+        self.assertIsNotNone(outcome.last_telemetry)
+        self.assertEqual(len(self.twin.moves()), 1)
+        # the dispatch was issued with its whole limit, and the child was never terminated
+        dispatch_budgets = [b for m, _at, b in session.calls if m == "dispatch_move"]
+        self.assertEqual(len(dispatch_budgets), 1)
+        self.assertAlmostEqual(dispatch_budgets[0], tight.dispatch_s, places=9)
+        self.assertFalse(session.terminated)
+
+    def test_overall_timeout_after_dispatch_with_a_real_child_and_the_real_clock(self) -> None:
+        """INTEGRATION CHECK, NOT DETERMINISTIC (real child process, real clock).
+
+        The window (1.0 s) leaves about 0.6 s of real time for connect, two mode checks, the
+        start read and the dispatch (each 0.4 s limit, milliseconds in practice). If this
+        machine stalls longer than that, the dispatch is legitimately never issued and
+        nothing is proven, so the test SKIPS instead of passing or failing falsely. The
+        deterministic proof is the test above."""
+        # target_move_s is raised so the work deadline, not the 0.25 s target phase, ends the run
+        tight = dataclasses.replace(FAST, target_move_s=5.0, total_s=FAST.recovery_reserve_s + 1.0)
+        self.twin.ignore_moves = {1}
+        outcome = self.run_it(timeouts=tight, fresh_session_stop="unsupported")
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+        if not outcome.target_dispatched:
+            self.skipTest("the machine stalled: the dispatch was never reached; nothing proven")
+        self.assertLess(self.elapsed, tight.total_s)
         self.assertEqual(self.twin.names().count("stop"), 1)
         self.assertEqual(outcome.stop, "confirmed")
         self.assertIsNotNone(outcome.last_telemetry)
@@ -752,6 +792,18 @@ class TimeoutTests(ExecutorCase):
         self.twin.fail["connect"] = HANG
         outcome = self.failure("overall_timeout", timeouts=tight)
         self.assert_nothing_sent(outcome)
+        self.assertLess(self.elapsed, tight.total_s)
+
+    def test_a_work_window_of_0_15_s_ends_before_anything_is_sent(self) -> None:
+        # The window the test above used to run with. The first call (connect, limit 0.4 s)
+        # does not fit in 0.15 s, so it is never issued: the session stays healthy, no
+        # movement, no stop, overall_timeout.
+        tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.15)
+        self.twin.ignore_moves = {1}
+        outcome = self.failure("overall_timeout", timeouts=tight)
+        self.assert_nothing_sent(outcome)
+        self.assertEqual(self.twin.moves(), [])
+        self.assertNotIn("connect", self.twin.names())
         self.assertLess(self.elapsed, tight.total_s)
 
     def test_a_successful_run_does_not_wait_for_the_limits(self) -> None:
@@ -841,6 +893,609 @@ class SupervisedInterruptionTests(ExecutorCase):
         self.assertEqual(outcome.stop, "confirmed")
         self.assertFalse(outcome.manual_verification_required)
         self.assertEqual(self.twin.names().count("stop"), 1)
+
+
+class _SliverClock:
+    """Stands in for the ``time`` module INSIDE simulation_executor only.
+
+    The final, shortened poll pause of a wait phase (the one that ends at the phase
+    deadline) is cut so it returns SLIVER_S before that deadline, as an early wake-up
+    does. Every other pause and every clock read is real. No load is needed.
+    """
+
+    SLIVER_S = 0.00003  # far shorter than any pipe round trip to a child process
+
+    def __init__(self, poll_interval_s: float) -> None:
+        self.poll_interval_s = poll_interval_s
+        self.cut_pauses = 0
+        self.seen_remaining_s: list[float] = []  # what the executor saw right after each cut pause
+        self._last_now = 0.0
+        self._expect: float | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def monotonic(self) -> float:
+        self._last_now = time.monotonic()
+        if self._expect is not None:  # the executor's first clock read after a cut pause
+            self.seen_remaining_s.append(self._expect - self._last_now)
+            self._expect = None
+        return self._last_now
+
+    def sleep(self, seconds: float) -> None:
+        if seconds >= self.poll_interval_s * 0.999:
+            time.sleep(seconds)
+            return
+        # The executor computed ``seconds`` as phase_deadline - (its last clock read).
+        target = self._last_now + seconds  # exactly the phase deadline
+        time.sleep(max(0.0, seconds - 0.010))
+        while time.monotonic() < target - self.SLIVER_S:
+            pass
+        self._expect = target
+        self.cut_pauses += 1
+
+
+class _RecordingSession:
+    """Delegates to a real session and records the budget each telemetry read was given."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        self.read_budgets_s: list[float] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def call(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        if method == "read_telemetry":
+            self.read_budgets_s.append(deadline - time.monotonic())
+        return self._session.call(method, args, deadline)
+
+
+class RealChildSliverIntegrationTest(ExecutorCase):
+    """INTEGRATION CHECK, NOT DETERMINISTIC: the same property with a REAL supervised child.
+
+    The sliver is placed by a real-time spin, so a pre-empted test thread can miss it; the
+    test then SKIPS (it never passes falsely). The deterministic proof of the invariant is
+    ``DeterministicDeadlineTests`` (fake clock, fake pause, fake session: no real time).
+    This one only shows that the real supervisor and a real pipe agree with the fake.
+    """
+
+    MIN_USEFUL_READ_S = 0.001  # no read may be issued with less than 1 ms
+
+    def run_with_sliver(self, **timeout_options: Any) -> tuple[Any, _RecordingSession, _SliverClock, bool]:
+        session = open_process_session(self, self.twin, fresh_session_stop="unsupported")
+        recording = _RecordingSession(session)
+        # poll_interval_s 0.2 (its maximum) against a 0.25 s phase: the first pause is a full
+        # one and the SECOND is always the shortened one that ends at the phase deadline.
+        timeouts = dataclasses.replace(FAST, **{"poll_interval_s": 0.2, **timeout_options})
+        clock = _SliverClock(timeouts.poll_interval_s)
+        with mock.patch.object(simulation_executor, "time", clock):
+            outcome = run_rehearsal(snapshot(), recording, timeouts)
+        still_healthy = session.healthy  # read BEFORE close: was the child killed during the run?
+        session.close()
+        return outcome, recording, clock, still_healthy
+
+    def check(self, kind: str, result: tuple[Any, _RecordingSession, _SliverClock, bool]) -> None:
+        outcome, recording, clock, still_healthy = result
+        self.assertGreaterEqual(clock.cut_pauses, 1, "the sliver was not set up; the test proves nothing")
+        if not (clock.seen_remaining_s and 0 < clock.seen_remaining_s[0] < self.MIN_USEFUL_READ_S):
+            # Only the FIRST look after the cut pause is the sliver this test sets up (a later
+            # one may be past the deadline, after a full-limit read). If that first look was
+            # already past the deadline, the thread was pre-empted: no sliver was presented,
+            # and nothing is proven either way.
+            self.skipTest(f"the sliver was not presented (executor saw {clock.seen_remaining_s})")
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        # Each property is checked on its own, so a failure shows every one that broke.
+        with self.subTest("no read is issued with a sliver of the phase's time"):
+            self.assertGreaterEqual(min(recording.read_budgets_s), self.MIN_USEFUL_READ_S)
+        with self.subTest("the healthy twin child is not terminated"):
+            self.assertTrue(still_healthy)
+        with self.subTest("the error kind is the phase timeout"):
+            self.assertEqual(outcome.kind, kind, outcome.detail)
+        # The same outcome as for an ordinary phase timeout (see SupervisedInterruptionTests).
+        with self.subTest("the stop is sent through the live session and confirmed"):
+            self.assertEqual(outcome.stop, "confirmed")
+            self.assertFalse(outcome.manual_verification_required)
+            self.assertEqual(self.twin.names().count("stop"), 1)
+
+    def test_a_target_phase_ending_in_a_sliver_with_a_real_child(self) -> None:
+        self.twin.ignore_moves = {1}
+        self.check("target_timeout", self.run_with_sliver())
+
+
+class _FakeClock:
+    """A complete fake of ``time`` for simulation_executor: monotonic() and sleep() only.
+
+    ``sleep`` never sleeps: it moves the clock. ``early_wake_s``: every pause returns that
+    much EARLY (an early wake-up), so the pause that ends a phase leaves a sliver of it.
+    ``land_at``: a pause that would cross that instant stops exactly on it instead.
+    Nothing here depends on real time or scheduling.
+    """
+
+    START = 1024.0  # a power of two: every figure below is exact in binary floating point
+
+    def __init__(self, early_wake_s: float = 0.0, land_at: float | None = None) -> None:
+        self.now = self.START
+        self.early_wake_s = early_wake_s
+        self.land_at = land_at
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        target = self.now + max(0.0, seconds - self.early_wake_s)
+        if self.land_at is not None and self.now < self.land_at <= target:
+            target = self.land_at
+        self.now = max(self.now, target)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+class _ClockedSession(InProcessSession):
+    """The fake twin session with the SUPERVISOR's timing rules, on a fake clock.
+
+    Every call takes ``latency(method, now, budget)`` of fake time. A call whose budget is
+    shorter than that cannot finish: like ``ProcessTwinSession._receive`` it runs to its
+    deadline, TERMINATES the child (``terminated``) and raises ``SessionTimeout``. Each
+    call is recorded as (method, issued_at, budget).
+    """
+
+    def __init__(self, twin: Any, clock: _FakeClock, latency: Any) -> None:
+        super().__init__(twin)
+        self.clock = clock
+        self.latency = latency
+        self.terminated = False
+        self.calls: list[tuple[str, float, float]] = []
+        self.after: Any = None  # called with the method name after each call completes
+
+    @property
+    def healthy(self) -> bool:
+        return not self.closed and not self.terminated
+
+    def call_with_gates(self, method: str, args: tuple[Any, ...], deadline: float) -> tuple[Any, bool, bool]:
+        budget = deadline - self.clock.now
+        self.calls.append((method, self.clock.now, budget))
+        if self.terminated:
+            raise SessionUnusable("the twin session is not usable")
+        took = self.latency(method, self.clock.now, budget)
+        if budget < took:
+            self.clock.now = max(self.clock.now, deadline)
+            self.terminated = True
+            raise SessionTimeout("the twin request did not finish in time")
+        self.clock.now += took
+        result = super().call_with_gates(method, args, deadline)
+        if self.after is not None:
+            self.after(method)
+        return result
+
+    def dispatch_move(self, joint: str, value_rad: float, deadline: float, on_acknowledged: Any) -> None:
+        """The two-phase handshake of ``ProcessTwinSession.dispatch_move`` on the fake clock.
+
+        PREPARE (one round trip) -> acknowledgement recorded -> GO: the child CALLS
+        ``move_joint`` and replies (one more round trip). BOTH round trips share the ONE
+        ``deadline``; a missed reply terminates the child (a movement may already have been
+        sent by then: ``move_joint`` has run).
+        """
+        budget = deadline - self.clock.now
+        self.calls.append(("dispatch_move", self.clock.now, budget))
+        if self.terminated:
+            raise SessionUnusable("the twin session is not usable")
+        trip = self.latency("dispatch_move", self.clock.now, budget)
+        if self.clock.now + trip > deadline:  # no INTENT in time: nothing was sent
+            self.clock.now = max(self.clock.now, deadline)
+            self.terminated = True
+            raise SessionTimeout("the twin request did not finish in time")
+        self.clock.now += trip
+        if self.moves >= MAX_MOVES:
+            raise SessionRefused("movement_limit_reached")
+        on_acknowledged()
+        self.moves += 1
+        try:
+            self.twin.move_joint(joint, value_rad)  # GO: the child moves, then replies
+        except Exception as exc:
+            raise TwinCallFailed(type(exc).__name__) from None
+        if self.clock.now + trip > deadline:  # the reply "moved" misses the deadline
+            self.clock.now = max(self.clock.now, deadline)
+            self.terminated = True
+            raise SessionTimeout("the twin request did not finish in time")
+        self.clock.now += trip
+        if self.after is not None:
+            self.after("dispatch_move")
+
+    def reads(self) -> list[tuple[float, float]]:
+        """(issued_at, budget) of every telemetry read BEFORE the stop (the rehearsal's own)."""
+        out = []
+        for method, issued_at, budget in self.calls:
+            if method == "stop":
+                break
+            if method == "read_telemetry":
+                out.append((issued_at, budget))
+        return out
+
+    def stop_budgets(self) -> list[float]:
+        return [budget for method, _at, budget in self.calls if method == "stop"]
+
+
+class DeterministicDeadlineTests(ExecutorCase):
+    """DETERMINISTIC: no real sleeping, no real clock, no scheduling, no child process.
+
+    A fake clock and a fake pause drive the executor to the final-poll boundary on EVERY
+    run (nothing here can skip). Invariant: a telemetry read is issued only with its FULL
+    read limit, and only if that limit fits before D_work; a phase or work deadline that is
+    a sliver away ends the run as an ordinary timeout, with the child alive and the stop
+    sent through the live session with its full reserve.
+    """
+
+    SLIVER_S = 0.00003
+    CALL_S = 0.0005  # fake time every call takes
+
+    def drive(self, timeouts: Timeouts, *, clock: _FakeClock, latency: Any = None) -> tuple[Any, _ClockedSession]:
+        latency = latency or (lambda method, now, budget: self.CALL_S)
+        session = _ClockedSession(self.twin, clock, latency)
+        with mock.patch.object(simulation_executor, "time", clock):
+            outcome = run_rehearsal(snapshot(), session, timeouts)
+        session.close()
+        return outcome, session
+
+    def check(self, kind: str, timeouts: Timeouts, outcome: Any, session: _ClockedSession, clock: _FakeClock) -> None:
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        work_deadline = _FakeClock.START + timeouts.total_s - timeouts.recovery_reserve_s
+        reads = session.reads()
+        self.assertTrue(reads, "no telemetry read was issued at all")
+        with self.subTest("every telemetry read was issued with its full read limit"):
+            for _at, budget in reads:
+                self.assertAlmostEqual(budget, timeouts.telemetry_read_s, places=9)
+        with self.subTest("no read ends after the work deadline (the reserve is never consumed)"):
+            for issued_at, budget in reads:
+                self.assertLessEqual(issued_at + budget, work_deadline + 1e-9)
+        with self.subTest("the child was not terminated"):
+            self.assertFalse(session.terminated)
+        with self.subTest("the error kind"):
+            self.assertEqual(outcome.kind, kind, outcome.detail)
+        with self.subTest("the stop is the same as for an ordinary timeout"):
+            self.assertEqual(outcome.stop, "confirmed")
+            self.assertFalse(outcome.manual_verification_required)
+            self.assertEqual(self.twin.names().count("stop"), 1)
+            self.assertEqual(len(session.stop_budgets()), 1)  # through the live session
+            self.assertAlmostEqual(session.stop_budgets()[0], timeouts.stop_s, places=9)  # full reserve
+
+    def sliver_clock(self) -> _FakeClock:
+        return _FakeClock(early_wake_s=self.SLIVER_S)
+
+    def test_a_target_phase_ending_in_a_sliver(self) -> None:
+        self.twin.ignore_moves = {1}
+        timeouts = dataclasses.replace(FAST, poll_interval_s=0.2)
+        clock = self.sliver_clock()
+        outcome, session = self.drive(timeouts, clock=clock)
+        self.check("target_timeout", timeouts, outcome, session, clock)
+
+    def test_a_return_phase_ending_in_a_sliver(self) -> None:
+        self.twin.ignore_moves = {2}
+        timeouts = dataclasses.replace(FAST, poll_interval_s=0.2)
+        clock = self.sliver_clock()
+        outcome, session = self.drive(timeouts, clock=clock)
+        self.check("return_timeout", timeouts, outcome, session, clock)
+
+    def test_the_full_read_limit_does_not_fit_before_the_work_deadline(self) -> None:
+        # (a) The PHASE is long (1 s), so the WORK deadline ends the wait: the last pause
+        # ends a sliver before it. The read is not issued; overall_timeout; the child is
+        # alive; the stop goes through the live session and is confirmed.
+        self.twin.ignore_moves = {1}
+        reserve = FAST.stop_s + 0.05 + FAST.disconnect_s
+        timeouts = dataclasses.replace(
+            # every call's WHOLE limit must fit before D_work to be started: small limits
+            FAST, connect_s=0.05, mode_check_s=0.05, telemetry_read_s=0.05, dispatch_s=0.05,
+            target_move_s=1.0, total_s=reserve + 0.30, poll_interval_s=0.2,
+        )
+        clock = self.sliver_clock()
+        outcome, session = self.drive(timeouts, clock=clock)
+        self.check("overall_timeout", timeouts, outcome, session, clock)
+        work_deadline = _FakeClock.START + timeouts.total_s - timeouts.recovery_reserve_s
+        with self.subTest("the read that did not fit was never issued"):
+            last_issued_at, _budget = session.reads()[-1]
+            self.assertLess(work_deadline - last_issued_at, 0.30)  # reads happened...
+            self.assertGreaterEqual(work_deadline - last_issued_at, timeouts.telemetry_read_s - 1e-9)
+            self.assertGreater(clock.now, last_issued_at)  # ...and time moved on to the sliver
+
+    def test_a_read_with_exactly_enough_room_completes_and_the_stop_keeps_its_full_reserve(self) -> None:
+        # (b) Dyadic figures, so the equality below is exact. The last pause lands EXACTLY
+        # read_limit before D_work: the read is issued with its full limit and takes all of
+        # it (finishing exactly at D_work); the stop must still get its whole stop_s.
+        self.twin.ignore_moves = {1}
+        timeouts = dataclasses.replace(
+            FAST, connect_s=0.25, mode_check_s=0.25, telemetry_read_s=0.0625, dispatch_s=0.25,
+            target_move_s=1.0, target_verify_s=0.25, return_move_s=0.25, restore_verify_s=0.25,
+            stop_s=0.25, disconnect_s=0.25, total_s=0.5625 + 0.5, poll_interval_s=0.125,
+        )
+        work_deadline = _FakeClock.START + timeouts.total_s - timeouts.recovery_reserve_s
+        boundary = work_deadline - timeouts.telemetry_read_s
+        clock = _FakeClock(land_at=boundary)
+
+        def latency(method: str, now: float, budget: float) -> float:
+            return budget if (method == "read_telemetry" and now == boundary) else 0.001953125
+
+        outcome, session = self.drive(timeouts, clock=clock, latency=latency)
+        self.check("overall_timeout", timeouts, outcome, session, clock)
+        with self.subTest("the boundary read WAS issued, with exactly enough room, and completed"):
+            self.assertIn((boundary, timeouts.telemetry_read_s), session.reads())
+        with self.subTest("it ended exactly at the work deadline and the stop still had stop_s"):
+            self.assertEqual(session.stop_budgets(), [timeouts.stop_s])
+
+
+class DeterministicCallInvariantTests(ExecutorCase):
+    """DETERMINISTIC (fake clock, fake session; never skips): every call capped by the work
+    deadline is issued only with its WHOLE limit, and the recovery read likewise.
+
+    The work window is squeezed so that exactly one call finds only a sliver of it left. That
+    call must not be started: nothing is sent, the run ends as overall_timeout and the child is
+    alive. The dispatch is the one that matters: no acknowledgement may be recorded as "possibly
+    sent", and no movement may reach the twin.
+    """
+
+    CALL_S = 0.0005
+    SLIVER_S = 0.00003
+    ROUND_TRIPS = ("connect", "runtime_target", "twin_target", "read_telemetry", "dispatch_move")
+
+    def limits(self, timeouts: Timeouts) -> dict[str, float]:
+        return {
+            "connect": timeouts.connect_s, "runtime_target": timeouts.mode_check_s,
+            "twin_target": timeouts.mode_check_s, "read_telemetry": timeouts.telemetry_read_s,
+            "dispatch_move": timeouts.dispatch_s,
+        }
+
+    def squeezed(self, victim: str, leave_s: float) -> tuple[Timeouts, _FakeClock, Any]:
+        """Timeouts and a latency so that, when ``victim`` is about to be issued, ``leave_s`` of
+        the work window is left. The call BEFORE it is made to end exactly then (it was issued
+        with its full limit and fits, so it is started)."""
+        index = self.ROUND_TRIPS.index(victim)
+        if index == 0:  # no earlier call: the window itself is the sliver
+            timeouts = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + leave_s)
+            return timeouts, _FakeClock(), lambda method, now, budget: self.CALL_S
+        previous = self.ROUND_TRIPS[index - 1]
+        base = dataclasses.replace(FAST)
+        # the previous call must find its whole limit: window = earlier calls + its limit (+ 1 us)
+        window = (index - 1) * self.CALL_S + self.limits(base)[previous] + 1e-6
+        timeouts = dataclasses.replace(base, total_s=base.recovery_reserve_s + window)
+        work_deadline = _FakeClock.START + window
+
+        def latency(method: str, now: float, budget: float) -> float:
+            if method == previous:
+                took = (work_deadline - leave_s) - now
+                assert 0 < took <= budget, "the test set-up does not fit"
+                return took
+            return self.CALL_S
+
+        return timeouts, _FakeClock(), latency
+
+    def drive(self, timeouts: Timeouts, clock: _FakeClock, latency: Any,
+              after: Any = None) -> tuple[Any, _ClockedSession]:
+        session = _ClockedSession(self.twin, clock, latency)
+        session.after = after
+        with mock.patch.object(simulation_executor, "time", clock):
+            outcome = run_rehearsal(snapshot(), session, timeouts)
+        session.close()
+        return outcome, session
+
+    def check_not_started(self, victim: str, timeouts: Timeouts, outcome: Any, session: _ClockedSession) -> None:
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        limits = self.limits(timeouts)
+        with self.subTest(f"{victim}: it was never issued"):
+            self.assertNotIn(victim, [method for method, _at, _b in session.calls])
+        with self.subTest(f"{victim}: every call that WAS issued had its whole limit"):
+            for method, _at, budget in session.calls:
+                if method in limits:  # (the cleanup disconnect has its own budget)
+                    self.assertAlmostEqual(budget, limits[method], places=9, msg=method)
+        with self.subTest(f"{victim}: overall_timeout, the child healthy"):
+            self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+            self.assertFalse(session.terminated)
+        with self.subTest(f"{victim}: nothing was sent and nothing recorded as possibly sent"):
+            self.assertEqual(self.twin.moves(), [])
+            self.assertNotIn("move_joint", self.twin.names())
+            self.assertFalse(outcome.target_dispatched)
+            self.assertFalse(outcome.return_dispatched)
+            self.assertEqual(outcome.stop, "not_needed")
+            self.assertNotIn("stop", self.twin.names())
+
+    def test_connect_a_sliver_from_the_work_deadline_is_not_started(self) -> None:
+        timeouts, clock, latency = self.squeezed("connect", self.SLIVER_S)
+        outcome, session = self.drive(timeouts, clock, latency)
+        self.check_not_started("connect", timeouts, outcome, session)
+        # only the cleanup disconnect reached the session: no connect, no check, no read, no move
+        self.assertEqual([method for method, _at, _b in session.calls], ["disconnect"])
+
+    def test_the_mode_checks_and_the_start_read_a_sliver_from_the_work_deadline_are_not_started(self) -> None:
+        for victim in ("runtime_target", "twin_target", "read_telemetry"):
+            with self.subTest(victim=victim):
+                self.twin = FakeTwin()
+                self.addCleanup(self.twin.release.set)
+                timeouts, clock, latency = self.squeezed(victim, self.SLIVER_S)
+                outcome, session = self.drive(timeouts, clock, latency)
+                self.check_not_started(victim, timeouts, outcome, session)
+
+    def test_the_dispatch_a_sliver_from_the_work_deadline_sends_nothing(self) -> None:
+        # Less than one round trip is left: the PREPARE could not even be answered.
+        for leave_s in (self.SLIVER_S, 1.5 * self.CALL_S, 3.5 * self.CALL_S):
+            with self.subTest(left_for_the_dispatch_s=leave_s):
+                self.twin = FakeTwin()
+                self.addCleanup(self.twin.release.set)
+                self.twin.ignore_moves = {1}
+                timeouts, clock, latency = self.squeezed("dispatch_move", leave_s)
+                outcome, session = self.drive(timeouts, clock, latency)
+                self.check_not_started("dispatch_move", timeouts, outcome, session)
+
+    def test_the_recovery_read_is_not_started_when_its_whole_limit_does_not_fit(self) -> None:
+        # The process stalls (fake clock jump) right after the movement was sent, so that
+        # recovery starts a sliver before the end of the recovery-read window. No stop can be
+        # attempted (its deadline has passed) and the read must not be started either.
+        self.twin.ignore_moves = {1}
+        timeouts = FAST
+        window_end = _FakeClock.START + timeouts.total_s + 1.0 - timeouts.disconnect_s  # D_total + TERMINATE - disc
+        clock = _FakeClock()
+
+        def stall(method: str) -> None:
+            if method == "dispatch_move":
+                clock.now = window_end - self.SLIVER_S
+
+        outcome, session = self.drive(timeouts, clock, lambda method, now, budget: self.CALL_S, after=stall)
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        stalled_at = window_end - self.SLIVER_S
+        with self.subTest("the movement was sent; no stop could be attempted"):
+            self.assertTrue(outcome.target_dispatched)
+            self.assertEqual(outcome.kind, "overall_timeout")
+            self.assertEqual(outcome.stop, "unconfirmed")
+            self.assertTrue(outcome.manual_verification_required)
+            self.assertNotIn("stop", self.twin.names())
+        with self.subTest("no read was issued after the stall"):
+            late_reads = [m for m, at, _b in session.calls if m == "read_telemetry" and at >= stalled_at]
+            self.assertEqual(late_reads, [])
+            self.assertIsNone(outcome.last_telemetry)
+        with self.subTest("the child was not terminated and the disconnect still ran with its whole limit"):
+            self.assertFalse(session.terminated)
+            disconnects = [b for m, _at, b in session.calls if m == "disconnect"]
+            self.assertEqual(len(disconnects), 1)
+            self.assertAlmostEqual(disconnects[0], timeouts.disconnect_s, places=9)
+
+
+class _SkewClock:
+    """``time`` for simulation_executor: the REAL monotonic clock plus a skew the test can move.
+
+    Used with a REAL supervised child, whose own deadlines run on the real clock: until the
+    test jumps the skew, executor and supervisor agree on the time."""
+
+    def __init__(self) -> None:
+        self.skew = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.skew
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+class _JumpAfterStartRead:
+    """Wraps a REAL ``ProcessTwinSession``: after the start telemetry read it moves the clock so that
+    exactly ``leave_s`` of the work window is left, and records every message that is written
+    to the child's pipe (``_send``: PREPARE, GO, call, ...)."""
+
+    def __init__(self, session: Any, clock: _SkewClock, rehearsals: list[Any], leave_s: float) -> None:
+        self._session = session
+        self._clock = clock
+        self._rehearsals = rehearsals
+        self._leave_s = leave_s
+        self.sent: list[str] = []  # message kinds written to the child, in order
+        self.jumped = False
+        original = session._send
+
+        def recording_send(child: Any, message: tuple[Any, ...]) -> None:
+            self.sent.append(message[0] if message[0] != "call" else f"call:{message[2]}")
+            original(child, message)
+
+        session._send = recording_send
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def _maybe_jump(self, method: str) -> None:
+        if method == "read_telemetry" and not self.jumped:
+            self.jumped = True
+            work_deadline = self._rehearsals[0].work_deadline
+            self._clock.skew += (work_deadline - self._leave_s) - self._clock.monotonic()
+
+    def call(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        value = self._session.call(method, args, deadline)
+        self._maybe_jump(method)
+        return value
+
+    def call_with_gates(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        value = self._session.call_with_gates(method, args, deadline)
+        self._maybe_jump(method)
+        return value
+
+
+class DispatchBudgetWithRealChildTests(ExecutorCase):
+    """The PREPARE/ack/GO sequence against a REAL supervised child process (fake twin inside).
+
+    The budget check runs before ``session.dispatch_move``, whose first act is to write PREPARE
+    to the child's pipe. So a refused dispatch must leave NO ``prepare`` (and no ``go``) message
+    on that pipe. A control run proves the recorder sees both when the dispatch is allowed."""
+
+    WINDOW_S = 2.0  # work window; generous so the earlier calls always fit on a loaded machine
+
+    def run_with_leave(self, leave_s: float) -> tuple[Any, _JumpAfterStartRead]:
+        self.twin = FakeTwin()
+        self.addCleanup(self.twin.release.set)
+        self.twin.ignore_moves = {1}
+        timeouts = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + self.WINDOW_S)
+        clock = _SkewClock()
+        rehearsals: list[Any] = []
+
+        class Spy(simulation_executor._Rehearsal):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                rehearsals.append(self)
+
+        real = open_process_session(self, self.twin)
+        session = _JumpAfterStartRead(real, clock, rehearsals, leave_s)
+        with mock.patch.object(simulation_executor, "time", clock), \
+                mock.patch.object(simulation_executor, "_Rehearsal", Spy):
+            outcome = run_rehearsal(snapshot(), session, timeouts)
+        real.close()
+        self.assertTrue(session.jumped, "the start read never completed: the test set-up is wrong")
+        return outcome, session
+
+    def test_a_refused_dispatch_writes_no_prepare_to_the_child(self) -> None:
+        # Less than the dispatch limit (0.4 s) is left; 30, 750 and 1750 microseconds.
+        for leave_s in (0.00003, 0.00075, 0.00175):
+            with self.subTest(left_us=round(leave_s * 1e6)):
+                outcome, session = self.run_with_leave(leave_s)
+                self.assertIsInstance(outcome, RehearsalFailure, outcome)
+                self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+                self.assertIn("call:read_telemetry", session.sent)  # the recorder works
+                self.assertNotIn("prepare", session.sent)
+                self.assertNotIn("go", session.sent)
+                self.assertEqual(self.twin.moves(), [])
+                self.assertNotIn("move_joint", self.twin.names())
+                self.assertFalse(outcome.target_dispatched)
+                self.assertEqual(outcome.stop, "not_needed")
+                self.assertNotIn("stop", self.twin.names())
+
+    def test_control_an_allowed_dispatch_writes_prepare_then_go(self) -> None:
+        outcome, session = self.run_with_leave(1.0)  # well over dispatch_s: the dispatch is issued
+        self.assertIn("prepare", session.sent)
+        self.assertEqual(session.sent[session.sent.index("prepare") + 1], "go")
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(len(self.twin.moves()), 1)
+
+
+class ReserveDerivationTests(unittest.TestCase):
+    """The recovery reserve is stop_s + telemetry_read_s + disconnect_s, never a fixed number."""
+
+    def test_the_reserve_is_the_sum_of_the_three_settings(self) -> None:
+        for stop_s, read_s, disc_s in ((5.0, 3.0, 3.0), (0.3, 0.4, 0.3), (1.25, 0.5, 2.0), (4.0, 1.0, 0.5)):
+            with self.subTest(stop_s=stop_s, telemetry_read_s=read_s, disconnect_s=disc_s):
+                timeouts = Timeouts(stop_s=stop_s, telemetry_read_s=read_s, disconnect_s=disc_s)
+                self.assertEqual(timeouts.recovery_reserve_s, stop_s + read_s + disc_s)
+
+    def test_each_setting_moves_the_reserve_and_the_work_deadline_by_exactly_its_own_change(self) -> None:
+        base = Timeouts(stop_s=4.0, telemetry_read_s=2.0, disconnect_s=2.0, total_s=40.0)
+        for name in ("stop_s", "telemetry_read_s", "disconnect_s"):
+            with self.subTest(changed=name):
+                smaller = dataclasses.replace(base, **{name: getattr(base, name) - 1.0})
+                self.assertEqual(base.recovery_reserve_s - smaller.recovery_reserve_s, 1.0)
+                # D_work = D_total - reserve: a 1 s smaller reserve gives a 1 s later D_work
+                with mock.patch.object(simulation_executor, "time", _FakeClock()):
+                    a = simulation_executor._Rehearsal(snapshot(), object(), base)
+                    b = simulation_executor._Rehearsal(snapshot(), object(), smaller)
+                self.assertEqual(a.deadline, b.deadline)
+                self.assertEqual(a.work_deadline, a.deadline - base.recovery_reserve_s)
+                self.assertEqual(b.work_deadline - a.work_deadline, 1.0)
+
+    def test_the_production_work_deadline_is_total_minus_eleven_seconds(self) -> None:
+        with mock.patch.object(simulation_executor, "time", _FakeClock()):
+            rehearsal = simulation_executor._Rehearsal(snapshot(), object(), DEFAULT_TIMEOUTS)
+        self.assertEqual(rehearsal.deadline - _FakeClock.START, 75.0)
+        self.assertEqual(rehearsal.work_deadline - _FakeClock.START, 75.0 - (5.0 + 3.0 + 3.0))
 
 
 class StubSession:
