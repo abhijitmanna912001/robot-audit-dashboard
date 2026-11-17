@@ -759,6 +759,18 @@ class TimeoutTests(ExecutorCase):
         self.assert_nothing_sent(outcome)
         self.assertLess(self.elapsed, tight.total_s)
 
+    def test_a_work_window_of_0_15_s_ends_before_anything_is_sent(self) -> None:
+        # The window the test above used to run with. The first call (connect, limit 0.4 s)
+        # does not fit in 0.15 s, so it is never issued: the session stays healthy, no
+        # movement, no stop, overall_timeout.
+        tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.15)
+        self.twin.ignore_moves = {1}
+        outcome = self.failure("overall_timeout", timeouts=tight)
+        self.assert_nothing_sent(outcome)
+        self.assertEqual(self.twin.moves(), [])
+        self.assertNotIn("connect", self.twin.names())
+        self.assertLess(self.elapsed, tight.total_s)
+
     def test_a_successful_run_does_not_wait_for_the_limits(self) -> None:
         self.run_it(timeouts=DEFAULT_TIMEOUTS)
         self.assertLess(self.elapsed, 2.0)
@@ -1308,6 +1320,147 @@ class DeterministicCallInvariantTests(ExecutorCase):
             disconnects = [b for m, _at, b in session.calls if m == "disconnect"]
             self.assertEqual(len(disconnects), 1)
             self.assertAlmostEqual(disconnects[0], timeouts.disconnect_s, places=9)
+
+
+class _SkewClock:
+    """``time`` for simulation_executor: the REAL monotonic clock plus a skew the test can move.
+
+    Used with a REAL supervised child, whose own deadlines run on the real clock: until the
+    test jumps the skew, executor and supervisor agree on the time."""
+
+    def __init__(self) -> None:
+        self.skew = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.skew
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+class _JumpAfterStartRead:
+    """Wraps a REAL ``ProcessTwinSession``: after the start telemetry read it moves the clock so that
+    exactly ``leave_s`` of the work window is left, and records every message that is written
+    to the child's pipe (``_send``: PREPARE, GO, call, ...)."""
+
+    def __init__(self, session: Any, clock: _SkewClock, rehearsals: list[Any], leave_s: float) -> None:
+        self._session = session
+        self._clock = clock
+        self._rehearsals = rehearsals
+        self._leave_s = leave_s
+        self.sent: list[str] = []  # message kinds written to the child, in order
+        self.jumped = False
+        original = session._send
+
+        def recording_send(child: Any, message: tuple[Any, ...]) -> None:
+            self.sent.append(message[0] if message[0] != "call" else f"call:{message[2]}")
+            original(child, message)
+
+        session._send = recording_send
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def _maybe_jump(self, method: str) -> None:
+        if method == "read_telemetry" and not self.jumped:
+            self.jumped = True
+            work_deadline = self._rehearsals[0].work_deadline
+            self._clock.skew += (work_deadline - self._leave_s) - self._clock.monotonic()
+
+    def call(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        value = self._session.call(method, args, deadline)
+        self._maybe_jump(method)
+        return value
+
+    def call_with_gates(self, method: str, args: tuple[Any, ...], deadline: float) -> Any:
+        value = self._session.call_with_gates(method, args, deadline)
+        self._maybe_jump(method)
+        return value
+
+
+class DispatchBudgetWithRealChildTests(ExecutorCase):
+    """The PREPARE/ack/GO sequence against a REAL supervised child process (fake twin inside).
+
+    The budget check runs before ``session.dispatch_move``, whose first act is to write PREPARE
+    to the child's pipe. So a refused dispatch must leave NO ``prepare`` (and no ``go``) message
+    on that pipe. A control run proves the recorder sees both when the dispatch is allowed."""
+
+    WINDOW_S = 2.0  # work window; generous so the earlier calls always fit on a loaded machine
+
+    def run_with_leave(self, leave_s: float) -> tuple[Any, _JumpAfterStartRead]:
+        self.twin = FakeTwin()
+        self.addCleanup(self.twin.release.set)
+        self.twin.ignore_moves = {1}
+        timeouts = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + self.WINDOW_S)
+        clock = _SkewClock()
+        rehearsals: list[Any] = []
+
+        class Spy(simulation_executor._Rehearsal):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                rehearsals.append(self)
+
+        real = open_process_session(self, self.twin)
+        session = _JumpAfterStartRead(real, clock, rehearsals, leave_s)
+        with mock.patch.object(simulation_executor, "time", clock), \
+                mock.patch.object(simulation_executor, "_Rehearsal", Spy):
+            outcome = run_rehearsal(snapshot(), session, timeouts)
+        real.close()
+        self.assertTrue(session.jumped, "the start read never completed: the test set-up is wrong")
+        return outcome, session
+
+    def test_a_refused_dispatch_writes_no_prepare_to_the_child(self) -> None:
+        # Less than the dispatch limit (0.4 s) is left; 30, 750 and 1750 microseconds.
+        for leave_s in (0.00003, 0.00075, 0.00175):
+            with self.subTest(left_us=round(leave_s * 1e6)):
+                outcome, session = self.run_with_leave(leave_s)
+                self.assertIsInstance(outcome, RehearsalFailure, outcome)
+                self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+                self.assertIn("call:read_telemetry", session.sent)  # the recorder works
+                self.assertNotIn("prepare", session.sent)
+                self.assertNotIn("go", session.sent)
+                self.assertEqual(self.twin.moves(), [])
+                self.assertNotIn("move_joint", self.twin.names())
+                self.assertFalse(outcome.target_dispatched)
+                self.assertEqual(outcome.stop, "not_needed")
+                self.assertNotIn("stop", self.twin.names())
+
+    def test_control_an_allowed_dispatch_writes_prepare_then_go(self) -> None:
+        outcome, session = self.run_with_leave(1.0)  # well over dispatch_s: the dispatch is issued
+        self.assertIn("prepare", session.sent)
+        self.assertEqual(session.sent[session.sent.index("prepare") + 1], "go")
+        self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(len(self.twin.moves()), 1)
+
+
+class ReserveDerivationTests(unittest.TestCase):
+    """The recovery reserve is stop_s + telemetry_read_s + disconnect_s, never a fixed number."""
+
+    def test_the_reserve_is_the_sum_of_the_three_settings(self) -> None:
+        for stop_s, read_s, disc_s in ((5.0, 3.0, 3.0), (0.3, 0.4, 0.3), (1.25, 0.5, 2.0), (4.0, 1.0, 0.5)):
+            with self.subTest(stop_s=stop_s, telemetry_read_s=read_s, disconnect_s=disc_s):
+                timeouts = Timeouts(stop_s=stop_s, telemetry_read_s=read_s, disconnect_s=disc_s)
+                self.assertEqual(timeouts.recovery_reserve_s, stop_s + read_s + disc_s)
+
+    def test_each_setting_moves_the_reserve_and_the_work_deadline_by_exactly_its_own_change(self) -> None:
+        base = Timeouts(stop_s=4.0, telemetry_read_s=2.0, disconnect_s=2.0, total_s=40.0)
+        for name in ("stop_s", "telemetry_read_s", "disconnect_s"):
+            with self.subTest(changed=name):
+                smaller = dataclasses.replace(base, **{name: getattr(base, name) - 1.0})
+                self.assertEqual(base.recovery_reserve_s - smaller.recovery_reserve_s, 1.0)
+                # D_work = D_total - reserve: a 1 s smaller reserve gives a 1 s later D_work
+                with mock.patch.object(simulation_executor, "time", _FakeClock()):
+                    a = simulation_executor._Rehearsal(snapshot(), object(), base)
+                    b = simulation_executor._Rehearsal(snapshot(), object(), smaller)
+                self.assertEqual(a.deadline, b.deadline)
+                self.assertEqual(a.work_deadline, a.deadline - base.recovery_reserve_s)
+                self.assertEqual(b.work_deadline - a.work_deadline, 1.0)
+
+    def test_the_production_work_deadline_is_total_minus_eleven_seconds(self) -> None:
+        with mock.patch.object(simulation_executor, "time", _FakeClock()):
+            rehearsal = simulation_executor._Rehearsal(snapshot(), object(), DEFAULT_TIMEOUTS)
+        self.assertEqual(rehearsal.deadline - _FakeClock.START, 75.0)
+        self.assertEqual(rehearsal.work_deadline - _FakeClock.START, 75.0 - (5.0 + 3.0 + 3.0))
 
 
 class StubSession:
