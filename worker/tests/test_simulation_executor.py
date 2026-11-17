@@ -738,15 +738,50 @@ class TimeoutTests(ExecutorCase):
         self.assertLess(self.elapsed, FAST.total_s)
 
     def test_overall_timeout_is_handled_and_recovery_still_fits(self) -> None:
-        # Movement phases get 0.5 s in total; recovery keeps its own reserve. A telemetry
-        # read is never started unless its full limit (0.4 s) fits before the work deadline,
-        # so the window must hold the start read; the run then ends once less than 0.4 s of
-        # it is left (a smaller window would end before the movement was ever sent).
+        # DETERMINISTIC (fake clock, fake pause, fake session: no real time, no scheduling).
+        # Work window 0.5 s, recovery keeps its own reserve. A call is issued only if its
+        # whole limit (0.4 s) fits before the work deadline, so the start read and the
+        # dispatch go out (the window is 0.5 s and the fake calls take 0.5 ms each); the
+        # run then ends when the polling reads no longer fit. Real-clock version below.
         tight = dataclasses.replace(FAST, total_s=FAST.recovery_reserve_s + 0.5)
         self.twin.ignore_moves = {1}
-        outcome = self.failure("overall_timeout", timeouts=tight)
-        self.assertLess(self.elapsed, tight.total_s)
+        clock = _FakeClock()
+        session = _ClockedSession(self.twin, clock, lambda method, now, budget: 0.0005)
+        with mock.patch.object(simulation_executor, "time", clock):
+            outcome = run_rehearsal(snapshot(), session, tight)
+        session.close()
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+        self.assertLessEqual(len(outcome.detail), 200)
+        self.assertLess(clock.now - _FakeClock.START, tight.total_s)  # elapsed, in fake time
         self.assertTrue(outcome.target_dispatched)
+        self.assertEqual(self.twin.names().count("stop"), 1)
+        self.assertEqual(outcome.stop, "confirmed")
+        self.assertIsNotNone(outcome.last_telemetry)
+        self.assertEqual(len(self.twin.moves()), 1)
+        # the dispatch was issued with its whole limit, and the child was never terminated
+        dispatch_budgets = [b for m, _at, b in session.calls if m == "dispatch_move"]
+        self.assertEqual(len(dispatch_budgets), 1)
+        self.assertAlmostEqual(dispatch_budgets[0], tight.dispatch_s, places=9)
+        self.assertFalse(session.terminated)
+
+    def test_overall_timeout_after_dispatch_with_a_real_child_and_the_real_clock(self) -> None:
+        """INTEGRATION CHECK, NOT DETERMINISTIC (real child process, real clock).
+
+        The window (1.0 s) leaves about 0.6 s of real time for connect, two mode checks, the
+        start read and the dispatch (each 0.4 s limit, milliseconds in practice). If this
+        machine stalls longer than that, the dispatch is legitimately never issued and
+        nothing is proven, so the test SKIPS instead of passing or failing falsely. The
+        deterministic proof is the test above."""
+        # target_move_s is raised so the work deadline, not the 0.25 s target phase, ends the run
+        tight = dataclasses.replace(FAST, target_move_s=5.0, total_s=FAST.recovery_reserve_s + 1.0)
+        self.twin.ignore_moves = {1}
+        outcome = self.run_it(timeouts=tight, fresh_session_stop="unsupported")
+        self.assertIsInstance(outcome, RehearsalFailure, outcome)
+        self.assertEqual(outcome.kind, "overall_timeout", outcome.detail)
+        if not outcome.target_dispatched:
+            self.skipTest("the machine stalled: the dispatch was never reached; nothing proven")
+        self.assertLess(self.elapsed, tight.total_s)
         self.assertEqual(self.twin.names().count("stop"), 1)
         self.assertEqual(outcome.stop, "confirmed")
         self.assertIsNotNone(outcome.last_telemetry)
